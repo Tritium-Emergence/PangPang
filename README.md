@@ -170,6 +170,18 @@ Windows:
 python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace C:\Work --data C:\PangPangData
 ```
 
+### Three machines, one team
+
+The supervisor runs on one machine; every other machine joins with a connector:
+
+| Machine | Role | Command |
+| --- | --- | --- |
+| Windows workstation | supervisor + browser UI | `python -m pangpang.cli cloud` |
+| Linux GPU server | executor device | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace /data/projects --data /private/pangpang-device` |
+| MacBook | executor device | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace ~/work --data ~/.pangpang-device` |
+
+Pair each device in the Web UI before its first connect. Connectors only make outbound HTTPS connections — no SSH, no inbound ports on any machine. Plain HTTP is acceptable on a trusted LAN only; anything crossing networks needs the trusted HTTPS entry described in the runbook.
+
 First-time local execution requires explicit confirmation. Devices need no inbound SSH or public ports; a remote coordinator must sit behind a trusted HTTPS entry as described in the [deployment & recovery guide](docs/RUNBOOK.md) — never expose the default plaintext service to the public internet.
 
 Once models, devices and executors are configured, start with requests like:
@@ -255,6 +267,16 @@ Passing automated tests does not mean real-model / real-CLI / TLS / multi-platfo
 - [Contributing guide](CONTRIBUTING.md)
 
 PangPang's original code and documentation are licensed under the **Apache License 2.0**; third-party components remain under their own licenses — see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES). Contributions follow the [DCO](CONTRIBUTING.md). The PangPang name and logo are not licensed with the code — see [TRADEMARKS.md](TRADEMARKS.md).
+
+## One more thing · Make your Mac mini great again
+
+A VPS is somebody else's computer. You rent it month after month, your data sits in someone else's rack, and the day you stop paying, your "infrastructure" evaporates.
+
+Your own hardware tells a different story. The Mac mini under your desk, the retired gaming PC, the old laptop with the cracked screen — modern consumer machines (Apple Silicon's unified memory especially) are genuinely good at running local models and real executors. They idle most of the day, they are already paid for, and they are physically yours.
+
+PangPang turns that idle hardware into a workforce: one machine supervises, the others execute, and nothing leaves your house unless you say so. No per-agent monthly rent, no third party holding your files, nobody throttling your ambition.
+
+**Make your Mac mini great again.**
 
 ---
 

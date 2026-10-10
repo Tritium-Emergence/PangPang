@@ -45,6 +45,44 @@ python3 launch.py cloud
 python3 launch.py cloud --check
 ```
 
+## 多机部署（主管 + 连接器）
+
+主管只跑在一台机器上；其余需要接活的电脑各跑一个连接器。以「Windows 工作站当主管 + Linux GPU 服务器 + MacBook 当执行机」为例：
+
+**① Windows 工作站（主管）**
+
+```bash
+pip install pangpang
+python -m pangpang.cli cloud
+```
+
+浏览器打开 `http://127.0.0.1:8790` 登录并配置模型；在 Web 里创建设备配对。
+
+**② Linux GPU 服务器（执行机 A）**
+
+```bash
+python -m pangpang.cli connector \
+  --cloud https://192.168.1.10:8790 \
+  --workspace /data/projects \
+  --data /private/pangpang-device
+```
+
+**③ MacBook（执行机 B）**
+
+```bash
+python -m pangpang.cli connector \
+  --cloud https://192.168.1.10:8790 \
+  --workspace ~/work \
+  --data ~/.pangpang-device
+```
+
+要点：
+
+- 执行机的 `--cloud` 都指向同一台协调器。协调器默认只绑 loopback，跨机器访问必须先按 RUNBOOK 配好可信 HTTPS 反向代理；明文服务不得暴露公网。
+- 连接器只主动出站连接协调器，任何一台机器都不需要开 SSH 或入站端口。
+- 每台执行机首次允许本机执行需要显式确认（交互终端输入 `y`，或 `--allow-local-exec`）。
+- 配对完成后，任务由 PangPang 按设备能力与授权派发；撤销设备见下文「行为边界」。
+
 ## 首次启动行为
 
 1. 自检打印每项能力的状态与操作说明；任一 `blocked`/`unknown` 退出码为 1。

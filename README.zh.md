@@ -172,6 +172,18 @@ Windows：
 python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace C:\Work --data C:\PangPangData
 ```
 
+### 三台机器，一支队伍
+
+主管只需要跑在一台机器上，其余每台电脑用连接器接入：
+
+| 机器 | 角色 | 命令 |
+| --- | --- | --- |
+| Windows 工作站 | 主管 + 浏览器界面 | `python -m pangpang.cli cloud` |
+| Linux GPU 服务器 | 执行设备 | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace /data/projects --data /private/pangpang-device` |
+| MacBook | 执行设备 | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace ~/work --data ~/.pangpang-device` |
+
+每台设备首次连接前，先在 Web 里完成配对。连接器只主动出站连接协调器——任何机器都不需要开 SSH 或入站端口。明文 HTTP 只可用于可信局域网；跨网段访问必须按运行手册配置可信 HTTPS 入口。
+
 首次允许本机执行需要显式确认。设备不需要开放入站 SSH 或公网端口；远程协调器必须按[部署与恢复指南](docs/RUNBOOK.md)配置可信的 HTTPS 入口，不应把默认明文服务直接暴露在公网。
 
 配置好模型、设备和执行器后，你可以从这些要求开始：
@@ -257,6 +269,16 @@ python -m unittest discover -s tests -p "test_*.py"
 - [贡献指南](CONTRIBUTING.md)
 
 PangPang 的原创代码和文档采用 **Apache License 2.0**；第三方组件遵循各自许可证，详见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)。贡献遵循 [DCO](CONTRIBUTING.md)。PangPang 的名称和标志不随代码许可证一同授权，详见 [TRADEMARKS.md](TRADEMARKS.md)。
+
+## One more thing · 让你的 Mac mini 再次伟大
+
+VPS 终究是别人家的电脑：按月交租，数据躺在别人的机房，停止付费的那天，你的“基础设施”就蒸发了。
+
+自己的硬件是另一个故事。桌下那台 Mac mini、退役的游戏 PC、屏幕裂了的老笔记本——如今的消费级机器（尤其是统一内存的 Apple Silicon）跑本地模型和真实执行器绰绰有余。它们一天里大部分时间在闲置，钱已经付过了，而且物理上属于你。
+
+PangPang 把这些闲置硬件变成一支队伍：一台主管，多台执行，数据不出你的家门——除非你允许。没有按 Agent 计数的月租，没有第三方握着你的文件，没有人给你的野心限速。
+
+**让你的 Mac mini 再次伟大。**
 
 ---
 
