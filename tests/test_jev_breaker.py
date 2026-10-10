@@ -32,6 +32,21 @@ def ok_response(choice="NEW"):
     return _Response()
 
 
+def ok_commit():
+    body = json.dumps({"answers": {"commit_disposition": {"choice": "EXECUTE", "confidence": 0.9}}}).encode()
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, *_args):
+            return body
+    return _Response()
+
+
 class _Opener:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -107,6 +122,24 @@ class JevBreakerTests(unittest.TestCase):
             routing = self.app.resolve_continuation("bot-main", {"text": "继续旧项目"})
         self.assertEqual(routing["route_quality"], "fallback")
 
+    def test_content_error_keeps_weak_fallback_not_degraded(self):
+        self.assertIsNone(self._drive(_Opener([ValueError("schema drift")])))
+        self.assertFalse(self.gate.continuation_breaker_open)
+        with patch("urllib.request.build_opener", return_value=_Opener([ValueError("schema drift")])):
+            routing = self.app.resolve_continuation("bot-main", {"text": "继续旧项目"})
+        self.assertEqual(routing["route_quality"], "fallback")
+        self.assertNotEqual(routing.get("route_source"), "degraded_new")
+
+    def test_breaker_open_does_not_bypass_precommit_judge(self):
+        from pangpang.semantic_gate import GateUnavailable
+        self.gate._continuation_open_until = time.monotonic() + 30
+        with patch("urllib.request.build_opener", return_value=_Opener([ok_commit()])):
+            verdict = self.gate.judge({"turn": "state"})
+        self.assertEqual(verdict["disposition"], "EXECUTE")
+        with patch("urllib.request.build_opener", return_value=_Opener([http_error()])):
+            with self.assertRaises(GateUnavailable):
+                self.gate.judge({"turn": "state"})
+
     def _semantic_gate_row(self):
         return {row["capability"]: row
                 for row in self.app.effective_capabilities()}["semantic_gate"]
@@ -117,6 +150,7 @@ class JevBreakerTests(unittest.TestCase):
         row = self._semantic_gate_row()
         self.assertEqual(row["state"], "degraded")
         self.assertEqual(row["reason"], "jev_endpoint_breaker_open")
+        self.assertNotIn("test-key", json.dumps(row))
 
     def test_self_check_keyless_stays_unconfigured(self):
         self.key.stop()
