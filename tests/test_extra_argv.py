@@ -51,6 +51,15 @@ class ValidateExtraArgvTests(unittest.TestCase):
         validate_extra_argv("codex", ["--enable", "feature", "--strict-config"])
         validate_extra_argv("qwen-claude", ["--skip-git-repo-check"])
 
+    def test_codex_sandbox_bypass_and_listen_rejected(self):
+        for items in (["--sandbox", "danger-full-access"], ["--sandbox=danger-full-access"],
+                      ["--listen", "http://127.0.0.1:9999"], ["--listen=stdio://"]):
+            with self.subTest(items=items):
+                with self.assertRaises(Fault) as ctx:
+                    validate_extra_argv("codex", items)
+                self.assertEqual(ctx.exception.code, "invalid_extra_argv")
+        validate_extra_argv("codex", ["--sandbox", "workspace-write", "-m", "gpt"])
+
 
 class ExecutionExtraArgvTests(unittest.TestCase):
     def setUp(self):

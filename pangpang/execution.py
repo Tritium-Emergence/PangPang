@@ -522,7 +522,7 @@ MAX_EXTRA_ARGV_ITEMS = 16
 MAX_EXTRA_ARGV_ITEM_CHARS = 1024
 MAX_EXTRA_ARGV_TOTAL_CHARS = 4096
 _EXTRA_ARGV_DENY = ("yolo", "dangerously", "bypass", "full-auto", "no-sandbox",
-                    "approve-for-me", "skip-permissions")
+                    "approve-for-me", "skip-permissions", "danger-full-access")
 
 
 def validate_extra_argv(adapter, extra_argv):
@@ -557,6 +557,10 @@ def validate_extra_argv(adapter, extra_argv):
                             advice="'%s' is a codex exec-only flag: the app-server protocol this "
                                    "installation runs drops it and the process never receives it; "
                                    "trust the workspace instead (git init or codex config trust_level)" % name)
+            if name == "--listen":
+                raise Fault("invalid_extra_argv", 400,
+                            advice="'--listen' is owned by the app-server bridge (stdio only); "
+                                   "any other transport is rejected at launch, so storing it here would only defer the failure")
 
 
 class Execution:
