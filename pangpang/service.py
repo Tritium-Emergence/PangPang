@@ -4540,7 +4540,9 @@ class Service:
         resolution = body.get("resolution")
         evidence = str(body.get("evidence", "")).strip()
         if resolution not in {"confirmed_never_started", "confirmed_stopped"} or len(evidence) < 10:
-            raise Fault("operator_evidence_required")
+            raise Fault("operator_evidence_required",
+                        advice="resolution must be confirmed_stopped or confirmed_never_started; "
+                               "evidence must be at least 10 characters")
         host = self.execution.hosts[task["host_id"]]
         if host["transport"] == "connector":
             result = self.broker.resolve(task, resolution, evidence)
@@ -5293,6 +5295,45 @@ class Service:
             current["unknown_leftover_cancel_sent"] = True
             self.store.put("task", current)
 
+    def _auto_resolve_never_delivered(self, task):
+        """Auto-terminate the self-amplifying zombie class: a connector task in
+        unknown quarantine whose start command provably never reached the
+        device. The coordinator itself holds the authoritative fact (exact
+        command lookup), so waiting forever for a terminal receipt the device
+        can never produce only blocks the device command pipe and manufactures
+        the next zombie. Strictly bounded: connector transport only (local
+        tasks have no broker command and must never be presumed dead), proven
+        never-delivered evidence only (pending/delivered commands are
+        ineligible), and only for the two reasons where the start provably
+        never ran. Recorded as resolution_source=system, never posing as an
+        operator resolve."""
+        if task["status"] != "unknown":
+            return False
+        host = self.execution.hosts.get(task["host_id"]) or {}
+        if host.get("transport") != "connector":
+            return False
+        reason = task.get("unknown_reason")
+        if reason == "device_action_unconfirmed":
+            if not (task.get("cancel_requested") or task.get("device_cancel_sent")):
+                return False
+        elif reason != "capability_hold_deadline":
+            return False
+        never, detail = self.broker.start_never_delivered(task)
+        if not never:
+            return False
+        log.warning("task %s auto-resolved as cancelled: start never delivered "
+                    "(unknown_reason=%s, %s)", task["id"], reason,
+                    detail["start_command_state"])
+        self.complete_task(task, {
+            "execution_id": task["execution_id"], "spec_digest": task["spec_digest"],
+            "attempt_uuid": task.get("attempt_uuid"), "status": "cancelled",
+            "process_tree_confirmed": True, "not_launched": "never_started",
+            "resolution_source": "system",
+            "auto_resolved": True, "auto_resolve_reason": "start_never_delivered",
+            "unknown_reason": reason, **detail,
+            "tail": "System resolved: start never delivered", "artifacts": []})
+        return True
+
     def _apply_observation(self, task, receipt):
         """Deterministic three-state transition from one observation.
         Returns True iff durable state changed."""
@@ -5313,6 +5354,8 @@ class Service:
         if task["status"] == "unknown" and host["transport"] == "local" and self._settle_stopped_local(task):
             return True
         if task["status"] == "unknown":
+            if self._auto_resolve_never_delivered(task):
+                return True
             # No complete stop proof: continue reconciliation on bounded backoff.
             # Never relaunch or release a claim for receipt absence alone.
             # But an unknown task can still have a LIVE leftover process

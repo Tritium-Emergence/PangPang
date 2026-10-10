@@ -211,6 +211,35 @@ class Broker:
             cmd = self.enqueue(task["host_id"], "resolve_run", payload, task["execution_id"] + ":" + resolution)
         return {"status": "resolution_requested", "command_id": cmd["id"]}
 
+    def start_never_delivered(self, task):
+        """Read-only, side-effect-free classification: did THIS attempt's start
+        command provably never reach the device? Mirrors resolve()'s
+        never_delivered branch (404 = never enqueued; done + command_expired =
+        expired while pending; done + superseded_by_operator_resolution) but
+        never mutates state. A pending or delivered command is NOT eligible:
+        sync may hand a pending command to the device concurrently, and a
+        delivered one must never be presumed unexecuted. Returns
+        (never_delivered, detail)."""
+        command_id = self.command_id(task["host_id"], "start", task["execution_id"])
+        with self.store.atomic():
+            try:
+                cmd = self.store.get("command", command_id)
+            except Fault as error:
+                if error.status != 404:
+                    raise
+                return True, {"start_command_id": command_id,
+                              "start_command_state": "never_enqueued"}
+            if cmd["status"] != "done":
+                return False, None
+            result = cmd.get("result") or {}
+            if result.get("superseded_by_operator_resolution"):
+                return True, {"start_command_id": command_id,
+                              "start_command_state": "superseded_before_delivery"}
+            if result.get("error") == "command_expired":
+                return True, {"start_command_id": command_id,
+                              "start_command_state": "expired_before_delivery"}
+            return False, None
+
     def poll(self, task):
         try:
             return self.store.get("receipt", task["execution_id"])["payload"]
