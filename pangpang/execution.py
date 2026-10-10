@@ -531,7 +531,9 @@ def validate_extra_argv(adapter, extra_argv):
     rejected outright (the narrow tool grant a catalog row advertises must not
     be widened through this field), and for the codex app-server protocol every
     exec-only flag is rejected because the protocol rewrite DROPS it — storing
-    a flag the launched process never receives would be a silent lie."""
+    a flag the launched process never receives would be a silent lie. For the
+    same reason bare tokens are rejected there: the rewrite repositions them
+    before the app-server subcommand."""
     if not isinstance(extra_argv, list) or len(extra_argv) > MAX_EXTRA_ARGV_ITEMS:
         raise Fault("invalid_extra_argv", 400,
                     advice="extra_argv must be a list of at most %d strings" % MAX_EXTRA_ARGV_ITEMS)
@@ -550,7 +552,9 @@ def validate_extra_argv(adapter, extra_argv):
     row = ADAPTER_CATALOG.get(adapter or "") or {}
     if row.get("stdin_protocol") == CODEX_APP_SERVER:
         dropped = runner._CODEX_EXEC_ONLY_BOOL_FLAGS | runner._CODEX_EXEC_ONLY_VALUE_FLAGS
-        for item in extra_argv:
+        index = 0
+        while index < len(extra_argv):
+            item = extra_argv[index]
             name = item.partition("=")[0]
             if name in dropped:
                 raise Fault("invalid_extra_argv", 400,
@@ -561,6 +565,16 @@ def validate_extra_argv(adapter, extra_argv):
                 raise Fault("invalid_extra_argv", 400,
                             advice="'--listen' is owned by the app-server bridge (stdio only); "
                                    "any other transport is rejected at launch, so storing it here would only defer the failure")
+            if not item.startswith("-"):
+                raise Fault("invalid_extra_argv", 400,
+                            advice="'%s' is a bare token: the app-server protocol rewrite repositions it "
+                                   "before the app-server subcommand, silently changing the codex "
+                                   "subcommand; write values as '--flag=value' or attach them to a known "
+                                   "value flag instead" % item)
+            if name in runner._CODEX_VALUE_FLAGS and "=" not in item:
+                index += 2
+                continue
+            index += 1
 
 
 class Execution:

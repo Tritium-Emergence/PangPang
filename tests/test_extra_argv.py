@@ -60,6 +60,17 @@ class ValidateExtraArgvTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "invalid_extra_argv")
         validate_extra_argv("codex", ["--sandbox", "workspace-write", "-m", "gpt"])
 
+    def test_codex_bare_tokens_rejected_not_repositioned(self):
+        for items in (["--foo", "bar"], ["login"], ["--strict-config", "app"]):
+            with self.subTest(items=items):
+                with self.assertRaises(Fault) as ctx:
+                    validate_extra_argv("codex", items)
+                self.assertEqual(ctx.exception.code, "invalid_extra_argv")
+                self.assertIn("bare token", ctx.exception.advice)
+        validate_extra_argv("codex", ["-c", "model_reasoning_effort=high"])
+        validate_extra_argv("codex", ["--enable", "feature", "--config", "a=b"])
+        validate_extra_argv("qwen-claude", ["login"])
+
 
 class ExecutionExtraArgvTests(unittest.TestCase):
     def setUp(self):
@@ -87,8 +98,8 @@ class ExecutionExtraArgvTests(unittest.TestCase):
 
     def test_spec_appends_extra_argv_after_catalog_argv(self):
         base = list(config(self.root / "workspace")["installations"][0]["argv"])
-        execution = Execution(self.cfg({"extra_argv": ["--flag", "v"]}), self.root / "data")
-        self.assertEqual(execution.spec(self.task())["argv"], base + ["--flag", "v"])
+        execution = Execution(self.cfg({"extra_argv": ["--flag=v", "--strict-config"]}), self.root / "data")
+        self.assertEqual(execution.spec(self.task())["argv"], base + ["--flag=v", "--strict-config"])
 
     def test_spec_without_extra_argv_is_unchanged(self):
         base = list(config(self.root / "workspace")["installations"][0]["argv"])
