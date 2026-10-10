@@ -19,19 +19,33 @@ _spec.loader.exec_module(build_provenance)
 def test_build_identity_reads_generated_module(monkeypatch):
     module = types.ModuleType("pangpang._build")
     module.BUILD_COMMIT = "a" * 40
+    module.BUILD_REF = "v0.9.0-8-g" + "a" * 7
     module.BUILT_AT = "2026-10-10T00:00:00Z"
     module.__spec__ = None
     monkeypatch.setitem(sys.modules, "pangpang._build", module)
-    commit, built_at = build_identity()
+    commit, ref, built_at = build_identity()
     assert commit == "a" * 40
+    assert ref == "v0.9.0-8-g" + "a" * 7
     assert built_at == "2026-10-10T00:00:00Z"
-    assert version_string().startswith("0.9.0 (build aaaaaaa, built 2026-10-10T00:00:00Z)")
-    assert build_line() == "build: %s (built 2026-10-10T00:00:00Z)\n" % ("a" * 40)
+    assert version_string().startswith(
+        "0.9.0 (build aaaaaaa @ v0.9.0-8-g" + "a" * 7 + ", built 2026-10-10T00:00:00Z)")
+    assert build_line() == "build: %s ref=v0.9.0-8-g%s (built 2026-10-10T00:00:00Z)\n" % (
+        "a" * 40, "a" * 7)
+
+
+def test_build_identity_tolerates_pre_ref_artifact(monkeypatch):
+    module = types.ModuleType("pangpang._build")
+    module.BUILD_COMMIT = "d" * 40
+    module.BUILT_AT = "T"
+    module.__spec__ = None
+    monkeypatch.setitem(sys.modules, "pangpang._build", module)
+    assert build_identity() == ("d" * 40, "unknown", "T")
+    assert version_string().startswith("0.9.0 (build ddddddd, built T)")
 
 
 def test_build_identity_unknown_without_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "pangpang._build", None)
-    assert build_identity() == ("unknown", "unknown")
+    assert build_identity() == ("unknown", "unknown", "unknown")
     assert version_string() == "0.9.0 (build unknown)"
     assert build_line() == "build: unknown (built unknown)\n"
 
@@ -39,6 +53,7 @@ def test_build_identity_unknown_without_module(monkeypatch):
 def test_version_string_keeps_release_version_pure(monkeypatch):
     module = types.ModuleType("pangpang._build")
     module.BUILD_COMMIT = "b" * 40
+    module.BUILD_REF = "v0.9.0"
     module.BUILT_AT = "T"
     monkeypatch.setitem(sys.modules, "pangpang._build", module)
     from pangpang import __version__
@@ -52,22 +67,38 @@ def test_collect_provenance_fail_closed_when_required(monkeypatch):
     monkeypatch.setattr(build_provenance.subprocess, "run", boom)
     with pytest.raises(SystemExit):
         build_provenance.collect_provenance(require=True)
-    assert build_provenance.collect_provenance(require=False)["BUILD_COMMIT"] == "unknown"
+    info = build_provenance.collect_provenance(require=False)
+    assert info["BUILD_COMMIT"] == "unknown"
+    assert info["BUILD_REF"] == "unknown"
+
+
+def test_collect_provenance_refuses_dirty_tree_when_required(monkeypatch):
+    def fake_run(cmd, *args, **kwargs):
+        return types.SimpleNamespace(stdout="ref-1-g" + "e" * 7 + "-dirty\n")
+    monkeypatch.setattr(build_provenance.subprocess, "run", fake_run)
+    with pytest.raises(SystemExit):
+        build_provenance.collect_provenance(require=True)
+    info = build_provenance.collect_provenance(require=False)
+    assert info["BUILD_REF"].endswith("-dirty")
 
 
 def test_collect_provenance_reads_git_head():
     info = build_provenance.collect_provenance(require=False)
     assert len(info["BUILD_COMMIT"]) == 40 or info["BUILD_COMMIT"] == "unknown"
+    assert info["BUILD_REF"] != ""
     assert info["BUILT_AT"].endswith("Z")
 
 
 def test_render_and_write_roundtrip(tmp_path):
     path = build_provenance.write_to(str(tmp_path),
-                                     {"BUILD_COMMIT": "c" * 40, "BUILT_AT": "T"})
+                                     {"BUILD_COMMIT": "c" * 40, "BUILD_REF": "v1", "BUILT_AT": "T"})
     namespace = {}
     exec(Path(path).read_text(encoding="utf-8"), namespace)
     assert namespace["BUILD_COMMIT"] == "c" * 40
+    assert namespace["BUILD_REF"] == "v1"
     assert namespace["BUILT_AT"] == "T"
+    legacy = build_provenance.render({"BUILD_COMMIT": "c" * 40, "BUILT_AT": "T"})
+    assert "BUILD_REF = 'unknown'" in legacy
 
 
 def test_cli_version_flag_exits_zero(capsys):

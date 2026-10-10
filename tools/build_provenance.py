@@ -18,16 +18,26 @@ def collect_provenance(require=None):
                                 text=True, check=True).stdout.strip()
     except Exception:
         commit = ""
+    try:
+        ref = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    except Exception:
+        ref = ""
     if not commit:
         if require:
             raise SystemExit("PANGPANG_REQUIRE_BUILD_PROVENANCE=1 but git provenance is unavailable")
         commit = "unknown"
+    if require and ref.endswith("-dirty"):
+        raise SystemExit("release builds must come from a clean tree; "
+                         "ref %r carries local modifications" % ref)
     return {"BUILD_COMMIT": commit,
+            "BUILD_REF": ref or "unknown",
             "BUILT_AT": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
 def render(info):
-    return "BUILD_COMMIT = %r\nBUILT_AT = %r\n" % (info["BUILD_COMMIT"], info["BUILT_AT"])
+    return "BUILD_COMMIT = %r\nBUILD_REF = %r\nBUILT_AT = %r\n" % (
+        info["BUILD_COMMIT"], info.get("BUILD_REF", "unknown"), info["BUILT_AT"])
 
 
 def write_to(directory, info=None):
