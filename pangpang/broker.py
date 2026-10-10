@@ -213,34 +213,30 @@ class Broker:
 
     def start_never_delivered(self, task):
         """Read-only, side-effect-free classification: did THIS attempt's start
-        command provably never reach the device? Two trusted sources only:
-        404 = never enqueued, and done + superseded_by_operator_resolution =
-        a supersede THIS coordinator recorded in the same Store transaction
-        that could have delivered it. Never mutates state. A pending or
+        command provably never reach the device? ONE trusted source: the
+        exact command id is absent (404) under the never-delete constraint,
+        so it was never enqueued. Never mutates state. A pending or
         delivered command is NOT eligible: sync hands pending commands to
         the device under the same Store transaction that marks them
         delivered, so a read-then-act on pending is a TOCTOU, and a
         delivered command must never be presumed unexecuted. A
         command_expired result is NOT trusted evidence either: start is
         enqueued durable (expires=None), so the expiry sweep can never
-        legitimately produce it — one appearing on a start command has an
-        unknown origin and must not auto-terminate anything. Returns
-        (never_delivered, detail)."""
+        legitimately produce it. A done result carrying
+        superseded_by_operator_resolution is NOT trusted evidence either:
+        the device report path stores reported results verbatim, so that
+        marker is not coordinator-exclusive and a DELIVERED start whose
+        report contains the key would otherwise be auto-terminated as
+        never-delivered. Returns (never_delivered, detail)."""
         command_id = self.command_id(task["host_id"], "start", task["execution_id"])
         with self.store.atomic():
             try:
-                cmd = self.store.get("command", command_id)
+                self.store.get("command", command_id)
             except Fault as error:
                 if error.status != 404:
                     raise
                 return True, {"start_command_id": command_id,
                               "start_command_state": "never_enqueued"}
-            if cmd["status"] != "done":
-                return False, None
-            result = cmd.get("result") or {}
-            if result.get("superseded_by_operator_resolution"):
-                return True, {"start_command_id": command_id,
-                              "start_command_state": "superseded_before_delivery"}
             return False, None
 
     def poll(self, task):

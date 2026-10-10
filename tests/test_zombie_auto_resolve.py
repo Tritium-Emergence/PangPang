@@ -93,7 +93,7 @@ class ZombieAutoResolveTests(unittest.TestCase):
         done = self.observe(task)
         self.assertEqual(done["status"], "unknown")
 
-    def test_superseded_start_auto_cancels(self):
+    def test_superseded_marker_is_not_trusted_auto_resolve_evidence(self):
         self.sync(3)
         task, _ = self.submit("z3")
         self.app.task_step()
@@ -101,8 +101,7 @@ class ZombieAutoResolveTests(unittest.TestCase):
         self.mutate(task["id"], device_cancel_sent=True)
         self.app._mark_task_unknown(task, "device_action_unconfirmed")
         done = self.observe(task)
-        self.assertEqual(done["status"], "cancelled")
-        self.assertEqual(done["receipt"]["start_command_state"], "superseded_before_delivery")
+        self.assertEqual(done["status"], "unknown")
 
     def test_pending_start_is_never_presumed_dead(self):
         self.sync(3)
