@@ -645,6 +645,19 @@ curl -s \
 回退不只是 git revert：如果新版本已经发出外部副作用或改变 durable schema/状态机，必须先 drain/reconcile，必要时恢复一致快照。
 
 
+### 发行溯源与回滚摘要核验
+
+`pangpang --version` 与 self-check 的 `build:` 行显示构建时烘焙进包的 commit、source ref（`git describe`）与构建时间；源码检出没有 `_build.py` 时显式显示 `unknown`。
+
+发布构建流程（commit→资产摘要的可核对关系）：
+
+1. 从明确的 tag 构建（工作树必须干净：`PANGPANG_REQUIRE_BUILD_PROVENANCE=1` 下 dirty ref 与缺失 git 信息都拒绝出包；只有本地源码开发允许 `unknown`）；
+2. 构建产物内的 `BUILD_COMMIT`/`BUILD_REF` 由构建钩子从该构建输入写入，运行时不访问 git；
+3. 出包后立刻 `sha256sum dist/*.whl dist/*.zip`，把**每个资产的 SHA256 与对应 tag/commit 一起写进该 tag 的 Release 说明**——资产摘要不可能嵌进资产自身，这层对应关系只存在于 Release 记录；
+4. 已发布资产不可变：不重打同版本覆盖用户正在校验的包；新构建身份走新 tag/补丁版；
+5. 回滚 SOP：先对候选资产 `sha256sum` 与 Release 记录核对，再按记录的 commit/tag 切代码树——只按"0.9.0"版本号切树不可接受，同版本号可能对应不同 commit。
+
+
 ### Routine approval 升级语义
 
 模型创建/修改的 Routine 代表**未来持续写权限**，不能只凭“当前 turn 里有用户消息”自动生效。current main 的模型路径会创建/保留 proposal，但 routine 处于 `pending + inactive`，operator 必须批准当前版本。
