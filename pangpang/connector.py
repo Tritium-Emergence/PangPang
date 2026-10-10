@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__
+from .adapters_file import merge as merge_custom_adapters
 from .env_compat import env_value, with_legacy_names
 from .__main__ import ProcessLock
 from .execution import Execution
@@ -55,6 +56,7 @@ class Connector:
         except Fault as error:
             if error.status != 404:
                 raise
+        merge_custom_adapters(self.data / "adapters.json")
         self.host_id = config["host_id"]
         hosts = config.get("hosts", [])
         if len(hosts) != 1 or hosts[0]["id"] != self.host_id or hosts[0].get("transport") != "local":
@@ -539,6 +541,11 @@ def main():
     parser.add_argument("--data", default="connector-data")
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding="utf-8")) if args.config else paired_config(args)
+    try:
+        merge_custom_adapters(Path(args.data) / "adapters.json")
+    except Fault as error:
+        print("%s: %s" % (error.code, error.advice))
+        return 1
     connector = Connector(config, args.data)
     try:
         connector.run()

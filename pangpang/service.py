@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import runner
+from .adapters_file import merge as merge_custom_adapters
 from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_matches_pin,
                        fetch_pinned_pi, materialize_executor_env,
                        permission_bridge_for, pi_models_api, secret_env_name, task_interjection_tier,
@@ -412,6 +413,7 @@ class Service:
                 raise
         for profile in self.config.get("models", []):
             normalize_profile(profile)
+        merge_custom_adapters(self.data / "adapters.json")
         self.execution = Execution(self.config, self.data)
         self.execution.deployment_level = self.deployment_level
         self.onboarding = Onboarding(self)

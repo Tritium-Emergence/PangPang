@@ -516,7 +516,10 @@ class Execution:
                     raise Fault("invalid_remote_python", 400)
         for e in self.installations.values():
             if e.get("adapter") not in ADAPTER_CATALOG:
-                raise Fault("invalid_adapter", 400)
+                raise Fault("invalid_adapter", 400,
+                            advice="adapter rows come from the built-in catalog plus custom rows in %s; "
+                                   "a removed or renamed adapters.json requires restoring it or removing "
+                                   "the installations that reference its adapters" % (self.data / "adapters.json"))
             if not isinstance(e.get("argv"), list) or not e["argv"] or not all(isinstance(a, str) and "\x00" not in a for a in e["argv"]):
                 raise Fault("invalid_argv", 400)
             # executor capacity is expressed by the generic

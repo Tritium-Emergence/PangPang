@@ -163,6 +163,13 @@ def main():
     if len(token) < 24:
         parser.error("Set PANGPANG_TOKEN (or legacy XIAN_PANGPANG_TOKEN) to at least 24 random characters")
     data = secure_directory(args.data)
+    from .adapters_file import merge as merge_custom_adapters
+    from .store import Fault
+    try:
+        merge_custom_adapters(data / "adapters.json")
+    except Fault as error:
+        _SYS.stderr.write("%s: %s\n" % (error.code, error.advice))
+        return 1
     try:
         lock = ProcessLock(data / "coordinator.lock")
     except OSError:

@@ -83,6 +83,17 @@ python -m pangpang.cli connector \
 - 每台执行机首次允许本机执行需要显式确认（交互终端输入 `y`，或 `--allow-local-exec`）。
 - 配对完成后，任务由 PangPang 按设备能力与授权派发；撤销设备见下文「行为边界」。
 
+## 扩展执行器目录（adapters.json，phase 1：手工双端放置）
+
+内置执行器目录（`ADAPTER_CATALOG`）不可被配置覆盖或删除。operator 可以在**协调器与连接器的数据目录各放一份** `<data>/adapters.json`，为目录追加自定义 CLI 行——新增一个通用 stdin 执行器不再需要改代码，但**两端都要由 operator 同步放置同一文件**（broker 自动下发是后续版本）。
+
+- 格式：JSON 对象，键为自定义 adapter 名（小写字母数字连字符），值为 `{binary, argv, concurrency, priority, use_when, secret_env?, extra_env?}`。`binary` 为 PATH 中的可执行文件名，`argv` 为参数模板（字符串数组），`concurrency` 1–64，`priority` 0–1000，`use_when` 为模型可见的派单说明。
+- **SIS 边界不变**：argv 永远由 operator 定义，模型与任何 API 都没有目录写入路径。
+- 自定义行**禁止**携带 `pinned`、`stdin_protocol`、`session_protocol`、`resume_protocol`、`interjection_tier`、`permission_bridge`、`models_json` 等内置协议/信任字段；未知字段一律拒启。自定义 CLI 只承诺通用 stdin 任务的可执行与回执，mid-turn inject、会话恢复、权限桥是内置 runner 的显式协议能力，加数据行不会自动获得。
+- 启动时严格校验（JSON 合法性、大小/条数/argv 长度上限、env 键格式、文件属主与权限）；任何违规**拒启**并指明文件、行号与字段。
+- 两端同名 adapter 的 binary/argv 漂移不会悄悄执行另一条命令：设备在派发时按既有 `policy_digest` 合同校验实际拒跑（`local_policy_changed_probe_and_resubmit`），需两端重新放置同一文件并重新探测。
+- **删除或改名 `adapters.json` 是 fail-closed**：若存量 installation 引用自定义 adapter，服务将拒启（`invalid_adapter`，错误信息指向该文件路径）；恢复文件或移除对应 installation 即可。
+
 ## 首次启动行为
 
 1. 自检打印每项能力的状态与操作说明；任一 `blocked`/`unknown` 退出码为 1。
