@@ -2320,7 +2320,8 @@ def supervise(directory):
         env = {key: value for key, value in os.environ.items()
                if key in env_keys and key not in {"PANGPANG_TOKEN", "XIAN_PANGPANG_TOKEN"}}
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-        env.update(spec.get("extra_env", {}))
+        env.update({key: value for key, value in spec.get("extra_env", {}).items()
+                    if not key.startswith(("PANGPANG_", "XIAN_PANGPANG_"))})
         # Set XPP_OUTPUT_DIR *after* extra_env so a stray same-named config entry
         # cannot redirect the executor away from the harvested output dir.
         if output_dir is not None:

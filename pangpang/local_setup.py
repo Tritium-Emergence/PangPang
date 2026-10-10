@@ -2,8 +2,8 @@
 import copy
 import shutil
 from .execution import (Execution, ADAPTER_CATALOG, binary_matches_pin, fetch_pinned_pi,
-                       materialize_executor_env, pi_models_api, secret_env_name,
-                       write_pi_provider_config, _PI_BASE_URL_ENV)
+                       installation_id, materialize_executor_env, pi_models_api, secret_env_name,
+                       validate_profile_env, write_pi_provider_config, _PI_BASE_URL_ENV)
 from .runner import checked, probe
 from .store import Fault, digest
 
@@ -75,13 +75,19 @@ class LocalSetup:
         from .runner import check_control_separation
         check_control_separation(host["allowed_roots"], [self.c.data])
         cwd = str(checked(body.get("cwd") or host["allowed_roots"][0], host["allowed_roots"]))
-        identity = adapter + "-" + self.c.host_id
+        profile = body.get("profile")
+        identity = installation_id(adapter, self.c.host_id, profile)
         old = self.c.execution.installations.get(identity, {})
+        env = body.get("env", old.get("env"))
+        if env is not None:
+            validate_profile_env(env)
         cat = ADAPTER_CATALOG[adapter]
         e = {"id": identity, "host_id": self.c.host_id, "adapter": adapter, "enabled": True,
              "argv": [found["binary"], *cat["argv"]],
              "cwd": cwd, "prompt_mode": "stdin", "risk": "write", "resource_keys": old.get("resource_keys", []),
              "max_concurrency": old.get("max_concurrency", cat["concurrency"]), "env_allowlist": []}
+        if env:
+            e["env"] = dict(env)
         # SIS: executor capacity is the GENERIC max_concurrency,
         # not a product-level qwen special case. PangPang does not hardcode "qwen must
         # hold qwen-shared". A real shared external device lock is legitimate but must

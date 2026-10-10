@@ -3673,11 +3673,13 @@ class Service:
             if len(by_adapter) == 1:
                 b["installation_id"] = by_adapter[0]
             elif len(by_adapter) > 1:
-                # Ambiguous: same adapter on multiple hosts. Do not guess — leave the
-                # (unmatchable) name so route rejects, but log so it is diagnosable and
-                # the model can retry with a host_id to disambiguate.
-                log.warning("executor intent '%s' matches %d installations across hosts %s; needs host_id to disambiguate",
-                            iid, len(by_adapter), [insts[i]["host_id"] for i in by_adapter])
+                # Ambiguous: same adapter on multiple hosts or profiles. Do not
+                # guess — leave the (unmatchable) name so route rejects, but carry
+                # the candidate ids so submit_task can reject diagnosably and the
+                # model can retry with an exact installation id or host_id.
+                b["intent_ambiguity"] = {"name": iid, "candidates": sorted(by_adapter)}
+                log.warning("executor intent '%s' matches %d installations %s; needs an exact installation id to disambiguate",
+                            iid, len(by_adapter), sorted(by_adapter))
         return b
 
     def route(self, bot_id, work, body, *, quiet=False):
@@ -3738,6 +3740,8 @@ class Service:
             (rejected if reason else candidates).append({"installation_id": e["id"], "host_id": e["host_id"], "reason": reason})
         candidates.sort(key=lambda c: (self._route_priority(self.execution.installations[c["installation_id"]]), c["installation_id"]))
         result = {"selected": candidates[0] if candidates else None, "candidates": candidates, "rejected": rejected}
+        if not result["selected"] and body.get("intent_ambiguity"):
+            result["intent_ambiguity"] = body["intent_ambiguity"]
         if not result["selected"] and not quiet:
             log.warning("no eligible executor work=%s rejected=%s", work.get("id"),
                         [(r["installation_id"], r["reason"]) for r in rejected])
@@ -3753,6 +3757,11 @@ class Service:
             raise Fault("work_cancelled") # admission recheck 
         route = self.route(bot_id, work, body)
         if not route["selected"]:
+            if route.get("intent_ambiguity"):
+                amb = route["intent_ambiguity"]
+                raise Fault("ambiguous_executor", advice=(
+                    "installation_id '%s' 匹配多个执行器实例：%s；请传完整的 installation id（多 profile 时每个实例 id 不同）或加 host_id 消歧。"
+                    % (amb["name"], "、".join(amb["candidates"]))))
             # 映射成稳定业务错误给模型。若模型指定了目标执行器/主机，优先报「那个目标」的原因，
             # 否则按全局优先级取（避免非目标执行器的 reason 遮蔽真实原因，见 codex 复审）。
             rejected = route["rejected"]

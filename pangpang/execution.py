@@ -483,6 +483,41 @@ ADAPTER_CATALOG = {
 }
 
 
+PROFILE_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+PROFILE_ENV_KEYS = frozenset(("CLAUDE_CONFIG_DIR", "CODEX_HOME"))
+MAX_PROFILE_ENV_ITEMS = 16
+MAX_PROFILE_ENV_VALUE_CHARS = 4096
+
+
+def installation_id(adapter, host_id, profile=None):
+    """The ONE canonical installation namespace, shared by the device configure,
+    the cloud approve and the cloud report so all three derive the same id from
+    (adapter, profile, host). Without a profile it is byte-identical to the
+    historical adapter + "-" + host_id."""
+    if not profile:
+        return adapter + "-" + host_id
+    if not isinstance(profile, str) or not PROFILE_PATTERN.fullmatch(profile):
+        raise Fault("invalid_installation_profile", 400,
+                    advice="profile must match ^[a-z0-9][a-z0-9-]{0,31}$")
+    return adapter + "-" + profile + "-" + host_id
+
+
+def validate_profile_env(env):
+    """Per-installation operator env: a closed whitelist of profile-location
+    variables only. Secrets go through secret_refs/vault; control-plane and
+    process-hijacking variables (PANGPANG_*, PATH, PYTHONPATH, ...) are never
+    acceptable no matter who asks."""
+    if not isinstance(env, dict) or len(env) > MAX_PROFILE_ENV_ITEMS:
+        raise Fault("invalid_installation_env", 400,
+                    advice="env must be an object of at most %d entries" % MAX_PROFILE_ENV_ITEMS)
+    for key, value in env.items():
+        if (key not in PROFILE_ENV_KEYS or not isinstance(value, str) or not value
+                or "\x00" in value or len(value) > MAX_PROFILE_ENV_VALUE_CHARS):
+            raise Fault("invalid_installation_env", 400,
+                        advice="env keys are limited to %s; secrets belong in the credential vault"
+                               % sorted(PROFILE_ENV_KEYS))
+
+
 class Execution:
     def __init__(self, config, data):
         self.config, self.data = config, Path(data)
@@ -522,6 +557,8 @@ class Execution:
                                    "the installations that reference its adapters" % (self.data / "adapters.json"))
             if not isinstance(e.get("argv"), list) or not e["argv"] or not all(isinstance(a, str) and "\x00" not in a for a in e["argv"]):
                 raise Fault("invalid_argv", 400)
+            if "env" in e:
+                validate_profile_env(e["env"])
             # executor capacity is expressed by the generic
             # max_concurrency, not a product-level qwen resource special-case. A
             # real external device lock may still be configured via resource_keys,
@@ -657,7 +694,8 @@ class Execution:
                 "outputs": task.get("outputs", []), "required_outputs": task.get("required_outputs", []),
                 "timeout_s": task.get("timeout_s", e.get("timeout_s", 3600)),
                 "env_allowlist": e.get("env_allowlist", []),
-                "extra_env": e.get("extra_env", {}), "secret_refs": e.get("secret_refs", {}),
+                "extra_env": dict(e.get("env", {}), **e.get("extra_env", {})),
+                "secret_refs": e.get("secret_refs", {}),
                 "vault_path": str(self.data / "vault") if h["transport"] == "local" else None,
                 "resources": [self.resources[k] for k in e.get("resource_keys", [])]}
         pins = pinned_digests(e)
