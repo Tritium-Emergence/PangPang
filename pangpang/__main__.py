@@ -13,6 +13,7 @@ from .runtime import Runtime
 from .service import Service
 from .vault import secure_directory
 from .logs import configure_logging, get_logger
+from .build_info import build_line, version_string
 from .env_compat import env_value
 
 # main() reads sys.platform, and tests replace this module's sys binding with a
@@ -122,6 +123,7 @@ def install_routine_scheduler_gate(service):
 
 def main():
     parser = argparse.ArgumentParser(description="PangPang Bot Console")
+    parser.add_argument("--version", action="version", version=version_string())
     parser.add_argument("--config", default="config/runtime.json")
     parser.add_argument("--data", default="data-v2")
     parser.add_argument("--host", default="127.0.0.1")
@@ -231,6 +233,8 @@ def main():
             log.warning("capability: %s", warning)
     text, status = render_self_check(service)
     write_self_check(text)
+    _SYS.stderr.write(build_line())
+    _SYS.stderr.flush()
     if args.check:
         # Same projection startup prints, after the first-run registration above.
         # This does not listen. It is not a read-only query. Release the DB

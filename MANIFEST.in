@@ -1,5 +1,7 @@
 include README.md
 include LICENSE
+include setup.py
+include tools/build_provenance.py
 recursive-include pangpang *.py
 recursive-include pangpang *.mjs
 recursive-include pangpang *.json

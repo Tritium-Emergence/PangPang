@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .build_info import version_string
 from .env_compat import env_value
 
 
@@ -85,6 +86,7 @@ def _parser():
     parser = argparse.ArgumentParser(
         description="PangPang. Documented entry: python -m pangpang.cli cloud|connector. "
                     "The pip script pangpang (pangpang.exe on Windows) is optional; use -m if that exe is blocked.")
+    parser.add_argument("--version", action="version", version=version_string())
     parser.add_argument("role", choices=["cloud", "connector"])
     parser.add_argument("--data")
     parser.add_argument("--show-access-key", action="store_true")
