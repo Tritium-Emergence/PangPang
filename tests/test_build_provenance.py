@@ -129,6 +129,15 @@ def test_git_queries_pinned_to_source_root(tmp_path, monkeypatch):
     assert info["BUILD_REF"] != "unknown"
 
 
+def test_strict_mode_rejects_git_status_error(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".git" / "index").write_bytes(b"corrupted-index-payload")
+    with pytest.raises(SystemExit):
+        build_provenance.collect_provenance(require=True, root=str(tmp_path))
+    assert len(build_provenance.collect_provenance(
+        require=False, root=str(tmp_path))["BUILD_COMMIT"]) == 40
+
+
 def test_collect_provenance_reads_git_head():
     info = build_provenance.collect_provenance(require=False)
     assert len(info["BUILD_COMMIT"]) == 40 or info["BUILD_COMMIT"] == "unknown"
