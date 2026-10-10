@@ -689,7 +689,6 @@ class SemanticGate:
             if self._continuation_failures >= self.continuation_breaker_failures:
                 self._continuation_open_until = (
                     time.monotonic() + self.continuation_breaker_cooldown_s)
-                self._continuation_failures = 0
             return None
         except (ValueError, KeyError, TypeError):
             return None

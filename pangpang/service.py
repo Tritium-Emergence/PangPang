@@ -1867,7 +1867,6 @@ class Service:
         self._local_routing_failures = failures
         if failures >= 3:
             self._local_routing_open_until = time.monotonic() + 30
-            self._local_routing_failures = 0
         log.info("local continuation routing degraded (%s)", reason)
         return None
 

@@ -105,6 +105,16 @@ class JevBreakerTests(unittest.TestCase):
         self.assertIsNotNone(self._drive(_Opener([ok_response()])))
         self.assertFalse(self.gate.continuation_breaker_open)
 
+    def test_steady_451_reopens_breaker_on_first_post_cooldown_failure(self):
+        opener = _Opener([http_error()] * 10)
+        for _ in range(3):
+            self._drive(opener)
+        self.assertTrue(self.gate.continuation_breaker_open)
+        self.gate._continuation_open_until = time.monotonic() - 1
+        self.assertIsNone(self._drive(opener))
+        self.assertTrue(self.gate.continuation_breaker_open)
+        self.assertEqual(opener.calls, 4)
+
     def test_breaker_open_routes_deterministic_fresh_work(self):
         self.gate._continuation_open_until = time.monotonic() + 30
         with patch("urllib.request.build_opener") as build:
