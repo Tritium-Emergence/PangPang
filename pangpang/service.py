@@ -1685,6 +1685,9 @@ class Service:
         # a configured-but-failing Jev yields the weak `fallback` route below.
         route_source = "jev"
         if gate is not None and getattr(gate, "continuation_configured", False):
+            if getattr(gate, "continuation_breaker_open", False):
+                return dict(base, work_id=None, route_source="degraded_new",
+                            route_quality="deterministic")
             verdict = None
             try:
                 verdict = gate.classify_continuation(
@@ -3250,6 +3253,9 @@ class Service:
                    or gate.continuation_routing)
         if not enabled:
             sg = {"state": "unconfigured", "reason": "disabled",
+                  "operator_action_code": None, "operator_action": None, "restart_required": False}
+        elif has_key and gate.continuation_configured and gate.continuation_breaker_open:
+            sg = {"state": "degraded", "reason": "jev_endpoint_breaker_open",
                   "operator_action_code": None, "operator_action": None, "restart_required": False}
         elif has_key:
             sg = {"state": "ready", "reason": None, "operator_action_code": None, "operator_action": None, "restart_required": False}

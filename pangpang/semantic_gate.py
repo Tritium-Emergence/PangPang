@@ -552,6 +552,14 @@ class SemanticGate:
         (fallback, weak route)."""
         return bool(self.continuation_routing and os.environ.get("TYPESAFE_API_KEY"))
 
+    @property
+    def continuation_breaker_open(self):
+        """True while the continuation circuit breaker is open (endpoint-layer
+        failures reached the threshold; cooling down). Routing must treat this as
+        'configured but degraded' — deterministic fresh Work — not as healthy and
+        not as the weak fallback route."""
+        return time.monotonic() < self._continuation_open_until
+
     def _call(self, state, question=None, question_key="commit_disposition", choices=DISPOSITIONS):
         key = os.environ.get("TYPESAFE_API_KEY", "")
         if not key:
@@ -676,13 +684,14 @@ class SemanticGate:
             self._continuation_failures = 0
             self._continuation_open_until = 0.0
             return result
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
-                ValueError, KeyError, TypeError, json.JSONDecodeError):
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
             self._continuation_failures += 1
             if self._continuation_failures >= self.continuation_breaker_failures:
                 self._continuation_open_until = (
                     time.monotonic() + self.continuation_breaker_cooldown_s)
                 self._continuation_failures = 0
+            return None
+        except (ValueError, KeyError, TypeError):
             return None
 
     def shadow(self, state, *, turn_id=None, work_id=None, tool_name=None, metrics=None):
