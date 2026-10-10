@@ -190,6 +190,33 @@ class OnboardingProfileTests(unittest.TestCase):
         landed = self.app.execution.installations["codex-work-" + host_id]
         self.assertEqual(landed["adapter"], "codex")
 
+    def test_report_replay_is_noop_and_conflicting_report_conflicts(self):
+        host_id = self.paired_host()
+        req = self.request(host_id, {"action": "configure", "adapter": "codex"})
+        self.app.onboarding.approve(req["request_id"], {"profile": "work"})
+        command = [c for c in self.app.store.find("command", action="configure")
+                   if c["payload"].get("request_id") == req["request_id"]][0]
+        right = {"installation": {"id": "codex-work-" + host_id, "host_id": host_id,
+                                  "adapter": "codex", "cwd": str(self.root)}}
+        instance_id = self.app.store.get("device", host_id)["instance_id"]
+
+        def sync(result):
+            return self.app.broker.sync(host_id, {"instance_id": instance_id,
+                                                  "supported_contract_version": 3,
+                                                  "reports": [{"id": command["id"], "result": result}],
+                                                  "receipts": []})
+
+        sync(right)
+        landed = self.app.execution.installations["codex-work-" + host_id]
+        self.assertEqual(landed["adapter"], "codex")
+        sync(right)
+        self.assertEqual(self.app.execution.installations["codex-work-" + host_id], landed)
+        with self.assertRaises(Fault) as ctx:
+            sync({"installation": {"id": "codex-" + host_id, "host_id": host_id,
+                                   "adapter": "codex", "cwd": str(self.root)}})
+        self.assertEqual(ctx.exception.code, "command_result_conflict")
+        self.assertNotIn("codex-" + host_id, self.app.execution.installations)
+
     def test_approve_rejects_bad_profile_and_env(self):
         host_id = self.paired_host()
         req = self.request(host_id, {"action": "configure", "adapter": "codex"})
