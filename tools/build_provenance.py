@@ -4,8 +4,9 @@ Release builds set PANGPANG_REQUIRE_BUILD_PROVENANCE=1 and fail closed when
 git provenance is unavailable, the clean-tree check itself fails to run, or
 the source tree carries modified tracked or untracked files; developer
 builds fall back to the explicit string "unknown". Git is always queried at
-the pinned source root, never at the caller's working directory. The runtime
-never shells out to git — provenance is baked in at build time only.
+the pinned source root, never at the caller's working directory, and strict
+builds additionally require that root to be the repository root itself. The
+runtime never shells out to git — provenance is baked in at build time only.
 """
 import os
 import subprocess
@@ -42,6 +43,11 @@ def collect_provenance(require=None, root=None):
             raise SystemExit("PANGPANG_REQUIRE_BUILD_PROVENANCE=1 but git provenance is unavailable")
         commit = "unknown"
     if require:
+        toplevel = _git_required(root, "rev-parse", "--show-toplevel")
+        if os.path.realpath(toplevel) != os.path.realpath(root):
+            raise SystemExit("release builds require the source root to be the git repository root; "
+                             "git toplevel is %s — a parent repository would bake in the wrong "
+                             "commit and hide ignored sources" % toplevel)
         if _git_required(root, "status", "--porcelain", "--untracked-files=all"):
             raise SystemExit("release builds require a clean tracked tree without untracked "
                              "sources; git status --porcelain -uall is not empty")

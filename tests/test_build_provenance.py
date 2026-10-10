@@ -129,6 +129,20 @@ def test_git_queries_pinned_to_source_root(tmp_path, monkeypatch):
     assert info["BUILD_REF"] != "unknown"
 
 
+def test_strict_mode_rejects_parent_repository_root(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    run = _init_repo(parent)
+    (parent / ".gitignore").write_text("vendor/\n", encoding="utf-8")
+    run("add", ".gitignore")
+    run("commit", "-qm", "ignore vendor")
+    vendor = parent / "vendor" / "pp"
+    vendor.mkdir(parents=True)
+    (vendor / "extra.py").write_text("x\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        build_provenance.collect_provenance(require=True, root=str(vendor))
+
+
 def test_strict_mode_rejects_git_status_error(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / ".git" / "index").write_bytes(b"corrupted-index-payload")
