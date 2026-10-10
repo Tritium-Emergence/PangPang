@@ -1,33 +1,34 @@
 """Migration shim for the pre-GA ``XIAN_PANGPANG_*`` environment prefix.
 
 The GA rename replaced the ``XIAN_`` prefix (``XIAN_PANGPANG_TOKEN`` ->
-``PANGPANG_TOKEN``). A legacy deployment that still exports only the old
-names must keep working for one release cycle, while a present new name
-always wins — even when its value is rejected — so a partial rename can
-never silently downgrade the effective secret (fail-closed).
+``PANGPANG_TOKEN``). Only variables with verifiable pre-GA legacy usage are
+listed in ``LEGACY_ENV_NAMES``; every other ``PANGPANG_*`` variable reads its
+current name only — no mechanical prefix fallback, because inventing a legacy
+contract for a variable that never had one could silently resurrect a stale
+value (e.g. a runtime bundle selector) that no upgrade site ever set. A
+present new name always wins — even when its value is empty or rejected —
+so a partial rename can never silently downgrade the effective secret
+(fail-closed).
 """
 import logging
 import os
 
-MIGRATED_ENV_NAMES = (
-    "PANGPANG_TOKEN",
-    "PANGPANG_DEVICE_TOKEN",
-    "PANGPANG_PI_WORKER",
-    "PANGPANG_PI_NODE_BUNDLE",
-    "PANGPANG_PI_BUN_BUNDLE",
-    "PANGPANG_LOG_LEVEL",
-    "PANGPANG_SEMANTIC_GATE_URL",
-    "PANGPANG_SEARCH_PROVIDER",
-)
+LEGACY_ENV_NAMES = {
+    "PANGPANG_TOKEN": "XIAN_PANGPANG_TOKEN",
+    "PANGPANG_DEVICE_TOKEN": "XIAN_PANGPANG_DEVICE_TOKEN",
+    "PANGPANG_PI_WORKER": "XIAN_PANGPANG_PI_WORKER",
+    "PANGPANG_LOG_LEVEL": "XIAN_PANGPANG_LOG_LEVEL",
+    "PANGPANG_SEMANTIC_GATE_URL": "XIAN_PANGPANG_SEMANTIC_GATE_URL",
+}
+
+MIGRATED_ENV_NAMES = tuple(LEGACY_ENV_NAMES)
 
 _warned = set()
 
 
 def legacy_name(name):
-    """Return the pre-GA name for a current ``PANGPANG_*`` variable, else None."""
-    if name.startswith("PANGPANG_"):
-        return "XIAN_" + name
-    return None
+    """Return the verified pre-GA name for a current variable, else None."""
+    return LEGACY_ENV_NAMES.get(name)
 
 
 def _warn_legacy(name, legacy):
@@ -51,8 +52,11 @@ def has_env(name):
 
 def env_value(name, default=""):
     """Read one config variable: new name first, legacy name as a deprecated
-    fallback, default otherwise. A present new name is returned as-is even
-    when invalid; rejecting it is the caller's job (fail-closed)."""
+    fallback (only for variables with a verified legacy contract), default
+    otherwise. A present new name is returned as-is even when empty or
+    invalid — an explicit empty value is operator intent to unset, so the
+    legacy name is never consulted and never silently substituted; rejecting
+    an invalid value is the caller's job (fail-closed)."""
     if name in os.environ:
         return os.environ[name]
     legacy = legacy_name(name)
@@ -63,8 +67,8 @@ def env_value(name, default=""):
 
 
 def with_legacy_names(names):
-    """Project a collection of variable names to also cover their legacy
-    spellings, so redaction can't be bypassed via the old prefix."""
+    """Project a collection of variable names to also cover their verified
+    legacy spellings, so redaction can't be bypassed via the old prefix."""
     out = set()
     for name in names:
         out.add(name)

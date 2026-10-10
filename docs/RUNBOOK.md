@@ -87,6 +87,22 @@ PANGPANG_TOKEN
 
 不要把 token 写进 Git、聊天、issue 或普通日志。
 
+### 环境变量旧名迁移（XIAN_PANGPANG_* → PANGPANG_*）
+
+GA 重命名去掉了 `XIAN_` 前缀。仅以下**有升级现场证据**的变量在本发布周期内兼容读取旧名（旧名仅在新名完全缺失时生效，命中时打一条只含变量名、不含值的告警）：
+
+| 现名 | 兼容的旧名 |
+| --- | --- |
+| `PANGPANG_TOKEN` | `XIAN_PANGPANG_TOKEN` |
+| `PANGPANG_DEVICE_TOKEN` | `XIAN_PANGPANG_DEVICE_TOKEN` |
+| `PANGPANG_PI_WORKER` | `XIAN_PANGPANG_PI_WORKER` |
+| `PANGPANG_LOG_LEVEL` | `XIAN_PANGPANG_LOG_LEVEL` |
+| `PANGPANG_SEMANTIC_GATE_URL` | `XIAN_PANGPANG_SEMANTIC_GATE_URL` |
+
+其余变量（`PANGPANG_PI_NODE_BUNDLE`、`PANGPANG_PI_BUN_BUNDLE`、`PANGPANG_SEARCH_PROVIDER`）**没有可核实的旧名契约，不做任何回退**：设置 `XIAN_PANGPANG_PI_NODE_BUNDLE` 之类不会生效，运行时 bundle 选择器只认现名，避免陈旧值悄悄改变执行形态。
+
+约定：**新名一旦出现（哪怕是空字符串）就以新名为准，绝不回退旧名**。显式空值表示 operator 主动清空；此时旧名即使有效也不会被采用（token 场景下走既有的 Vault/交互路径，非交互则直接报错退出），不会被静默复活。
+
 ## 3. HTTPS 反向代理
 
 Coordinator 默认只监听 loopback。正式远程访问：
