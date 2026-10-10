@@ -213,12 +213,18 @@ class Broker:
 
     def start_never_delivered(self, task):
         """Read-only, side-effect-free classification: did THIS attempt's start
-        command provably never reach the device? Mirrors resolve()'s
-        never_delivered branch (404 = never enqueued; done + command_expired =
-        expired while pending; done + superseded_by_operator_resolution) but
-        never mutates state. A pending or delivered command is NOT eligible:
-        sync may hand a pending command to the device concurrently, and a
-        delivered one must never be presumed unexecuted. Returns
+        command provably never reach the device? Two trusted sources only:
+        404 = never enqueued, and done + superseded_by_operator_resolution =
+        a supersede THIS coordinator recorded in the same Store transaction
+        that could have delivered it. Never mutates state. A pending or
+        delivered command is NOT eligible: sync hands pending commands to
+        the device under the same Store transaction that marks them
+        delivered, so a read-then-act on pending is a TOCTOU, and a
+        delivered command must never be presumed unexecuted. A
+        command_expired result is NOT trusted evidence either: start is
+        enqueued durable (expires=None), so the expiry sweep can never
+        legitimately produce it — one appearing on a start command has an
+        unknown origin and must not auto-terminate anything. Returns
         (never_delivered, detail)."""
         command_id = self.command_id(task["host_id"], "start", task["execution_id"])
         with self.store.atomic():
@@ -235,9 +241,6 @@ class Broker:
             if result.get("superseded_by_operator_resolution"):
                 return True, {"start_command_id": command_id,
                               "start_command_state": "superseded_before_delivery"}
-            if result.get("error") == "command_expired":
-                return True, {"start_command_id": command_id,
-                              "start_command_state": "expired_before_delivery"}
             return False, None
 
     def poll(self, task):

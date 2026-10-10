@@ -5322,10 +5322,12 @@ class Service:
         can never produce only blocks the device command pipe and manufactures
         the next zombie. Strictly bounded: connector transport only (local
         tasks have no broker command and must never be presumed dead), proven
-        never-delivered evidence only (pending/delivered commands are
-        ineligible), and only for the two reasons where the start provably
-        never ran. Recorded as resolution_source=system, never posing as an
-        operator resolve."""
+        never-delivered evidence only (pending/delivered commands and
+        untrusted result markers are ineligible; the capability-hold class
+        additionally requires the strict never-enqueued proof, and its
+        settlement says never_started rather than posing as a user cancel).
+        Recorded as resolution_source=system, never posing as an operator
+        resolve."""
         if task["status"] != "unknown":
             return False
         host = self.execution.hosts.get(task["host_id"]) or {}
@@ -5335,10 +5337,14 @@ class Service:
         if reason == "device_action_unconfirmed":
             if not (task.get("cancel_requested") or task.get("device_cancel_sent")):
                 return False
-        elif reason != "capability_hold_deadline":
+        elif reason == "capability_hold_deadline":
+            pass
+        else:
             return False
         never, detail = self.broker.start_never_delivered(task)
         if not never:
+            return False
+        if reason == "capability_hold_deadline" and detail["start_command_state"] != "never_enqueued":
             return False
         log.warning("task %s auto-resolved as cancelled: start never delivered "
                     "(unknown_reason=%s, %s)", task["id"], reason,

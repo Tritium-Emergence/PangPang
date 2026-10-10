@@ -74,7 +74,7 @@ class ZombieAutoResolveTests(unittest.TestCase):
         self.assertEqual(self.app.store.find("command", action="resolve_run"), [])
         self.assertNotEqual(self.app.store.get("dependency", r["dependency_id"])["status"], "pending")
 
-    def test_unconfirmed_with_cancel_and_expired_start_auto_cancels(self):
+    def test_command_expired_marker_is_not_trusted_evidence(self):
         self.sync(3)
         task, _ = self.submit("z2")
         self.app.task_step()
@@ -82,8 +82,16 @@ class ZombieAutoResolveTests(unittest.TestCase):
         self.mutate(task["id"], cancel_requested=True)
         self.app._mark_task_unknown(task, "device_action_unconfirmed")
         done = self.observe(task)
-        self.assertEqual(done["status"], "cancelled")
-        self.assertEqual(done["receipt"]["start_command_state"], "expired_before_delivery")
+        self.assertEqual(done["status"], "unknown")
+
+    def test_capability_hold_with_superseded_start_is_not_auto_cancelled(self):
+        self.sync(3)
+        task, _ = self.submit("z2b")
+        self.app.task_step()
+        self.finish_start(task, {"superseded_by_operator_resolution": True})
+        self.app._mark_task_unknown(task, "capability_hold_deadline")
+        done = self.observe(task)
+        self.assertEqual(done["status"], "unknown")
 
     def test_superseded_start_auto_cancels(self):
         self.sync(3)
@@ -147,6 +155,31 @@ class ZombieAutoResolveTests(unittest.TestCase):
         app._mark_task_unknown(task, "capability_hold_deadline")
         app._apply_observation(app.store.get("task", task["id"]), {"status": "awaiting_receipt"})
         self.assertEqual(app.store.get("task", task["id"])["status"], "unknown")
+
+    def test_duplicate_auto_resolve_is_idempotent(self):
+        task, r = self.held_task("z10")
+        self.app._mark_task_unknown(task, "capability_hold_deadline")
+        stale = self.app.store.get("task", task["id"])
+        self.assertTrue(self.app._auto_resolve_never_delivered(stale))
+        first = self.app.store.get("task", task["id"])
+        self.assertTrue(self.app._auto_resolve_never_delivered(stale))
+        second = self.app.store.get("task", task["id"])
+        self.assertEqual(second["status"], "cancelled")
+        self.assertEqual(second["receipt"], first["receipt"])
+        self.assertEqual(second["ended"], first["ended"])
+        self.assertNotEqual(self.app.store.get("dependency", r["dependency_id"])["status"], "pending")
+
+    def test_late_receipt_cannot_flip_an_auto_resolved_task(self):
+        task, _ = self.held_task("z11")
+        self.app._mark_task_unknown(task, "capability_hold_deadline")
+        done = self.app.reconcile(task["id"])
+        self.assertEqual(done["status"], "cancelled")
+        late = self.app.complete_task(done, {
+            "execution_id": done["execution_id"], "spec_digest": done["spec_digest"],
+            "attempt_uuid": done.get("attempt_uuid"), "status": "succeeded",
+            "process_tree_confirmed": True, "tail": "late", "artifacts": []})
+        self.assertEqual(late["status"], "cancelled")
+        self.assertTrue(late["receipt"]["auto_resolved"])
 
     def test_operator_evidence_fault_names_requirements(self):
         task, _ = self.held_task("z9")
