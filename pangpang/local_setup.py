@@ -3,7 +3,7 @@ import copy
 import shutil
 from .execution import (Execution, ADAPTER_CATALOG, binary_matches_pin, fetch_pinned_pi,
                        installation_id, materialize_executor_env, pi_models_api, secret_env_name,
-                       validate_profile_env, write_pi_provider_config, _PI_BASE_URL_ENV)
+                       validate_extra_argv, validate_profile_env, write_pi_provider_config, _PI_BASE_URL_ENV)
 from .runner import checked, probe
 from .store import Fault, digest
 
@@ -81,6 +81,9 @@ class LocalSetup:
         env = body.get("env", old.get("env"))
         if env is not None:
             validate_profile_env(env)
+        extra_argv = body.get("extra_argv", old.get("extra_argv"))
+        if extra_argv is not None:
+            validate_extra_argv(adapter, extra_argv)
         cat = ADAPTER_CATALOG[adapter]
         e = {"id": identity, "host_id": self.c.host_id, "adapter": adapter, "enabled": True,
              "argv": [found["binary"], *cat["argv"]],
@@ -88,6 +91,8 @@ class LocalSetup:
              "max_concurrency": old.get("max_concurrency", cat["concurrency"]), "env_allowlist": []}
         if env:
             e["env"] = dict(env)
+        if extra_argv:
+            e["extra_argv"] = list(extra_argv)
         # SIS: executor capacity is the GENERIC max_concurrency,
         # not a product-level qwen special case. PangPang does not hardcode "qwen must
         # hold qwen-shared". A real shared external device lock is legitimate but must

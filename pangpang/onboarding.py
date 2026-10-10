@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from .store import Fault, digest, uid, encode
-from .execution import ADAPTER_CATALOG, installation_id, validate_profile_env
+from .execution import ADAPTER_CATALOG, installation_id, validate_extra_argv, validate_profile_env
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
 
 # A 16x16 red PNG: proves a "supports images" model endpoint accepts image input.
@@ -214,7 +214,7 @@ class Onboarding:
             # Endpoint and qwen resource argv are operator/device-owned security
             # policy. A model proposal can request the adapter/auth mode only.
             if any(k in body for k in ("endpoint", "slot_acquire_args", "slot_release_args",
-                                       "profile", "env")):
+                                       "profile", "env", "extra_argv")):
                 raise Fault("operator_owned_setup_field", 400)
             body = dict(body, auth=body.get("auth", "existing"), endpoint="", endpoint_source="operator")
         else:
@@ -239,7 +239,7 @@ class Onboarding:
 
     def approve(self, identity, body=None):
         body = body or {}
-        if set(body) - {"endpoint", "profile", "env"}:
+        if set(body) - {"endpoint", "profile", "env", "extra_argv"}:
             raise Fault("invalid_setup_approval", 400)
         with self.store.atomic():
             req = self.checked_request(identity, "needs_approval")
@@ -254,6 +254,9 @@ class Onboarding:
                 env = body.get("env")
                 if env is not None:
                     validate_profile_env(env)
+                extra_argv = body.get("extra_argv")
+                if extra_argv is not None:
+                    validate_extra_argv(proposal["adapter"], extra_argv)
                 # Same canonical namespace as LocalSetup, derived by the server;
                 # profile is operator-supplied at approval, never model-supplied.
                 proposal["installation_id"] = installation_id(proposal["adapter"], req["host_id"], profile)
@@ -261,6 +264,8 @@ class Onboarding:
                     proposal["profile"] = profile
                 if env:
                     proposal["env"] = dict(env)
+                if extra_argv:
+                    proposal["extra_argv"] = list(extra_argv)
                 previous = next((i for i in self._config().get("installations", [])
                                  if i["id"] == proposal["installation_id"]), {})
                 if previous and previous["host_id"] != req["host_id"]:

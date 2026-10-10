@@ -300,6 +300,17 @@ catalog 内各执行器（claude-code / codex 等）的能力描述只是默认�
 
 connector installation 仍是 device-owned，不能在 cloud 端用这个通用配置 UI 修改。
 
+### extra_argv（operator 追加参数）
+
+installation 可配置 `extra_argv`：字符串数组，启动时追加在 catalog argv 之后。SIS 边界不变——argv 本体仍由 catalog 固定，模型不能提案该字段（`operator_owned_setup_field`），只能由 operator 在配置 UI 或 approve 时注入。
+
+约束：
+
+- 最多 16 项、单项 ≤1024 字符、总计 ≤4096 字符，空数组表示清除；
+- 权限/沙箱解除类 token（`yolo`、`dangerously`、`bypass`、`full-auto`、`no-sandbox`、`approve-for-me`、`skip-permissions`）一律 400——catalog 行声明的窄授权不能经此字段放宽；
+- codex 走 app-server 协议：`--skip-git-repo-check`、`--json`、`--approve-for-me` 等 exec-only flag 在协议改写时会被**静默丢弃**，因此 extra_argv 直接 400 拒绝这些 flag，而不是存一个进程永远收不到的参数。trust guard 的正确解法是给 workspace 建立可信目录（`git init` 或 codex config 的 `trust_level`），不是传 flag；
+- cloud 端显示限制：connector installation 在 cloud 侧 argv 是占位 `["device-owned-command"]`，`extra_argv` 真实值只存在 device 端并在 device 侧启动时生效。
+
 ### Executor 产物
 
 推荐 Executor 把交付文件写到：
@@ -324,7 +335,7 @@ $XPP_OUTPUT_DIR
 
 ### Installation 配置编辑冲突
 
-local installation 配置页支持 `cwd/max_concurrency/enabled/timeout_s/priority/use_when`。保存时常见 409：
+local installation 配置页支持 `cwd/max_concurrency/enabled/timeout_s/priority/use_when/extra_argv`。保存时常见 409：
 
 - `installation_config_changed`：prepare 后同一 installation/host 已被其他操作修改；刷新当前值并人工合并，不要盲目覆盖；
 - `installation_busy`：修改 cwd 时仍有 active/quarantined task；先让执行事实收口。

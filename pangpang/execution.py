@@ -518,6 +518,47 @@ def validate_profile_env(env):
                                % sorted(PROFILE_ENV_KEYS))
 
 
+MAX_EXTRA_ARGV_ITEMS = 16
+MAX_EXTRA_ARGV_ITEM_CHARS = 1024
+MAX_EXTRA_ARGV_TOTAL_CHARS = 4096
+_EXTRA_ARGV_DENY = ("yolo", "dangerously", "bypass", "full-auto", "no-sandbox",
+                    "approve-for-me", "skip-permissions")
+
+
+def validate_extra_argv(adapter, extra_argv):
+    """Operator-owned extra argv appended after the catalog argv. Shape is
+    necessary but not sufficient: permission/sandbox-disabling tokens are
+    rejected outright (the narrow tool grant a catalog row advertises must not
+    be widened through this field), and for the codex app-server protocol every
+    exec-only flag is rejected because the protocol rewrite DROPS it — storing
+    a flag the launched process never receives would be a silent lie."""
+    if not isinstance(extra_argv, list) or len(extra_argv) > MAX_EXTRA_ARGV_ITEMS:
+        raise Fault("invalid_extra_argv", 400,
+                    advice="extra_argv must be a list of at most %d strings" % MAX_EXTRA_ARGV_ITEMS)
+    total = 0
+    for item in extra_argv:
+        if not isinstance(item, str) or "\x00" in item or not item or len(item) > MAX_EXTRA_ARGV_ITEM_CHARS:
+            raise Fault("invalid_extra_argv", 400,
+                        advice="extra_argv entries must be non-empty plain strings")
+        total += len(item)
+        if any(marker in item.lower() for marker in _EXTRA_ARGV_DENY):
+            raise Fault("invalid_extra_argv", 400,
+                        advice="permission/sandbox-disabling flags are not allowed in extra_argv: %s" % item)
+    if total > MAX_EXTRA_ARGV_TOTAL_CHARS:
+        raise Fault("invalid_extra_argv", 400,
+                    advice="extra_argv exceeds %d characters in total" % MAX_EXTRA_ARGV_TOTAL_CHARS)
+    row = ADAPTER_CATALOG.get(adapter or "") or {}
+    if row.get("stdin_protocol") == CODEX_APP_SERVER:
+        dropped = runner._CODEX_EXEC_ONLY_BOOL_FLAGS | runner._CODEX_EXEC_ONLY_VALUE_FLAGS
+        for item in extra_argv:
+            name = item.partition("=")[0]
+            if name in dropped:
+                raise Fault("invalid_extra_argv", 400,
+                            advice="'%s' is a codex exec-only flag: the app-server protocol this "
+                                   "installation runs drops it and the process never receives it; "
+                                   "trust the workspace instead (git init or codex config trust_level)" % name)
+
+
 class Execution:
     def __init__(self, config, data):
         self.config, self.data = config, Path(data)
@@ -559,6 +600,8 @@ class Execution:
                 raise Fault("invalid_argv", 400)
             if "env" in e:
                 validate_profile_env(e["env"])
+            if "extra_argv" in e:
+                validate_extra_argv(e.get("adapter"), e["extra_argv"])
             # executor capacity is expressed by the generic
             # max_concurrency, not a product-level qwen resource special-case. A
             # real external device lock may still be configured via resource_keys,
@@ -688,7 +731,8 @@ class Execution:
         h = self.hosts[e["host_id"]]
         spec = {"execution_id": task["execution_id"], "spec_digest": task["spec_digest"],
                 "attempt_uuid": task.get("attempt_uuid"),
-                "argv": e["argv"], "prompt": task["prompt"], "prompt_mode": e.get("prompt_mode", "stdin"),
+                "argv": list(e["argv"]) + list(e.get("extra_argv", [])),
+                "prompt": task["prompt"], "prompt_mode": e.get("prompt_mode", "stdin"),
                 "cwd": task.get("cwd", e["cwd"]), "allowed_roots": h.get("allowed_roots", []), "inputs": task["inputs"],
                 "control_roots": [str(self.data)] if h["transport"] == "local" else [h["runner_root"]],
                 "outputs": task.get("outputs", []), "required_outputs": task.get("required_outputs", []),

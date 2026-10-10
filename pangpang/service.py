@@ -19,7 +19,7 @@ from .adapters_file import merge as merge_custom_adapters
 from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_matches_pin,
                        fetch_pinned_pi, materialize_executor_env,
                        permission_bridge_for, pi_models_api, secret_env_name, task_interjection_tier,
-                       write_pi_provider_config, _PI_BASE_URL_ENV)
+                       validate_extra_argv, write_pi_provider_config, _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
 from .store import Fault, Store, digest, encode, uid, os_family
 from .vault import secure_directory
@@ -3997,7 +3997,8 @@ class Service:
     # via this generic path). priority/use_when are ROUTING metadata (which executor
     # the planner prefers and why), not command material, so they are operator-tunable
     # here while argv stays locked; empty falls back to the ADAPTER_CATALOG default.
-    INSTALLATION_CONFIG_FIELDS = ("max_concurrency", "cwd", "enabled", "timeout_s", "priority", "use_when")
+    INSTALLATION_CONFIG_FIELDS = ("max_concurrency", "cwd", "enabled", "timeout_s", "priority", "use_when",
+                                  "extra_argv")
 
     def configure_installation(self, installation_id, body):
         prepared = self.prepare_installation_config(installation_id, body)
@@ -4082,6 +4083,13 @@ class Service:
                 raise Fault("invalid_use_when", 400)
             else:
                 updated["use_when"] = text.strip()
+        if "extra_argv" in body:
+            raw = body["extra_argv"]
+            if raw is None or raw == []:
+                updated.pop("extra_argv", None)
+            else:
+                validate_extra_argv(inst.get("adapter"), raw)
+                updated["extra_argv"] = list(raw)
         if "cwd" in body:
             try:
                 runner.check_control_separation(host.get("allowed_roots", []), [self.data])
