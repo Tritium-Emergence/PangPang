@@ -1,0 +1,10 @@
+[
+  {
+    "id": "local-host",
+    "reach": "local",
+    "allowed_roots": [
+      "/REPLACE_WITH_AUTHORIZED_WORKSPACE"
+    ],
+    "parallel": 1
+  }
+]

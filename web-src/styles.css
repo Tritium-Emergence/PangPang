@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Product-surface design tokens. A later theme pass only touches these vars. */
+:root {
+  --ink: #2b2723;
+  --muted: #8a8178;
+  --line: #e9e3da;
+  --surface: #faf7f1;
+  --raised: #fffdf9;
+  --soft: #f2ede4;
+  --brand: #1f6f6b;
+  --warn: #b45309;
+  --good: #047857;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body, #app, #root { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  color: var(--ink);
+  background: var(--surface);
+  -webkit-font-smoothing: antialiased;
+}
+/* CSP style-src 'self' forbids inline style={} — these are the former inline styles,
+   now in the external stylesheet (served from /app.css). */
+.shell-root { height: 100dvh; }
+.composer-root { padding-bottom: calc(0.75rem + env(safe-area-inset-bottom)); }
+#messages, #work-view, #hosts-view { min-height: 0; }
+#composer, .shell-root main > header { flex-shrink: 0; }
+#setup-panel, #capability-list, #notice { flex-shrink: 0; max-height: 25dvh; overflow-y: auto; }
+/* iOS: hide scrollbars but keep scrollability (mobile). */
+@media (max-width: 639px) {
+  .scroll-none { scrollbar-width: none; }
+  .scroll-none::-webkit-scrollbar { display: none; }
+}
+input, textarea, select { background: var(--raised); }
+pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
+.modal, dialog[open] { max-width: 95vw; max-height: 90dvh; overflow-y: auto; }
+.modal { width: min(720px, 95vw); }
+.modal.settings-modal, .modal.bot-modal { width: min(480px, 95vw); }
+.modal.secret-modal, .modal.pair-modal { width: min(416px, 95vw); }
+.modal::backdrop { background: rgba(20,18,15,.65); }
+#file-dialog { width: min(720px, 95vw); }
+.file-browser { min-height: 220px; max-height: min(60vh,480px); overflow-y: auto; }
+.browse-head { position: sticky; top: 0; background: var(--raised); gap: 8px; }
+.browse-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.browse-size { flex: none; color: var(--muted); font-size: 12px; }
+.browse-item.picked { background: #e4efed; box-shadow: inset 3px 0 var(--brand); }
+.dropping { outline: 2px dashed var(--brand); outline-offset: -4px; }
+/* Capability pills: a tiny state dot carries the status color so the row reads at a
+   glance without a wall of text. Color maps the raw state via data-state (SIS). */
+.cap-dot { background: var(--muted); }
+.cap-pill[data-state="ready"] .cap-dot { background: var(--good); }
+.cap-pill[data-state="blocked"] .cap-dot,
+.cap-pill[data-state="unconfigured"] .cap-dot { background: var(--warn); }
+.cap-pill[data-state="blocked"], .cap-pill[data-state="unconfigured"] { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
+.chip-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 5px; }
+.media-preview { margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; max-width: 100%; }
+.media-img, .media-video { display: block; width: auto; max-width: 100%; max-height: 420px; object-fit: contain; background: var(--soft); }
+.media-audio { width: 100%; }
+.media-cap { padding: 6px 10px; background: var(--soft); }
+.artifact-card .media-img, .artifact-card .media-video { max-height: 220px; }
+.image-zoom { display: grid; place-items: center; min-width: 44px; min-height: 44px; padding: 0; max-width: 100%; cursor: zoom-in; }
+.modal.lightbox { padding: 0; background: transparent; border: 0; width: fit-content; min-width: 64px; min-height: 64px; max-width: 96vw; max-height: 94dvh; overflow: visible; }
+.lightbox-img { max-width: 96vw; max-height: 90dvh; object-fit: contain; }
+.lightbox-close { position: absolute; right: 4px; top: 4px; border-radius: 50%; width: 44px; height: 44px; background: var(--raised); }
+.md-table-scroll { max-width: 100%; overflow-x: auto; }
+.md-table { border-collapse: collapse; white-space: normal; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 6px 10px; }
+.md-table th { background: var(--soft); }
+.md-h, .md-p, .md-list, .md-quote, .md-pre { margin: 6px 0; }
+.md-hr { border-top: 1px solid var(--line); margin: 12px 0; }
+@media (max-width: 639px) {
+  #work-view > .grid { grid-template-columns: minmax(0,1fr); }
+  #messages, #composer, #work-view, #hosts-view { padding-left: 12px; padding-right: 12px; }
+  #composer .compose-options { flex-wrap: wrap; }
+  #composer .compose-hint { display: none; }
+  #composer .compose-files { margin-left: 0; flex-wrap: wrap; }
+  #message { font-size: 16px; }
+  .body, .msg-media, .tcard, .warning { max-width: 100%; }
+  .media-img, .media-video { max-height: 280px; }
+  .pager { gap: 8px; font-size: 12px; flex-wrap: wrap; }
+  #activity { max-width: 40%; }
+}
+/* Landscape and a reduced visual viewport must still expose the send control. */
+@media (max-height: 500px) {
+  .shell-root main > header { padding-top: 6px; padding-bottom: 6px; }
+  #setup-panel, #capability-list, #notice { max-height: 15dvh; }
+  #composer { padding-top: 6px; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
+  #composer .compose-hint { display: none; }
+  #message { height: 56px; }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "pangpang",
+  "version": "0.9.0",
+  "description": "Thin alias for the PangPang Python package. Documented entry is python -m pangpang.cli. Does not download Bun, pi, or Python.",
+  "license": "Apache-2.0",
+  "bin": {
+    "pangpang": "./bin/pangpang.js"
+  },
+  "files": [
+    "bin/pangpang.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

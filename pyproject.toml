@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pangpang"
+description = "Durable control plane for the agents, models, and computers you already have."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+dynamic = ["version"]
+dependencies = [
+    "cryptography==50.0.1",
+    "cffi==2.1.1",
+    "pycparser==3.0",
+    "tzdata==2026.4",
+]
+
+[project.scripts]
+pangpang = "pangpang.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Tritium-Emergence/PangPang"
+Security = "https://github.com/Tritium-Emergence/PangPang/blob/main/SECURITY.md"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "pangpang.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["pangpang*"]
+
+[tool.setuptools.package-data]
+pangpang = ["*.mjs", "*.json", "*.txt", "web/*", "_shipped/runtime/**"]

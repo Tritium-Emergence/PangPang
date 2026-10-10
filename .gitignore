@@ -1,0 +1,47 @@
+__pycache__/
+*.pyc
+data/
+config/persons.json
+config/hosts.json
+config/executors.json
+.env
+
+# Live bot runtime state and operator configuration
+config/runtime.json
+data-v2/
+*.db-shm
+*.db-wal
+
+# Never track runtime databases / vault material, regardless of directory name.
+*.db
+*.key
+**/vault/
+
+# Private host connector state and enrollment configuration
+connector-data/
+config/connector.json
+*.env
+
+node_modules/
+.venv/
+playwright-report/
+test-results/
+.test-tmp/
+dist/
+
+# 发行版自带的 packaged Bun worker（打包期放入，绝不入库）
+runtime/
+
+# 本地 CI 运行日志与摘要
+reports/
+
+# Cloud coordinator runtime data (bots.db, vault, master.key) — never commit
+cloud-data/
+live-data/
+
+live.out.log
+.env.local
+cloud-data/
+cloud-data-startup.log
+cloud-data-workspace/
+web-dist/

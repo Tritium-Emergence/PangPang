@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+recursive-include pangpang *.py
+recursive-include pangpang *.mjs
+recursive-include pangpang *.json
+recursive-include pangpang *.txt
+recursive-include pangpang/web *
+recursive-include pangpang/_shipped *
+global-exclude __pycache__
+global-exclude *.pyc
+prune tests

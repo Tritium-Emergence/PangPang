@@ -1,0 +1,492 @@
+{
+  "default_model": "default",
+  "turn_budget": 8,
+  "delegation_budget": 6,
+  "semantic_gate": {
+    "mode": "off",
+    "continuation_routing": true,
+    "model": "jev-latest",
+    "timeout_s": 2.0,
+    "continuation_switch_threshold": 0.75,
+    "correction_threshold": 0.85,
+    "continuation_breaker_failures": 3,
+    "continuation_breaker_cooldown_s": 30,
+    "max_state_bytes": 65536,
+    "tools": [
+      "link_work",
+      "cancel_dependency",
+      "send_bot_message",
+      "delegate",
+      "submit_task"
+    ]
+  },
+  "models": [
+    {
+      "id": "default",
+      "endpoint": "https://REPLACE_WITH_LLM_ENDPOINT/v1",
+      "model": "REPLACE_WITH_YOUR_MODEL_ID",
+      "credential_env": "PANGPANG_LLM_KEY",
+      "context_budget": 32000,
+      "output_tokens": 32768,
+      "timeout_s": 120,
+      "generation_settings": {},
+      "resource_keys": []
+    }
+  ],
+  "hosts": [
+    {
+      "id": "linux-gpu",
+      "os": "Linux",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_LINUX_GPU",
+      "allowed_roots": []
+    },
+    {
+      "id": "linux-remote",
+      "os": "Linux",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_LINUX_REMOTE",
+      "allowed_roots": []
+    },
+    {
+      "id": "cloud-small",
+      "os": "Linux",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_CLOUD_SMALL",
+      "allowed_roots": []
+    },
+    {
+      "id": "win-a",
+      "os": "Windows",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_WIN_A",
+      "allowed_roots": []
+    },
+    {
+      "id": "win-b",
+      "os": "Windows",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_WIN_B",
+      "allowed_roots": []
+    },
+    {
+      "id": "mac-a",
+      "os": "macOS",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_MAC_A",
+      "allowed_roots": []
+    },
+    {
+      "id": "mac-b",
+      "os": "macOS",
+      "transport": "connector",
+      "credential_env": "PANGPANG_DEVICE_MAC_B",
+      "allowed_roots": []
+    }
+  ],
+  "installations": [
+    {
+      "id": "claude-code-linux-gpu",
+      "host_id": "linux-gpu",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-linux-gpu",
+      "host_id": "linux-gpu",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-linux-gpu",
+      "host_id": "linux-gpu",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    },
+    {
+      "id": "claude-code-linux-remote",
+      "host_id": "linux-remote",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-linux-remote",
+      "host_id": "linux-remote",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-linux-remote",
+      "host_id": "linux-remote",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    },
+    {
+      "id": "claude-code-cloud-small",
+      "host_id": "cloud-small",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-cloud-small",
+      "host_id": "cloud-small",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-cloud-small",
+      "host_id": "cloud-small",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    },
+    {
+      "id": "claude-code-win-a",
+      "host_id": "win-a",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-win-a",
+      "host_id": "win-a",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-win-a",
+      "host_id": "win-a",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    },
+    {
+      "id": "claude-code-win-b",
+      "host_id": "win-b",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-win-b",
+      "host_id": "win-b",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-win-b",
+      "host_id": "win-b",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    },
+    {
+      "id": "claude-code-mac-a",
+      "host_id": "mac-a",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-mac-a",
+      "host_id": "mac-a",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-mac-a",
+      "host_id": "mac-a",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    },
+    {
+      "id": "claude-code-mac-b",
+      "host_id": "mac-b",
+      "adapter": "claude-code",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "codex-mac-b",
+      "host_id": "mac-b",
+      "adapter": "codex",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [],
+      "timeout_s": 3600
+    },
+    {
+      "id": "qwen-claude-mac-b",
+      "host_id": "mac-b",
+      "adapter": "qwen-claude",
+      "enabled": false,
+      "argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "probe_argv": [
+        "DEVICE_LOCAL_COMMAND"
+      ],
+      "prompt_mode": "stdin",
+      "cwd": "DEVICE_LOCAL_WORKSPACE",
+      "risk": "write",
+      "permission_verified": false,
+      "resource_keys": [
+        "qwen-shared"
+      ],
+      "timeout_s": 3600
+    }
+  ],
+  "resources": [
+    {
+      "key": "qwen-shared",
+      "acquire_argv": [
+        "/REPLACE_WITH_VERIFIED_SLOT_ACQUIRE"
+      ],
+      "release_argv": [
+        "/REPLACE_WITH_VERIFIED_SLOT_RELEASE"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+[
+  {
+    "id": "pangpang",
+    "name": "胖胖",
+    "role": "chief",
+    "executor": null,
+    "host": null,
+    "enabled": true
+  },
+  {
+    "id": "wu-dingyuan",
+    "name": "伍定远",
+    "role": "specialist",
+    "executor": "qwen-claude",
+    "host": "local-host",
+    "enabled": true
+  },
+  {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "role": "specialist",
+    "executor": "claude-code",
+    "host": "local-host",
+    "enabled": true
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "role": "specialist",
+    "executor": "codex",
+    "host": "local-host",
+    "enabled": true
+  }
+]

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.pangpang.connector</string>
+<key>ProgramArguments</key><array>
+<string>/REPLACE_WITH_PYTHON</string><string>-m</string><string>pangpang.connector</string>
+<string>--data</string><string>/REPLACE_WITH_PRIVATE_DATA</string>
+</array>
+<key>WorkingDirectory</key><string>/REPLACE_WITH_REPO</string>
+<!-- Pair interactively once before loading this plist. Device credentials stay in the connector vault under --data. -->
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>AbandonProcessGroup</key><true/>
+</dict></plist>
