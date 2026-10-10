@@ -1,35 +1,40 @@
 """Generate ``pangpang/_build.py`` from the build input (git HEAD).
 
 Release builds set PANGPANG_REQUIRE_BUILD_PROVENANCE=1 and fail closed when
-git provenance is unavailable; developer builds fall back to the explicit
-string "unknown". The runtime never shells out to git — provenance is baked
-in at build time only.
+git provenance is unavailable or the source tree carries modified tracked
+or untracked files; developer builds fall back to the explicit string
+"unknown". Git is always queried at the pinned source root, never at the
+caller's working directory. The runtime never shells out to git —
+provenance is baked in at build time only.
 """
 import os
 import subprocess
 import time
 
+SOURCE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def collect_provenance(require=None):
+
+def _git(root, *args):
+    try:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True,
+                              text=True, check=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+def collect_provenance(require=None, root=None):
     if require is None:
         require = os.environ.get("PANGPANG_REQUIRE_BUILD_PROVENANCE") == "1"
-    try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                text=True, check=True).stdout.strip()
-    except Exception:
-        commit = ""
-    try:
-        ref = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"],
-                             capture_output=True, text=True, check=True).stdout.strip()
-    except Exception:
-        ref = ""
+    root = root or SOURCE_ROOT
+    commit = _git(root, "rev-parse", "HEAD")
+    ref = _git(root, "describe", "--tags", "--always", "--dirty")
     if not commit:
         if require:
             raise SystemExit("PANGPANG_REQUIRE_BUILD_PROVENANCE=1 but git provenance is unavailable")
         commit = "unknown"
-    if require and ref.endswith("-dirty"):
-        raise SystemExit("release builds must come from a clean tree; "
-                         "ref %r carries local modifications" % ref)
+    if require and _git(root, "status", "--porcelain", "--untracked-files=all"):
+        raise SystemExit("release builds require a clean tracked tree without untracked "
+                         "sources; git status --porcelain -uall is not empty")
     return {"BUILD_COMMIT": commit,
             "BUILD_REF": ref or "unknown",
             "BUILT_AT": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}

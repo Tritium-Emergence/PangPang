@@ -82,6 +82,53 @@ def test_collect_provenance_refuses_dirty_tree_when_required(monkeypatch):
     assert info["BUILD_REF"].endswith("-dirty")
 
 
+def _init_repo(path):
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=str(path), capture_output=True,
+                              text=True, check=True)
+    (path / "tracked.txt").write_text("x\n", encoding="utf-8")
+    run("init", "-q")
+    run("config", "user.email", "t@t.local")
+    run("config", "user.name", "t")
+    run("add", ".")
+    run("commit", "-qm", "base")
+    return run
+
+
+def test_strict_mode_rejects_untracked_sources(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / "newly_added.py").write_text("evil\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        build_provenance.collect_provenance(require=True, root=str(tmp_path))
+    assert len(build_provenance.collect_provenance(
+        require=False, root=str(tmp_path))["BUILD_COMMIT"]) == 40
+
+
+def test_strict_mode_rejects_modified_tracked_tree(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("modified\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        build_provenance.collect_provenance(require=True, root=str(tmp_path))
+
+
+def test_strict_mode_accepts_clean_repo(tmp_path):
+    _init_repo(tmp_path)
+    info = build_provenance.collect_provenance(require=True, root=str(tmp_path))
+    assert len(info["BUILD_COMMIT"]) == 40
+
+
+def test_git_queries_pinned_to_source_root(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    _init_repo(source)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    info = build_provenance.collect_provenance(require=False, root=str(source))
+    assert len(info["BUILD_COMMIT"]) == 40
+    assert info["BUILD_REF"] != "unknown"
+
+
 def test_collect_provenance_reads_git_head():
     info = build_provenance.collect_provenance(require=False)
     assert len(info["BUILD_COMMIT"]) == 40 or info["BUILD_COMMIT"] == "unknown"

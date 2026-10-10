@@ -651,8 +651,8 @@ curl -s \
 
 发布构建流程（commit→资产摘要的可核对关系）：
 
-1. 从明确的 tag 构建（工作树必须干净：`PANGPANG_REQUIRE_BUILD_PROVENANCE=1` 下 dirty ref 与缺失 git 信息都拒绝出包；只有本地源码开发允许 `unknown`）；
-2. 构建产物内的 `BUILD_COMMIT`/`BUILD_REF` 由构建钩子从该构建输入写入，运行时不访问 git；
+1. 从明确的 tag 构建（工作树必须干净：`PANGPANG_REQUIRE_BUILD_PROVENANCE=1` 下缺失 git 信息、tracked 改动或**未追踪源文件**（`git status --porcelain -uall` 非空，`.gitignore` 排除的构建产物不计）都拒绝出包；只有本地源码开发允许 `unknown`）；
+2. 构建产物内的 `BUILD_COMMIT`/`BUILD_REF` 由构建钩子从该构建输入写入（git 查询固定钉在源码根目录，与构建命令的当前工作目录无关），运行时不访问 git；
 3. 出包后立刻 `sha256sum dist/*.whl dist/*.zip`，把**每个资产的 SHA256 与对应 tag/commit 一起写进该 tag 的 Release 说明**——资产摘要不可能嵌进资产自身，这层对应关系只存在于 Release 记录；
 4. 已发布资产不可变：不重打同版本覆盖用户正在校验的包；新构建身份走新 tag/补丁版；
 5. 回滚 SOP：先对候选资产 `sha256sum` 与 Release 记录核对，再按记录的 commit/tag 切代码树——只按"0.9.0"版本号切树不可接受，同版本号可能对应不同 commit。
