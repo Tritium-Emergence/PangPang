@@ -285,6 +285,12 @@ workspace = C:\Work
 一次成功的 version probe 只证明 binary 可见，不等于登录、权限、写文件都正确。必须用小任务做真实 execution acceptance。
 
 
+### connector 主机的 operator 注册入口
+
+对话式 onboarding 之外，operator 有直接注册入口：Web 设备页会列出 connector 主机上**已探测未注册**的 CLI，点"注册执行器"即创建 setup_request；等价 HTTP 入口为 `POST /api/v1/setup/request`，body `{host_id, action:"configure", adapter, cwd?, auth?}`（凭据录入用 `action:"credential", installation_id`）。请求进入与对话式路径相同的批准队列：operator 在待批准面板确认（endpoint 在批准时提供），设备执行 configure 并回报落库。
+
+SIS 边界不变：argv 仍由 `ADAPTER_CATALOG` 生成，该入口不接收模型提案，也不开放任何 argv 字段。`auth:"api_key"` 的注册落库后保持停用，需再发起 credential 请求在专用窗口录入密钥。
+
 ### Adapter catalog / use_when
 
 当前执行器 command/default 定义集中在 operator-owned `ADAPTER_CATALOG`。不要通过聊天让模型登记任意 argv。

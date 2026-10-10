@@ -135,7 +135,7 @@ export default {
   },
   hosts: {
     connectWorkspace: 'Connect your workspace',
-    connectWorkspaceDesc: 'After the connector is paired, the computer appears automatically. You can then detect and configure its executors.',
+    connectWorkspaceDesc: 'After the connector is paired, the computer appears automatically. Detected executors can be registered from here; each registration completes once the operator approves it.',
     noModelSet: 'No model set', endpointConfigured: 'Endpoint configured', endpointUnconfigured: 'Endpoint not configured',
     setGlobalModel: 'Set global chat model', connectNewComputer: 'Connect new computer', myComputers: 'My computers',
     deviceRevoked: 'Device revoked', online: '● Online', offline: '○ Offline / awaiting connection', localDevice: '● Local',
@@ -143,7 +143,7 @@ export default {
     revokeConfirm: "Revoke this device's cloud access? Running tasks will not be force-stopped.", revokeFailed: 'Revoke failed',
     revokeDevice: 'Revoke device access', probed: 'Detected · {{version}}', versionUnregistered: 'Version not registered',
     unavailable: 'Unavailable · {{reason}}', notProbed: 'Not checked', probeInstall: 'Check installation',
-    noExecutors: 'No executors registered yet', pairDialogTitle: 'Connect a computer',
+    noExecutors: 'No executors registered yet', pairDialogTitle: 'Connect a computer',    unregisteredExecutors: 'Detected, not registered', registerExecutor: 'Register executor', registerPending: 'Registration pending approval',
     pairDialogDesc: 'Start the connector on that computer and fill in the cloud URL, allowed working directories, and the pairing code below.',
     pairCodeHint: 'The pairing code is valid for ten minutes and for one device only.', close: 'Close', unsavedChanges: 'Unsaved changes',
     invalidConcurrency: 'Concurrency must be 1–16.', invalidTimeout: 'Timeout must be 30–86400 seconds.',

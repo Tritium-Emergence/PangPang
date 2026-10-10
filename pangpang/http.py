@@ -447,6 +447,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     self.respond(service.onboarding.revoke_model_key()); return
                 if parts == ["setup", "pairing"]:
                     self.respond(service.onboarding.pairing_code()); return
+                if parts == ["setup", "request"]:
+                    self.respond(service.onboarding.operator_request(body)); return
                 if len(parts) == 3 and parts[0] == "setup":
                     if parts[2] == "approve":
                         self.respond(service.onboarding.approve(parts[1], body)); return

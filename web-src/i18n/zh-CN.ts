@@ -135,7 +135,7 @@ export default {
   },
   hosts: {
     connectWorkspace: '连接你的工作空间',
-    connectWorkspaceDesc: '客户端配对后电脑会自动出现，随后可按设备探测并配置各执行器。',
+    connectWorkspaceDesc: '客户端配对后电脑会自动出现，可按设备探测执行器；已探测未注册的执行器可发起注册，批准后完成配置。',
     noModelSet: '未设置模型', endpointConfigured: '已配置地址', endpointUnconfigured: '未配置地址',
     setGlobalModel: '设置全局对话模型', connectNewComputer: '连接新电脑', myComputers: '我的电脑',
     deviceRevoked: '设备已撤销', online: '● 在线', offline: '○ 离线 / 等待连接', localDevice: '● 本机',
@@ -144,6 +144,7 @@ export default {
     revokeDevice: '撤销设备连接', probed: '已探测 · {{version}}', versionUnregistered: '版本未登记',
     unavailable: '不可用 · {{reason}}', notProbed: '未探测', probeInstall: '探测安装',
     noExecutors: '尚未登记执行器', pairDialogTitle: '连接一台电脑',
+    unregisteredExecutors: '已探测未注册', registerExecutor: '注册执行器', registerPending: '注册请求待批准',
     pairDialogDesc: '在该电脑启动连接器，填写云端地址、允许使用的工作目录和下面的配对码。',
     pairCodeHint: '配对码十分钟有效，仅用于一台设备。', close: '关闭', unsavedChanges: '有未保存的修改',
     invalidConcurrency: '并行数须为 1–16。', invalidTimeout: '超时须为 30–86400 秒。',

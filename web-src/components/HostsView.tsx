@@ -40,6 +40,14 @@ export function HostsView({store}: {store: Store}) {
           const statusText = h.transport === 'connector'
             ? (device?.revoked ? t('hosts.deviceRevoked'): (device?.online ? t('hosts.online'): t('hosts.offline')))
 : t('hosts.localDevice');
+          const inventory = h.transport === 'connector'
+            ? (((snap.setup.inventory || []) as any[]).find((x) => x.id === h.id)?.items || []) as any[]
+: [];
+          const registered = new Set(insts.map((e) => String(e.adapter || '')));
+          const unregistered = inventory.filter((x) => x.adapter && !registered.has(String(x.adapter)));
+          const pendingAdapters = new Set((snap.setup.requests || [])
+            .filter((r) => r.host_id === h.id && ['needs_approval', 'configuring'].includes(r.status))
+            .map((r) => String((r.proposal || {}).adapter || '')));
           return (
             <section key={h.id} className="device-section rounded-xl border border-line bg-raised p-4">
               <div className="device-head flex items-start justify-between gap-3">
@@ -73,6 +81,27 @@ export function HostsView({store}: {store: Store}) {
 );
                 }): <p className="text-sm text-muted">{t('hosts.noExecutors')}</p>}
               </div>
+              {unregistered.length ? (
+                <div className="mt-2">
+                  <p className="text-xs font-medium text-muted">{t('hosts.unregisteredExecutors')}</p>
+                  <div className="mt-1 grid grid-cols-1 gap-2 lg:grid-cols-2">
+                    {unregistered.map((x) => (
+                      <div key={String(x.adapter)} className="panel rounded-lg border border-dashed border-line p-3">
+                        <h4 className="text-sm font-medium">{String(x.adapter)}</h4>
+                        <p className="text-xs text-muted">{String(x.version || t('hosts.versionUnregistered'))}</p>
+                        {pendingAdapters.has(String(x.adapter)) ? (
+                          <p className="mt-1 text-xs text-warn">{t('hosts.registerPending')}</p>
+): (
+                          <button className="mt-1 text-xs text-brand" onClick={async () => {
+                            try { await api('setup/request', {host_id: h.id, action: 'configure', adapter: String(x.adapter)}); await store.refresh(); }
+                            catch (err: any) { store.setNotice(err?.message); }
+                          }}>{t('hosts.registerExecutor')}</button>
+)}
+                      </div>
+))}
+                  </div>
+</div>
+): null}
             </section>
 );
         })}

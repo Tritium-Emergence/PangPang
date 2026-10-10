@@ -229,6 +229,34 @@ class Onboarding:
                   "expires": time.time() + 3600})
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
+    def operator_request(self, body):
+        host_id = body.get("host_id")
+        if self.s.execution.hosts.get(host_id, {}).get("transport") != "connector":
+            raise Fault("connector_host_required")
+        action = body.get("action", "configure")
+        if action not in {"configure", "credential", "delete_credential"}:
+            raise Fault("invalid_setup_action")
+        if action == "configure":
+            if body.get("adapter") not in ADAPTER_CATALOG:
+                raise Fault("adapter_required")
+            proposal = {"action": "configure", "adapter": body["adapter"],
+                        "auth": body.get("auth", "existing"), "endpoint": "", "endpoint_source": "operator"}
+            if body.get("cwd"):
+                proposal["cwd"] = body["cwd"]
+            status = "needs_approval"
+        else:
+            inst = next((i for i in self._config().get("installations", [])
+                         if i["id"] == body.get("installation_id")), {})
+            if inst.get("host_id") != host_id:
+                raise Fault("installation_host_mismatch")
+            proposal = dict(body, expected_policy_digest=self.store.get("probe", inst["id"])["policy_digest"],
+                            endpoint=inst.get("endpoint", ""))
+            status = "needs_secret" if action == "credential" else "needs_approval"
+        req = self.store.put("setup_request", {"id": uid("setup"), "host_id": host_id, "bot_id": None,
+                  "work_id": None, "origin": "operator", "proposal": proposal, "status": status,
+                  "expires": time.time() + 3600})
+        return {"request_id": req["id"], "status": req["status"], "yielded": True}
+
     def checked_request(self, identity, status):
         req = self.store.get("setup_request", identity)
         if req["status"] != status or req["expires"] < time.time():
@@ -382,9 +410,12 @@ class Onboarding:
                 self.store.put("probe", dict(probe, id=item["id"], at=time.time()))
                 safe["installation"] = item
                 if req and payload.get("auth") == "api_key" and cmd["action"] == "configure":
-                    self.request(req["bot_id"], req["work_id"], {"action": "credential",
-                                 "host_id": cmd["host_id"], "installation_id": item["id"]})
-                    safe["next"] = "在专用窗口输入密钥"
+                    if req.get("bot_id"):
+                        self.request(req["bot_id"], req["work_id"], {"action": "credential",
+                                     "host_id": cmd["host_id"], "installation_id": item["id"]})
+                        safe["next"] = "在专用窗口输入密钥"
+                    else:
+                        safe["next"] = "密钥尚未录入：该执行器已注册但保持停用，请创建凭据录入请求完成录入"
             if req:
                 req["status"] = "failed" if safe.get("error") else "done"
                 self.store.put("setup_request", req)
