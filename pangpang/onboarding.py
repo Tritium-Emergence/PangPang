@@ -230,16 +230,35 @@ class Onboarding:
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
     def operator_request(self, body):
+        action = body.get("action", "configure")
+        allowed = {"configure": {"host_id", "action", "adapter", "cwd", "auth"},
+                   "credential": {"host_id", "action", "installation_id"},
+                   "delete_credential": {"host_id", "action", "installation_id"}}
+        if action not in allowed:
+            raise Fault("invalid_setup_action")
+        if set(body) - allowed[action]:
+            raise Fault("invalid_setup_request_field", 400)
         host_id = body.get("host_id")
         if self.s.execution.hosts.get(host_id, {}).get("transport") != "connector":
             raise Fault("connector_host_required")
-        action = body.get("action", "configure")
-        if action not in {"configure", "credential", "delete_credential"}:
-            raise Fault("invalid_setup_action")
         if action == "configure":
-            if body.get("adapter") not in ADAPTER_CATALOG:
+            adapter = body.get("adapter")
+            if adapter not in ADAPTER_CATALOG:
                 raise Fault("adapter_required")
-            proposal = {"action": "configure", "adapter": body["adapter"],
+            if body.get("auth", "existing") not in {"existing", "api_key"}:
+                raise Fault("invalid_setup_auth", 400)
+            try:
+                inventory = self.store.get("inventory", host_id)
+            except Fault as error:
+                if error.status != 404:
+                    raise
+                inventory = None
+            discovered = {str(x.get("adapter")) for x in (inventory or {}).get("items", [])}
+            if adapter not in discovered:
+                raise Fault("adapter_not_in_inventory",
+                            advice="only adapters the device itself reported in its latest "
+                                   "discovery can be registered; run executor discovery on that computer first")
+            proposal = {"action": "configure", "adapter": adapter,
                         "auth": body.get("auth", "existing"), "endpoint": "", "endpoint_source": "operator"}
             if body.get("cwd"):
                 proposal["cwd"] = body["cwd"]

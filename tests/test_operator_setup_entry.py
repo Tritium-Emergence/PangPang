@@ -23,7 +23,7 @@ class OperatorSetupEntryTests(unittest.TestCase):
         self.addCleanup(self.app.store.close)
         self.addCleanup(self.tmp.cleanup)
 
-    def paired_host(self):
+    def paired_host(self, discover_adapters=("codex",)):
         data = self.root.parent / "device"
         data.mkdir(exist_ok=True)
         store = Store(data / "connector.db")
@@ -36,7 +36,13 @@ class OperatorSetupEntryTests(unittest.TestCase):
         code = self.app.onboarding.pairing_code()["code"]
         pair = self.app.onboarding.pair({"code": code, "instance_id": identity, "public_key": pub,
                                          "name": "PC", "os": "Linux"})
+        if discover_adapters:
+            self.discover(pair["host_id"], *discover_adapters)
         return pair["host_id"]
+
+    def discover(self, host_id, *adapters):
+        self.app.store.put("inventory", {"id": host_id, "items": [
+            {"adapter": a, "binary": a, "version": "1.0"} for a in adapters]})
 
     def command_for(self, request_id):
         return [c for c in self.app.store.find("command", action="configure")
@@ -91,6 +97,39 @@ class OperatorSetupEntryTests(unittest.TestCase):
             self.app.onboarding.operator_request({"host_id": host_id, "action": "bogus"})
         self.assertEqual(ctx.exception.code, "invalid_setup_action")
         self.assertEqual(self.app.store.find("setup_request"), [])
+
+    def test_field_set_and_inventory_gates(self):
+        host_id = self.paired_host()
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                  "adapter": "codex", "argv": ["--evil"]})
+        self.assertEqual(ctx.exception.code, "invalid_setup_request_field")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                  "adapter": "codex", "extra_argv": ["--x"]})
+        self.assertEqual(ctx.exception.code, "invalid_setup_request_field")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "credential",
+                                                  "installation_id": "codex-" + host_id, "env": {}})
+        self.assertEqual(ctx.exception.code, "invalid_setup_request_field")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                  "adapter": "codex", "auth": "oauth"})
+        self.assertEqual(ctx.exception.code, "invalid_setup_auth")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                  "adapter": "claude-code"})
+        self.assertEqual(ctx.exception.code, "adapter_not_in_inventory")
+        other_host = self.paired_host(())
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": other_host, "action": "configure",
+                                                  "adapter": "codex"})
+        self.assertEqual(ctx.exception.code, "adapter_not_in_inventory")
+        self.discover(other_host, "claude-code")
+        r = self.app.onboarding.operator_request({"host_id": other_host, "action": "configure",
+                                                  "adapter": "claude-code"})
+        self.assertEqual(r["status"], "needs_approval")
+        self.assertEqual(self.app.store.find("setup_request", status="needs_approval")[0]["host_id"], other_host)
 
     def test_credential_request_for_landed_installation_opens_secret_window(self):
         host_id = self.paired_host()
@@ -174,6 +213,8 @@ class OperatorSetupHttpTests(unittest.TestCase):
         code = self.app.onboarding.pairing_code()["code"]
         pair = self.app.onboarding.pair({"code": code, "instance_id": identity, "public_key": pub,
                                          "name": "PC", "os": "Linux"})
+        self.app.store.put("inventory", {"id": pair["host_id"], "items": [
+            {"adapter": "codex", "binary": "codex", "version": "1.0"}]})
         return pair["host_id"]
 
     def test_unauthenticated_rejected_and_operator_flow_over_http(self):
@@ -196,6 +237,28 @@ class OperatorSetupHttpTests(unittest.TestCase):
         self.assertIn(created["request_id"], [q["id"] for q in snap["setup"]["requests"]])
         with self.request("setup/" + created["request_id"] + "/approve", {"endpoint": ""}) as r:
             self.assertTrue(json.load(r)["accepted"])
+
+    def test_idempotency_key_required_replay_and_conflict(self):
+        host_id = self.paired_host()
+        self.login()
+        body = {"host_id": host_id, "action": "configure", "adapter": "codex"}
+        anonymous = urllib.request.Request(self.origin + "/api/v1/setup/request",
+                                           data=json.dumps(body).encode(),
+                                           headers={"Origin": self.origin, "Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as nokey:
+            self.client.open(anonymous)
+        self.assertEqual(nokey.exception.code, 400)
+        self.assertEqual(self.app.store.find("setup_request"), [])
+        with self.request("setup/request", body, key="idem-1") as r:
+            created = json.load(r)
+        with self.request("setup/request", body, key="idem-1") as r:
+            replay = json.load(r)
+        self.assertEqual(replay["request_id"], created["request_id"])
+        self.assertEqual(len(self.app.store.find("setup_request")), 1)
+        with self.assertRaises(urllib.error.HTTPError) as conflict:
+            self.request("setup/request", dict(body, adapter="codex", cwd="/x"), key="idem-1")
+        self.assertEqual(conflict.exception.code, 409)
+        self.assertEqual(len(self.app.store.find("setup_request")), 1)
 
 
 if __name__ == "__main__":

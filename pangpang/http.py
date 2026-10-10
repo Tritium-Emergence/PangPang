@@ -447,8 +447,6 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     self.respond(service.onboarding.revoke_model_key()); return
                 if parts == ["setup", "pairing"]:
                     self.respond(service.onboarding.pairing_code()); return
-                if parts == ["setup", "request"]:
-                    self.respond(service.onboarding.operator_request(body)); return
                 if len(parts) == 3 and parts[0] == "setup":
                     if parts[2] == "approve":
                         self.respond(service.onboarding.approve(parts[1], body)); return
@@ -461,6 +459,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 def action():
                     if parts == ["settings"]:
                         raise Fault("use_guided_model_and_conversational_setup", 410)
+                    if parts == ["setup", "request"]:
+                        return service.onboarding.operator_request(body)
                     if len(parts) == 3 and parts[0] == "devices" and parts[2] == "revoke":
                         return service.broker.revoke(parts[1])
                     if len(parts) == 3 and parts[0] == "hosts" and parts[2] == "execution-level":
