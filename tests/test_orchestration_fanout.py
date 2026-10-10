@@ -1,10 +1,11 @@
-"""Regression tests for the multi-task orchestration semantics behind the
-manual A/B split (issue #9): a dependent chain must complete with real
-artifacts and a real handoff; cancelling one of two concurrent independent
-tasks must not disturb the other; and tasks that share a workspace (or one
-installation at max_concurrency) serialize by design instead of deadlocking.
-These encode the product guarantees the 600s manual window kept conflating
-with "parallel fan-out", using fixture executors only."""
+"""Regression tests for the multi-task control-plane semantics behind the
+manual A/B split (issue #9): a sequential artifact-ref chain must bind each
+consumer's inputs to the producer's registered artifact (read across distinct
+workspaces, never from a shared cwd) and echo every join back; cancelling one
+of two concurrent independent tasks must not disturb the other; and tasks
+that share a workspace (or one installation at max_concurrency) serialize by
+design instead of deadlocking. These pin control-plane invariants only: the
+A→B→C ordering itself is a planner decision and is not covered here."""
 import sys
 import tempfile
 import time
@@ -17,6 +18,17 @@ from pangpang.service import Service
 
 def _stub(body):
     return [sys.executable, "-c", body]
+
+
+def _reads_bound_input(name, suffix):
+    return (
+        "import json, pathlib, sys; "
+        "prompt = sys.stdin.read(); "
+        "start = prompt.index('Input files: ') + len('Input files: '); "
+        "end = prompt.index('\\nDelivery note'); "
+        "inputs = json.loads(prompt[start:end]); "
+        "data = pathlib.Path(inputs[0]['path']).read_text(); "
+        "pathlib.Path(%r).write_text(data + %r); print('done %s')" % (name, "|" + suffix, name))
 
 
 class OrchestrationFanoutTests(unittest.TestCase):
@@ -47,6 +59,18 @@ class OrchestrationFanoutTests(unittest.TestCase):
                                 dict(base, id="inst-b", cwd=str(cwd_b))]
         return cfg
 
+    def _triple_cfg(self):
+        cfg = self._base_cfg()
+        base = cfg["installations"][0]
+        dirs = {}
+        for name in ("a", "b", "c"):
+            dirs[name] = self.root / name
+            dirs[name].mkdir()
+        cfg["installations"] = [dict(base, id="inst-a", cwd=str(dirs["a"])),
+                                dict(base, id="inst-b", cwd=str(dirs["b"])),
+                                dict(base, id="inst-c", cwd=str(dirs["c"]))]
+        return cfg, dirs
+
     def _argv(self, installation_id, body):
         self.app.execution.installations[installation_id]["argv"] = _stub(body)
 
@@ -76,30 +100,31 @@ class OrchestrationFanoutTests(unittest.TestCase):
     def _statuses(self, task_ids):
         return [self.app.store.get("task", tid)["status"] for tid in task_ids]
 
-    def test_dependent_chain_completes_with_real_artifacts_and_handoff(self):
-        self._boot(self._base_cfg())
-        self._argv("codex-local",
+    def test_sequential_artifact_ref_handoff_binds_inputs_across_workspaces(self):
+        cfg, dirs = self._triple_cfg()
+        self._boot(cfg)
+        self._argv("inst-a",
                    "import pathlib; pathlib.Path('research.txt').write_text('RESEARCH'); print('research done')")
-        a = self._submit("chain-a", "research", outputs=["research.txt"])
+        a = self._submit("chain-a", "research", installation_id="inst-a", outputs=["research.txt"])
         self.assertEqual(self._drain([a])[0]["status"], "succeeded")
         art_a = self.app.store.find("artifact", task_id=a)[0]
-        self.assertEqual((self.root / "research.txt").read_text(), "RESEARCH")
+        self.assertEqual((dirs["a"] / "research.txt").read_text(), "RESEARCH")
 
-        self._argv("codex-local",
-                   "import pathlib; pathlib.Path('guide.txt').write_text(pathlib.Path('research.txt').read_text() + '|GUIDE'); print('guide done')")
-        b = self._submit("chain-b", "guide", outputs=["guide.txt"], refs=[art_a["id"]])
+        self._argv("inst-b", _reads_bound_input("guide.txt", "GUIDE"))
+        b = self._submit("chain-b", "guide", installation_id="inst-b",
+                         outputs=["guide.txt"], refs=[art_a["id"]])
         self.assertEqual(self._drain([b])[0]["status"], "succeeded")
         task_b = self.app.store.get("task", b)
         self.assertEqual(task_b["inputs"],
                          [{"artifact_id": art_a["id"], "path": art_a["path"], "digest": art_a["digest"]}])
         art_b = self.app.store.find("artifact", task_id=b)[0]
-        self.assertEqual((self.root / "guide.txt").read_text(), "RESEARCH|GUIDE")
+        self.assertEqual((dirs["b"] / "guide.txt").read_text(), "RESEARCH|GUIDE")
 
-        self._argv("codex-local",
-                   "import pathlib; pathlib.Path('checklist.txt').write_text(pathlib.Path('guide.txt').read_text() + '|CHECK'); print('checklist done')")
-        c = self._submit("chain-c", "checklist", outputs=["checklist.txt"], refs=[art_b["id"]])
+        self._argv("inst-c", _reads_bound_input("checklist.txt", "CHECK"))
+        c = self._submit("chain-c", "checklist", installation_id="inst-c",
+                         outputs=["checklist.txt"], refs=[art_b["id"]])
         self.assertEqual(self._drain([c])[0]["status"], "succeeded")
-        self.assertEqual((self.root / "checklist.txt").read_text(), "RESEARCH|GUIDE|CHECK")
+        self.assertEqual((dirs["c"] / "checklist.txt").read_text(), "RESEARCH|GUIDE|CHECK")
 
         self.assertEqual(len(self.app.store.find("artifact")), 3)
         for tid in (a, b, c):
