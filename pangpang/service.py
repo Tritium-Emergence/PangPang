@@ -23,6 +23,7 @@ from .broker import Broker, global_profile
 from .store import Fault, Store, digest, encode, uid, os_family
 from .vault import secure_directory
 from .logs import get_logger
+from .env_compat import env_value
 from .replies import reply_text, reply_delta_text, history_reply_text
 
 log = get_logger("route")
@@ -4420,7 +4421,7 @@ class Service:
         q = str(query or "").strip()
         if not q:
             return {"error": "empty_query"}
-        forced = os.environ.get("PANGPANG_SEARCH_PROVIDER", "").strip().lower()
+        forced = env_value("PANGPANG_SEARCH_PROVIDER", "").strip().lower()
         if forced in {"off", "none", "disabled"}:
             chain = ["tavily"] if os.environ.get("TAVILY_API_KEY") else []
         elif forced in {"tavily", "bing", "duckduckgo"}:

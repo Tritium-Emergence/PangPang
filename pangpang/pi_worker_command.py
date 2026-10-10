@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+from .env_compat import env_value, has_env
+
 WORKER_ENV = "PANGPANG_PI_WORKER" # compiled single-file (bun --compile); preview
 NODE_BUNDLE_ENV = "PANGPANG_PI_NODE_BUNDLE" # Node 24 runtime + bundle
 BUN_BUNDLE_ENV = "PANGPANG_PI_BUN_BUNDLE" # pinned packaged Bun runtime + worker bundle; formal shape
@@ -38,7 +40,7 @@ def release_bundle_dir():
 
 
 def compiled_worker():
-    value = os.environ.get(WORKER_ENV)
+    value = env_value(WORKER_ENV, None)
     if value is None:
         return None
     path = Path(value)
@@ -50,7 +52,7 @@ def compiled_worker():
 
 
 def _node_bundle_invocation():
-    directory = os.environ.get(NODE_BUNDLE_ENV)
+    directory = env_value(NODE_BUNDLE_ENV, None)
     if directory is None:
         return None
     root = Path(directory)
@@ -90,7 +92,7 @@ def _bun_bundle_from_dir(root, incomplete_code):
 
 def _bun_bundle_invocation():
     """Operator-selected packaged Bun bundle (dev only). The formal shape."""
-    directory = os.environ.get(BUN_BUNDLE_ENV)
+    directory = env_value(BUN_BUNDLE_ENV, None)
     if directory is None:
         return None
     root = Path(directory)
@@ -133,7 +135,7 @@ def _packaged_invocation():
     Node default (source checkout only). At most one env selector may be set; an explicit
     selector overrides release auto-discovery (dev only). cwd is None unless the shape
     pins it (Bun bundle)."""
-    if len([name for name in _SELECTORS if name in os.environ]) > 1:
+    if len([name for name in _SELECTORS if has_env(name)]) > 1:
         raise ValueError("pi_worker_conflicting_selection")
     for resolver in (_bun_bundle_invocation, _node_bundle_invocation):
         inv = resolver()

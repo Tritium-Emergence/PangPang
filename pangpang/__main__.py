@@ -13,6 +13,7 @@ from .runtime import Runtime
 from .service import Service
 from .vault import secure_directory
 from .logs import configure_logging, get_logger
+from .env_compat import env_value
 
 # main() reads sys.platform, and tests replace this module's sys binding with a
 # platform-only stand-in. Keep a reference to the real module for stdout.
@@ -156,9 +157,9 @@ def main():
         log.info("POSIX personal start omitted --deployment-level; using L0")
     if args.host not in LOOPBACK_HOSTS:
         parser.error("Coordinator must bind to loopback; expose it only through a trusted HTTPS reverse proxy")
-    token = os.environ.get("PANGPANG_TOKEN", "")
+    token = env_value("PANGPANG_TOKEN", "")
     if len(token) < 24:
-        parser.error("Set PANGPANG_TOKEN to at least 24 random characters")
+        parser.error("Set PANGPANG_TOKEN (or legacy XIAN_PANGPANG_TOKEN) to at least 24 random characters")
     data = secure_directory(args.data)
     try:
         lock = ProcessLock(data / "coordinator.lock")

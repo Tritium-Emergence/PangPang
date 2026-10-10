@@ -2317,7 +2317,8 @@ def supervise(directory):
             cwd_before = None
         env_keys = {"PATH", "HOME", "USERPROFILE", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL"}
         env_keys.update(spec.get("env_allowlist", []))
-        env = {key: value for key, value in os.environ.items() if key in env_keys and key != "PANGPANG_TOKEN"}
+        env = {key: value for key, value in os.environ.items()
+               if key in env_keys and key not in {"PANGPANG_TOKEN", "XIAN_PANGPANG_TOKEN"}}
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
         env.update(spec.get("extra_env", {}))
         # Set XPP_OUTPUT_DIR *after* extra_env so a stray same-named config entry

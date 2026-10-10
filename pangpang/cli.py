@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .env_compat import env_value
+
 
 def source_root():
     return Path(__file__).resolve().parents[1]
@@ -59,14 +61,14 @@ def resolve_access_token(data, show_access_key, parser):
     # final component unresolved until secure_directory has checked symlink/reparse
     # redirection; only then canonicalize for subsequent use.
     data = secure_directory(data)
-    token = os.environ.get("PANGPANG_TOKEN", "")
+    token = env_value("PANGPANG_TOKEN", "")
     if token:
         return token
     vault = Vault(data / "vault")
     try:
         if not vault.has("web-access-token"):
             if not sys.stdout.isatty():
-                parser.error("首次非交互启动请设置 PANGPANG_TOKEN；访问密钥不写入服务日志")
+                parser.error("首次非交互启动请设置 PANGPANG_TOKEN（旧名 XIAN_PANGPANG_TOKEN 仍兼容一个版本）；访问密钥不写入服务日志")
             vault.set("web-access-token", secrets.token_urlsafe(32))
             show_access_key = True
         token = vault.get("web-access-token")

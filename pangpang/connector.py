@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__
+from .env_compat import env_value, with_legacy_names
 from .__main__ import ProcessLock
 from .execution import Execution
 from .runner import checked, receipt_proof_ok
@@ -70,9 +71,10 @@ class Connector:
             raise Fault("connector_requires_bare_origin")
         self.endpoint = endpoint + "/api/v1/connector/sync"
         self.credential_env = config.get("credential_env", "PANGPANG_DEVICE_TOKEN")
+        blocked_env = with_legacy_names({self.credential_env, "PANGPANG_TOKEN"})
         for installation in self.execution.installations.values():
             installation["env_allowlist"] = [k for k in installation.get("env_allowlist", [])
-                                            if k not in {self.credential_env, "PANGPANG_TOKEN"}]
+                                            if k not in blocked_env]
 
     def close(self):
         self.store.close()
@@ -86,7 +88,7 @@ class Connector:
             except Exception:
                 raise Fault("device_credential_missing") from None
         else:
-            token = os.environ.get(self.credential_env, "")
+            token = env_value(self.credential_env, "")
         if len(token) < 32:
             raise Fault("device_credential_missing")
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + token,

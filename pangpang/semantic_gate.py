@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from .logs import get_logger
+from .env_compat import env_value, with_legacy_names
 from .store import Fault, assert_no_txn_io, digest, encode
 
 
@@ -124,7 +125,7 @@ def secret_env_names(config):
             for item in value:
                 walk(item)
     walk(config)
-    return tuple(sorted(names))
+    return tuple(sorted(with_legacy_names(names)))
 
 
 def redact_known_secrets(env_names, value):
@@ -500,7 +501,7 @@ class SemanticGate:
         # Operator-overridable endpoint (SECURITY.md egress inventory): self-hosted
         # or proxied deployments set PANGPANG_SEMANTIC_GATE_URL instead of patching
         # the source. An empty value keeps the default.
-        self.endpoint = os.environ.get("PANGPANG_SEMANTIC_GATE_URL") or self.ENDPOINT
+        self.endpoint = env_value("PANGPANG_SEMANTIC_GATE_URL") or self.ENDPOINT
         cfg = service.config.get("semantic_gate") or {}
         if not isinstance(cfg, dict):
             cfg = {}

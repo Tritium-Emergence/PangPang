@@ -1,8 +1,9 @@
 """Lightweight logging for the coordinator. stdout only; the launcher already
 redirects stdout+stderr to a log file. No third-party deps, no rotation."""
 import logging
-import os
 import sys
+
+from .env_compat import env_value
 
 _configured = False
 
@@ -12,7 +13,7 @@ def configure_logging():
     global _configured
     if _configured:
         return
-    level_name = os.environ.get("PANGPANG_LOG_LEVEL", "INFO").upper()
+    level_name = env_value("PANGPANG_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     root = logging.getLogger("pangpang")
     root.setLevel(level)
