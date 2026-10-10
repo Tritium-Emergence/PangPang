@@ -181,6 +181,16 @@ class ZombieAutoResolveTests(unittest.TestCase):
         self.assertEqual(late["status"], "cancelled")
         self.assertTrue(late["receipt"]["auto_resolved"])
 
+    def test_late_start_enqueue_cannot_follow_the_never_enqueued_proof(self):
+        self.sync(3)
+        task, _ = self.submit("z12")
+        stale_starting = self.app.store.get("task", task["id"])
+        self.app._mark_task_unknown(task, "capability_hold_deadline")
+        self.assertEqual(self.app.broker.start(stale_starting), {"status": "start_withdrawn"})
+        self.assertTrue(self.app._auto_resolve_never_delivered(self.app.store.get("task", task["id"])))
+        self.assertEqual(self.app.broker.start(stale_starting), {"status": "start_withdrawn"})
+        self.assertEqual(self.app.store.find("command", action="start"), [])
+
     def test_operator_evidence_fault_names_requirements(self):
         task, _ = self.held_task("z9")
         self.app._mark_task_unknown(task, "capability_hold_deadline")
