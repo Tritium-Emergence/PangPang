@@ -115,6 +115,18 @@ class JevBreakerTests(unittest.TestCase):
         self.assertTrue(self.gate.continuation_breaker_open)
         self.assertEqual(opener.calls, 4)
 
+    def test_sparse_451_traffic_reaches_deterministic_after_two_fallbacks(self):
+        opener = _Opener([http_error()] * 30)
+        qualities = []
+        with patch("urllib.request.build_opener", return_value=opener):
+            for _ in range(6):
+                self.gate._continuation_open_until = time.monotonic() - 1
+                routing = self.app.resolve_continuation("bot-main", {"text": "继续旧项目"})
+                qualities.append(routing["route_quality"])
+        self.assertEqual(qualities, ["fallback", "fallback",
+                                     "deterministic", "deterministic",
+                                     "deterministic", "deterministic"])
+
     def test_breaker_open_routes_deterministic_fresh_work(self):
         self.gate._continuation_open_until = time.monotonic() + 30
         with patch("urllib.request.build_opener") as build:

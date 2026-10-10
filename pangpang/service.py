@@ -1700,6 +1700,9 @@ class Service:
             except Exception:
                 log.exception("continuation resolve failed; using bounded fallback")
             if not verdict:
+                if getattr(gate, "continuation_breaker_open", False):
+                    return dict(base, work_id=None, route_source="degraded_new",
+                                route_quality="deterministic")
                 return base
         elif gate is not None and getattr(gate, "continuation_routing", False):
             # Keyless fallback (1.0): route with the user's own configured model.
