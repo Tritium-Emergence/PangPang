@@ -91,7 +91,8 @@ python -m pangpang.cli connector \
 - **SIS 边界不变**：argv 永远由 operator 定义，模型与任何 API 都没有目录写入路径。
 - 自定义行**禁止**携带 `pinned`、`stdin_protocol`、`session_protocol`、`resume_protocol`、`interjection_tier`、`permission_bridge`、`models_json` 等内置协议/信任字段；未知字段一律拒启。自定义 CLI 只承诺通用 stdin 任务的可执行与回执，mid-turn inject、会话恢复、权限桥是内置 runner 的显式协议能力，加数据行不会自动获得。
 - 启动时严格校验（JSON 合法性、大小/条数/argv 长度上限、env 键格式、文件属主与权限）；任何违规**拒启**并指明文件、行号与字段。
-- 两端同名 adapter 的 binary/argv 漂移不会悄悄执行另一条命令：设备在派发时按既有 `policy_digest` 合同校验实际拒跑（`local_policy_changed_probe_and_resubmit`），需两端重新放置同一文件并重新探测。
+- **设备是 argv 的唯一来源**：start 下发 payload 不含 argv，connector 执行只用设备自己 installation 记录里的 argv；云端与设备 catalog 不一致不会"悄悄执行另一条命令"，也只影响云端侧调度元数据（priority/use_when/concurrency）。设备侧 installation 的任何变更由既有 `policy_digest` 合同拦截（`local_policy_changed_probe_and_resubmit`）。
+- 设备侧修改 `adapters.json` 的 argv **不影响已注册的 installation**：argv 在 configure 时已固化进 installation 记录，要重新 configure 才生效。两端目录漂移的正确处置仍是两端重新放置同一文件并重新探测/注册。
 - **删除或改名 `adapters.json` 是 fail-closed**：若存量 installation 引用自定义 adapter，服务将拒启（`invalid_adapter`，错误信息指向该文件路径）；恢复文件或移除对应 installation 即可。
 
 ## 首次启动行为
