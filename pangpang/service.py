@@ -359,6 +359,28 @@ def next_run(schedule, timezone, after):
     raise Fault("invalid_schedule_type", 400)
 
 
+# After the first start, stored settings are the live config. These two keys
+# are still taken from the startup config when it sets them; every other key
+# in that config stays ignored.
+_STARTUP_CONFIG_KEYS = ("turn_budget", "semantic_gate")
+
+
+def _take_startup_overrides(live, file_config):
+    """Copy turn_budget and semantic_gate from the startup config onto live
+    settings. Returns True when some other startup key does not match."""
+    if not isinstance(file_config, dict) or not isinstance(live, dict):
+        return False
+    for key in _STARTUP_CONFIG_KEYS:
+        if key in file_config and file_config[key] != live.get(key):
+            live[key] = copy.deepcopy(file_config[key])
+    for key, value in file_config.items():
+        if key in _STARTUP_CONFIG_KEYS:
+            continue
+        if live.get(key) != value:
+            return True
+    return False
+
+
 class Service:
     # Execution-plane liveness & observation policy.
     RECONCILE_CADENCE_S = 1.0 # active-task cheap reconcile period (spawn-free for local)
@@ -418,12 +440,18 @@ class Service:
         # Revision of settings/managed this process has published (0 = none yet).
         # Every managed-config write goes through commit_managed_config (G).
         self.config_revision = 0
+        file_config = self.config
         try:
             managed = self.store.get("settings", "managed")
             self.config, self.config_revision = managed["config"], managed["revision"]
         except Fault as error:
             if error.status != 404:
                 raise
+        else:
+            if _take_startup_overrides(self.config, file_config):
+                log.warning("startup config is not the live settings after the first start; "
+                            "only turn_budget and semantic_gate are read from it, and other keys "
+                            "stay in the stored settings")
         for profile in self.config.get("models", []):
             normalize_profile(profile)
         merge_custom_adapters(self.data / "adapters.json")
@@ -3193,7 +3221,7 @@ class Service:
         caps, out = self.capabilities(), []
         if not caps["semantic_gate_key"]:
             if self.semantic_gate.continuation_routing:
-                out.append("continuation routing disabled: TYPESAFE_API_KEY not set (every message starts a fresh Work unless the user continues one explicitly)")
+                out.append("TYPESAFE_API_KEY not set: continuation routing uses the configured local model; a local failure starts a fresh Work unless the user continues one explicitly")
             if caps["semantic_gate_mode"] == "enforce":
                 out.append("semantic gate mode=enforce without TYPESAFE_API_KEY: every guarded tool call is refused as gate_unavailable")
             if caps["task_result_gate_mode"] == "enforce":

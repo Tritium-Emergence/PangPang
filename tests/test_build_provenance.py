@@ -168,6 +168,90 @@ class CollectProvenanceTests(unittest.TestCase):
         self.assertEqual(len(build_provenance.collect_provenance(
             require=False, root=str(path))["BUILD_COMMIT"]), 40)
 
+    def test_strict_mode_accepts_gitignored_build_artifacts(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name)
+        run = _init_repo(path)
+        (path / ".gitignore").write_text("build/\n*.egg-info/\n", encoding="utf-8")
+        run("add", ".gitignore")
+        run("commit", "-qm", "ignore build artifacts")
+        (path / "build" / "lib").mkdir(parents=True)
+        (path / "build" / "lib" / "x.py").write_text("built\n", encoding="utf-8")
+        egg = path / "pangpang.egg-info"
+        egg.mkdir()
+        (egg / "PKG-INFO").write_text("Name: pangpang\n", encoding="utf-8")
+        info = build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertEqual(len(info["BUILD_COMMIT"]), 40)
+        (path / "stray.py").write_text("not a build artifact\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as raised:
+            build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertIn("untracked", str(raised.exception))
+
+    def test_repo_gitignore_covers_setuptools_artifacts(self):
+        text = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("\nbuild/\n", "\n" + text)
+        self.assertIn("*.egg-info/", text)
+
+    def _commit_version(self, path, version):
+        run = _init_repo(path)
+        package = path / "pangpang"
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            '__version__ = "%s"\n' % version, encoding="utf-8")
+        run("add", "pangpang")
+        run("commit", "-qm", "version")
+        return run
+
+    def test_strict_mode_refuses_version_tag_mismatch(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name)
+        run = self._commit_version(path, "0.9.1.dev0")
+        run("tag", "v0.9.5")
+        with self.assertRaises(SystemExit) as raised:
+            build_provenance.collect_provenance(require=True, root=str(path))
+        message = str(raised.exception)
+        self.assertIn("v0.9.5", message)
+        self.assertIn("0.9.5", message)
+        self.assertIn("0.9.1.dev0", message)
+        info = build_provenance.collect_provenance(require=False, root=str(path))
+        self.assertEqual(len(info["BUILD_COMMIT"]), 40)
+
+    def test_strict_mode_accepts_matching_version_tag(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name)
+        run = self._commit_version(path, "0.9.1.dev0")
+        run("tag", "v0.9.1.dev0")
+        info = build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertEqual(len(info["BUILD_COMMIT"]), 40)
+
+    def test_strict_mode_ignores_non_version_and_ancestor_tags(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name)
+        run = self._commit_version(path, "0.0.1")
+        run("tag", "v9.9.9")
+        run("tag", "nightly")
+        (path / "later.txt").write_text("y\n", encoding="utf-8")
+        run("add", "later.txt")
+        run("commit", "-qm", "later")
+        run("tag", "nightly-head")
+        info = build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertEqual(len(info["BUILD_COMMIT"]), 40)
+
+    def test_strict_mode_refuses_version_tag_without_package_version(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name)
+        run = _init_repo(path)
+        run("tag", "v1.2.3")
+        with self.assertRaises(SystemExit) as raised:
+            build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertIn("unreadable", str(raised.exception))
+        self.assertIn("v1.2.3", str(raised.exception))
+
     def test_collect_provenance_reads_git_head(self):
         info = build_provenance.collect_provenance(require=False)
         self.assertTrue(len(info["BUILD_COMMIT"]) == 40 or info["BUILD_COMMIT"] == "unknown")

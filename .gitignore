@@ -28,6 +28,8 @@ playwright-report/
 test-results/
 .test-tmp/
 dist/
+build/
+*.egg-info/
 
 # 发行版自带的 packaged Bun worker（打包期放入，绝不入库）
 runtime/

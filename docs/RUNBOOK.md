@@ -170,7 +170,7 @@ TYPESAFE_API_KEY
 }
 ```
 
-没有 `TYPESAFE_API_KEY` 或 `continuation_routing=false` 时，普通 Web `work_hint_id` **不会**建立 continuation：系统确定性 NEW（`route_source=unconfigured_new`）。这不算 outage，也不会触发 fallback approval。若确实需要确定性续接，应由受信内部/兼容入口使用显式 `work_id`。
+没有 `TYPESAFE_API_KEY` 且 `continuation_routing` 仍为 true（默认）时，普通 Web `work_hint_id` 由 operator 自己配置的模型在本地路由（`route_source=local_model`），不新增出站。本地路由失败、没有可路由的既有 Work，或 `continuation_routing=false` 时，系统确定性 NEW（`route_source=unconfigured_new`）。这不算 outage，也不会触发 fallback approval。若确实需要不经模型的确定性续接，应由受信内部/兼容入口使用显式 `work_id`。
 
 只有 key 已配置、但 Jev 请求失败/timeout/circuit breaker open 时，才产生 `fallback` weak route。
 
@@ -657,7 +657,7 @@ python -m pangpang.cli backup --data /absolute/data --dest /absolute/backup --co
 
 发布构建流程（commit→资产摘要的可核对关系）：
 
-1. 从明确的 tag 构建（工作树必须干净：`PANGPANG_REQUIRE_BUILD_PROVENANCE=1` 下缺失 git 信息、tracked 改动或**未追踪源文件**（`git status --porcelain -uall` 非空，`.gitignore` 排除的构建产物不计；该检查**执行失败同样拒绝出包**——只有成功且输出为空才算干净）都拒绝出包；只有本地源码开发允许 `unknown`）；
+1. 从明确的 tag 构建（工作树必须干净：`PANGPANG_REQUIRE_BUILD_PROVENANCE=1` 下缺失 git 信息、tracked 改动或**未追踪源文件**（`git status --porcelain -uall` 非空，`.gitignore` 排除的构建产物不计；该检查**执行失败同样拒绝出包**——只有成功且输出为空才算干净）都拒绝出包；只有本地源码开发允许 `unknown`。HEAD 上的版本 tag——可选前缀 `v`，其余为包版本号——必须与 `pangpang.__version__` 一致，否则拒绝出包；HEAD 上没有版本 tag 时不因此拒绝）；
 2. 构建产物内的 `BUILD_COMMIT`/`BUILD_REF` 由构建钩子从该构建输入写入（git 查询固定钉在源码根目录，与构建命令的当前工作目录无关；严格模式还要求源码根**就是仓库根本身**——`rev-parse --show-toplevel` 与源码根 realpath 不一致即拒，防止被父仓库包住时烤进父仓 HEAD），运行时不访问 git；
 3. 出包后立刻 `sha256sum dist/*.whl dist/*.zip`，把**每个资产的 SHA256 与对应 tag/commit 一起写进该 tag 的 Release 说明**——资产摘要不可能嵌进资产自身，这层对应关系只存在于 Release 记录；
 4. 已发布资产不可变：不重打同版本覆盖用户正在校验的包；新构建身份走新 tag/补丁版；
