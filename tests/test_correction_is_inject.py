@@ -121,7 +121,7 @@ class Issue147TierRoutingTests(unittest.TestCase):
         cases = (
             ("connector", "Linux", "claude-code", 3),
             ("connector", "Linux", "gemini", 3),
-            ("ssh", "Linux", "gemini", 2),
+            ("ssh", "Linux", "gemini", 3),
             ("local", "Windows", "gemini", 3),
             ("local", "Windows", "claude-code", 1),
 )

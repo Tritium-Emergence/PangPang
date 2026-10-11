@@ -709,13 +709,15 @@ class Service:
         """Startup reconcile for one active task. Runs
         OUTSIDE any store transaction so execution.poll (device I/O) is rule-B safe.
 
-        local/ssh: the runner is a DETACHED per-task supervisor — it survives a
+        local: the runner is a DETACHED per-task supervisor — it survives a
         coordinator restart, so a restart must NOT manufacture an unknown.
         The same three-state logic as the running worker
         applies: terminal receipt -> complete; attempt process alive -> keep
         running; attempt process gone without receipt -> unknown (the only
         legitimate case). A later trusted receipt still updates the task's
         terminal truth and appends a late-result (complete_task).
+        ssh: there is no runner channel. A poll fault is recorded and the
+        stored status is left unchanged — not completed and not rerun.
         connector: preserve execution and join until the next authenticated sync;
         a coordinator restart provides no evidence of the device's outcome."""
         task = self.store.get("task", task_id)

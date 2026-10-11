@@ -1245,6 +1245,36 @@ class SshRetireGateTests(unittest.TestCase):
         self.assertEqual(got["status"], "unknown")
         self.assertEqual(len(self.app.store.find("task")), 1)
 
+    def test_removed_ssh_channel_does_not_spawn_or_settle(self):
+        # Held deletion: poll/prepare/probe/cancel must not open ssh, and a
+        # running attempt stays running instead of being marked succeeded.
+        sent = self._send("channel")
+        submitted = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "live"})
+        task = self.app.store.get("task", submitted["task_id"])
+        task.update(status="running", host_id="ssh-h", installation_id="codex-ssh-h",
+                    started=time.time(), attempt_uuid="att")
+        self.app.store.put("task", task)
+        with patch("pangpang.execution.subprocess.run") as run:
+            self.app.task_step()
+            with self.assertRaises(Fault) as prepared:
+                self.app.execution.prepare(self.app.execution.hosts["ssh-h"], "/tmp/pangpang-ssh-nope")
+            with self.assertRaises(Fault) as probed:
+                self.app.execution.probe("codex-ssh-h")
+            with self.assertRaises(Fault) as cancelled:
+                self.app.execution.cancel(task)
+            run.assert_not_called()
+        self.assertEqual(prepared.exception.code, "ssh_transport_retired")
+        self.assertEqual(probed.exception.code, "ssh_transport_retired")
+        self.assertEqual(cancelled.exception.code, "ssh_transport_retired")
+        got = self.app.store.get("task", task["id"])
+        self.assertEqual(got["status"], "running")
+        self.assertEqual(got.get("last_observation_error"), "ssh_transport_retired")
+        self.assertNotIn("receipt", got)
+        self.assertEqual(self.app.execution.hosts["ssh-h"]["transport"], "ssh")
+        self.assertEqual(len(self.app.store.find("task")), 1)
+        self.assertEqual(task_interjection_tier(
+            {"adapter": "gemini"}, {"transport": "ssh", "os": "Linux"}), 3)
+
     def test_start_refuses_before_any_ssh_subprocess(self):
         with patch("pangpang.execution.subprocess.run") as run, \
                 patch.object(self.app.execution, "prepare") as prepare:

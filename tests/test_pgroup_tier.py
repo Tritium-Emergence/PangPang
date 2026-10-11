@@ -4,7 +4,6 @@ Unit checks run everywhere. Real-process checks need a POSIX host WITHOUT a usab
 systemd --user cgroup scope (otherwise the runner correctly prefers the cgroup
 tier) and are skipped elsewhere.
 """
-import base64
 import contextlib
 import errno
 import json
@@ -22,7 +21,7 @@ from unittest.mock import patch
 from test_bot_runtime import config
 from pangpang import consent, runner
 from pangpang.connector import Connector, policy_digest
-from pangpang.execution import BOOTSTRAP, Execution
+from pangpang.execution import Execution
 from pangpang.runtime import Runtime
 from pangpang.service import Service
 from pangpang.store import Fault, encode
@@ -609,27 +608,22 @@ class DetectionTests(unittest.TestCase):
 
 
 class SshBootstrapTests(unittest.TestCase):
-    def test_bootstrap_ships_linux_helper(self):
-        # a clean remote must be able to `from linux_job import...`.
+    def test_prepare_does_not_ship_a_remote_runner(self):
+        # The SSH bootstrap that wrote runner.py on the far side is gone.
+        # prepare must fail before any subprocess, and must not create the dir.
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "run"
             ex = Execution({"hosts": [{"id": "s", "transport": "ssh", "os": "Linux", "target": "u@h",
                                        "runner_root": "/srv/xpp", "allowed_roots": ["/srv/w"]}],
                             "installations": []}, Path(tmp) / "data")
-            sent = {}
-            with patch.object(Execution, "_run", staticmethod(lambda argv, payload=None: sent.update(payload=payload))):
-                ex.prepare(ex.hosts["s"], str(target), {"execution_id": "x"})
-            payload = sent["payload"]
-            self.assertIn("class LinuxJob", payload["linux_job"])
-            self.assertIn("class Job", payload["windows_job"])
-            # Execute the real bootstrap locally against a fresh directory.
-            bootstrap = "import base64;exec(base64.b64decode('" + base64.b64encode(BOOTSTRAP.encode()).decode() + "'))"
-            subprocess.run([sys.executable, "-c", bootstrap], input=encode(payload).encode(), check=True,
-                           stdout=subprocess.DEVNULL)
-            for name in ("runner.py", "windows_job.py", "linux_job.py", "spec.json"):
-                self.assertTrue((target / name).is_file(), name)
-            probe = subprocess.run([sys.executable, "-c", "import linux_job, runner"], cwd=target)
-            self.assertEqual(probe.returncode, 0)
+            with patch.object(Execution, "_run") as run, \
+                    patch("pangpang.execution.subprocess.run") as spawned:
+                with self.assertRaises(Fault) as caught:
+                    ex.prepare(ex.hosts["s"], str(target), {"execution_id": "x"})
+                self.assertEqual(caught.exception.code, "ssh_transport_retired")
+                run.assert_not_called()
+                spawned.assert_not_called()
+            self.assertFalse(target.exists())
 
 
 class ConsentToolTests(unittest.TestCase):
