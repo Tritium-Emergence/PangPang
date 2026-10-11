@@ -139,6 +139,9 @@ ROUTE_ERROR = {
     "installation_disabled": "executor_disabled",
     "control_only_no_local_executor": "requested_executor_not_available",
     "host_os_unverified": "requested_executor_not_available",
+    # SSH is retired as an execution transport. The business code tells the
+    # planner the task did not move to local or Connector.
+    "ssh_transport_retired": "ssh_executor_retired",
 }
 
 # An ssh host with an unknown/blank OS is rejected at route/start/config: windows()
@@ -706,13 +709,16 @@ class Service:
         """Startup reconcile for one active task. Runs
         OUTSIDE any store transaction so execution.poll (device I/O) is rule-B safe.
 
-        local/ssh: the runner is a DETACHED per-task supervisor — it survives a
+        local: the runner is a DETACHED per-task supervisor — it survives a
         coordinator restart, so a restart must NOT manufacture an unknown.
         The same three-state logic as the running worker
         applies: terminal receipt -> complete; attempt process alive -> keep
         running; attempt process gone without receipt -> unknown (the only
         legitimate case). A later trusted receipt still updates the task's
         terminal truth and appends a late-result (complete_task).
+        ssh: there is no runner channel. ssh_transport_retired quarantines the
+        attempt as unknown. It is not completed and not rerun; an operator
+        receipt is still required to settle it.
         connector: preserve execution and join until the next authenticated sync;
         a coordinator restart provides no evidence of the device's outcome."""
         task = self.store.get("task", task_id)
@@ -746,6 +752,8 @@ class Service:
         try:
             receipt = self.execution.poll(task, tail=True)
         except Fault as error:
+            if self._ssh_channel_gone(task, error):
+                return
             self._record_observation(task, "poll", error.code)
             return
         self._apply_observation(task, receipt)
@@ -1389,6 +1397,7 @@ class Service:
                 "execution_id": task["execution_id"], "spec_digest": task["spec_digest"]})
             return
         task["status"] = "cancel_requested"
+        task["cancel_requested"] = True
         self.store.put("task", task)
 
     def _withdraw_exchange_target(self, exchange_id):
@@ -3251,8 +3260,10 @@ class Service:
                     "在云端用已认证的操作员身份为该设备设 execution_level=L0"
                     "（POST /api/v1/hosts/{host_id}/execution-level，{\"level\":\"L0\"}），"
                     "只放行这一台设备，不必改动整个云端的部署等级。若该设备用进程组档"
-                    "（posix-pgroup-cooperative，macOS/无 cgroup 的 Linux），还需在设备本机"
-                    "运行 python -m pangpang.consent accept 记录风险同意（双重确认）。见 SECURITY.md。")
+                    "（posix-pgroup-cooperative，macOS/无 cgroup 的 Linux），先停止该设备上的服务，"
+                    "再在设备本机交互执行 python -m pangpang.consent accept --data <data>，"
+                    "输入当前风险版本确认；然后重启服务，并对该主机的执行器重新探测。"
+                    "进程组同意不是操作系统隔离。见 SECURITY.md。")
         if self.deployment_level in ("L1", "L2"):
             return ("connect_executor",
                     "当前部署等级只接受强监管（Windows Job Object）。协作档在这一档不会放行。见 SECURITY.md。")
@@ -3327,10 +3338,14 @@ class Service:
             routing = self.route(bot_id or "bot-main", {"id": "capability-probe"}, {}, quiet=True)
             per = [{"installation_id": c["installation_id"], "host_id": c["host_id"], "reason": None}
                    for c in routing["candidates"]] + routing["rejected"]
+            # discovered / execution_verified come from stored probe and receipt
+            # rows. This does not probe, and probe.available is not execution.
+            evidence = [self.installation_execution_facts(row["installation_id"]) for row in per]
             if routing["selected"]:
                 out.append({"capability": "executor", "state": "ready", "reason": None, "provider": None,
                             "operator_action_code": None, "operator_action": None, "restart_required": False,
-                            "detail": {"selected": routing["selected"], "installations": per}})
+                            "detail": {"selected": routing["selected"], "installations": per,
+                                       "executor_evidence": evidence}})
             else:
                 reasons = sorted({r["reason"] for r in routing["rejected"] if r["reason"]})
                 # When a single reason blocks every executor, point at the action that
@@ -3343,10 +3358,15 @@ class Service:
                           "control_only_no_local_executor": control_only_action,
                           "bot_policy": ("adjust_executor_policy", "该 Bot 不在此执行器的 allowed_bots 内；调整执行器策略或改派。"),
                           "platform_supervision_unverified": self._supervision_unverified_action(routing["rejected"]),
+                          "ssh_transport_retired": (
+                              "retire_ssh_executor",
+                              "SSH 执行器已退役，不会改派到本机或 Connector。"
+                              "未终结任务仍留在原记录，只能凭真实终态回执或操作员证据收口，不会自动重跑或复制目录。"),
                           }.get(reason, generic)
                 out.append({"capability": "executor", "state": "blocked", "reason": reason,
                             "provider": None, "operator_action_code": action[0], "operator_action": action[1],
-                            "restart_required": False, "detail": {"installations": per, "reasons": reasons}})
+                            "restart_required": False, "detail": {"installations": per, "reasons": reasons,
+                                                                  "executor_evidence": evidence}})
 
         # Device: paired connector devices (advisory presence; routing re-checks online()).
         # Revoked != offline: a revoked device needs re-pairing, not a connector restart.
@@ -3870,6 +3890,15 @@ class Service:
                 artifact = self.evidence(bot_id, ref, work)
                 if artifact.get("host_id") != e["host_id"]:
                     reason = "files_on_other_host"
+            # Retired SSH is not a candidate. A constraint that already excluded
+            # this host stays, so an unconstrained local/connector host can still
+            # be chosen. A request that names this host fails closed — its
+            # transport is not rewritten onto local or Connector. This wins over
+            # discovery/supervision so the refusal is not mistaken for "not installed".
+            if _h.get("transport") == "ssh" and reason not in {
+                    "user_host_constraint", "user_executor_constraint",
+                    "host_constraint", "executor_constraint"}:
+                reason = "ssh_transport_retired"
             if reason:
                 log.debug("route reject id=%s host=%s reason=%s", e["id"], e["host_id"], reason)
             (rejected if reason else candidates).append({"installation_id": e["id"], "host_id": e["host_id"], "reason": reason})
@@ -3904,12 +3933,18 @@ class Service:
                       if (not body.get("installation_id") or r["installation_id"] == body["installation_id"])
                       and (not body.get("host_id") or r["host_id"] == body["host_id"])]
             pool = target or rejected
-            order = ["executor_disabled", "requested_executor_not_registered", "executor_cleanup_unsupported",
+            order = ["ssh_executor_retired", "executor_disabled", "requested_executor_not_registered",
+                     "executor_cleanup_unsupported",
                      "executor_not_authorized",
                      "executor_host_offline", "work_routing_constraint", "requested_executor_not_available",
                      "artifact_location_conflict"]
             codes = {ROUTE_ERROR[r["reason"]] for r in pool if r["reason"] in ROUTE_ERROR}
             code = next((c for c in order if c in codes), "no_eligible_executor")
+            if code == "ssh_executor_retired":
+                raise Fault(code, advice=(
+                    "SSH 执行器已退役，不会改派到本机或 Connector。"
+                    "未终结的 SSH 任务不自动重跑，也不复制目录；"
+                    "只能用真实终态回执或操作员证据收口。"))
             raise Fault(code)
         selected = route["selected"]
         e = self.execution.installations[selected["installation_id"]]
@@ -5176,18 +5211,22 @@ class Service:
     def _start_denied(self, task):
         """Fail-closed pre-start gate (SECURITY L1). Returns the stable
         model-facing error when a task must NEVER launch on its target, else None.
-        Two deterministic reasons: (1) control-only coordinator + local transport;
-        (2) the executor's probed supervision is not accepted at the declared
+        Three deterministic reasons: (1) transport=ssh is retired and must not
+        launch; (2) control-only coordinator + local transport; (3) the
+        executor's probed supervision is not accepted at the declared
         deployment level (supervision_ok).
         route() rejects these for NEW submissions; this is the migration/existing-task
         net at admission + start so a task queued BEFORE the gate (old code) can never
         launch. Deterministic (never asks the model); returns the mapped BUSINESS code,
         not the internal reason, so inspect_task cannot leak implementation state (SIS)."""
         host = self.execution.hosts.get(task.get("host_id"), {})
+        if host.get("transport") == "ssh":
+            # Queued tasks fail closed (they never launched). A starting task is
+            # resolved by _deny_starting_task: remote state we cannot prove is
+            # unknown, not a clean failure and not a rerun on another host.
+            return ROUTE_ERROR["ssh_transport_retired"]
         if self.control_only and host.get("transport") == "local":
             return ROUTE_ERROR["control_only_no_local_executor"]
-        if host.get("transport") == "ssh" and os_family(host.get("os")) is None:
-            return ROUTE_ERROR["host_os_unverified"]
         inst = self.execution.installations.get(task.get("installation_id"), {})
         try:
             probe = self.store.get("probe", inst.get("id"))
@@ -5237,6 +5276,128 @@ class Service:
             return host["execution_level"]
         return self.deployment_level
 
+    _SSH_UNFINISHED = ("queued", "awaiting_approval", "starting", "running",
+                       "cancel_requested", "unknown")
+    _EVIDENCE_SCAN_LIMIT = 50
+
+    def ssh_inventory(self):
+        """Read-only list of SSH hosts and unfinished attempts.
+
+        Does not launch, copy a directory, rewrite transport, settle a task, or
+        rerun it. Nothing here is auto-migrated: an SSH identity is not a local
+        or Connector identity. Queued work has not started; anything already
+        starting or later may have side effects and closes only by a real
+        terminal receipt or operator evidence.
+        """
+        hosts = []
+        ssh_ids = set()
+        for host in self.execution.hosts.values():
+            if host.get("transport") != "ssh":
+                continue
+            ssh_ids.add(host["id"])
+            insts = [e["id"] for e in self.execution.installations.values()
+                     if e.get("host_id") == host["id"]]
+            hosts.append({
+                "host_id": host["id"],
+                "source": "managed_config.hosts",
+                "os": host.get("os"),
+                "target": host.get("target"),
+                "installation_ids": insts,
+                "migration": "refused",
+                "migration_reason": "ssh_identity_not_equivalent_to_local_or_connector",
+            })
+        attempts = []
+        for status in self._SSH_UNFINISHED:
+            for task in self._all("task", status=status):
+                if task.get("host_id") not in ssh_ids:
+                    continue
+                launched = status in {"starting", "running", "cancel_requested", "unknown"}
+                attempts.append({
+                    "task_id": task["id"],
+                    "status": status,
+                    "host_id": task.get("host_id"),
+                    "installation_id": task.get("installation_id"),
+                    "execution_id": task.get("execution_id"),
+                    "source": "task_store",
+                    "close": "terminal_receipt_or_operator" if launched else "refuse_new_launch",
+                    "side_effects": "possible" if launched else "not_started",
+                    "auto_migrate": False,
+                    "auto_rerun": False,
+                })
+        return {"transport_retired": True, "launch": "refused", "fallback": "none",
+                "hosts": hosts, "attempts": attempts}
+
+    def installation_execution_facts(self, installation_id):
+        """Grades already stored for one installation. Does not probe or launch.
+
+        discovered: a stored probe row says the binary answered --version.
+        execution_verified: a fenced succeeded receipt exists. probe.available
+        never sets this, and it does not mean the CLI is logged in, can write,
+        can run Bash, or that the workspace is trusted.
+        supervision_admitted: the stored label passes this host's level.
+        os_sandbox is always false: L0 process-group consent is not an OS sandbox,
+        and a Job Object or cgroup label is not a separate OS account.
+        native_cli_retest stays unverified until a real CLI and cwd are measured.
+        """
+        inst = self.execution.installations.get(installation_id)
+        if not inst:
+            raise Fault("installation_not_found", 404)
+        try:
+            probe = self.store.get("probe", installation_id)
+        except Fault:
+            probe = None
+        host = self.execution.hosts.get(inst.get("host_id"), {})
+        discovered = bool(probe and probe.get("available"))
+        admitted = bool(probe) and self._supervision_admissible(inst, probe)
+        return {
+            "installation_id": installation_id,
+            "host_id": inst.get("host_id"),
+            "transport": host.get("transport"),
+            "discovered": discovered,
+            "execution_verified": self._receipt_execution_verified(installation_id),
+            "supervision_admitted": admitted,
+            "supervision": None if not probe else probe.get("supervision"),
+            "os_sandbox": False,
+            "native_cli_retest": "unverified",
+            "claims_from_probe": {
+                "cli_logged_in": False,
+                "tools_can_write": False,
+                "can_run_bash": False,
+                "workspace_trusted": False,
+            },
+        }
+
+    def _receipt_execution_verified(self, installation_id):
+        """True when a recent succeeded task carries this attempt's own receipt.
+
+        Bounded to the newest _EVIDENCE_SCAN_LIMIT successes. A miss is not
+        verified. The receipt must pass the same attempt fence and proof used
+        to commit a terminal state. not_launched and operator resolutions are
+        not execution.
+        """
+        seen = 0
+        cursor = None
+        limit = self._EVIDENCE_SCAN_LIMIT
+        while seen < limit:
+            page, cursor = self.store.find_page(
+                "task", cursor=cursor, limit=min(limit - seen, limit), newest=True,
+                status="succeeded", installation_id=installation_id)
+            for task in page:
+                seen += 1
+                receipt = task.get("receipt") or {}
+                if task.get("status") != "succeeded" or receipt.get("status") != "succeeded":
+                    continue
+                if receipt.get("not_launched") or receipt.get("operator_resolution"):
+                    continue
+                if not self._receipt_matches_attempt(task, receipt):
+                    continue
+                if not self._receipt_confirmed(task, receipt):
+                    continue
+                return True
+            if cursor is None:
+                break
+        return False
+
     def _fail_task_terminally(self, task_id, error, from_statuses):
         """CAS a task in one of from_statuses -> failed with a stable error and settle
         its dependency. Used to terminate (not silently re-queue) a task that can never
@@ -5271,22 +5432,38 @@ class Service:
         self._mark_task_unknown(task, "start_denied_indeterminate")
         return True
 
+    def _ssh_channel_gone(self, task, error):
+        """Quarantine an attempt whose SSH runner channel no longer exists.
+
+        Returns True only when the task newly becomes unknown. A task that is
+        already unknown stays on the observation backoff; another poll of a
+        removed channel is not a state change.
+        """
+        if getattr(error, "code", None) != "ssh_transport_retired":
+            return False
+        return self._mark_task_unknown(task, "ssh_transport_retired")
+
     def _mark_task_unknown(self, task, reason):
         """Quarantine a task as unknown (observation uncertainty, not a business
         outcome). The model-visible `error` is ALWAYS the stable business
         code `execution_state_unknown`; the specific internal reason (process_gone /
         attempt_pid_foreign / execution_overran_deadline /...) is kept in
         `unknown_reason` for operator telemetry only, so inspect_task cannot leak an
-        implementation term to the model (SIS)."""
+        implementation term to the model. Returns True only when status
+        changes. A cancel already recorded on the task is kept."""
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL or current["status"] == "unknown":
-                return
-            current.update(status="unknown", error="execution_state_unknown",
-                           unknown_reason=reason, observation_retry_not_before=time.time() + 5)
+                return False
+            fields = {"status": "unknown", "error": "execution_state_unknown",
+                      "unknown_reason": reason, "observation_retry_not_before": time.time() + 5}
+            if current["status"] == "cancel_requested" or current.get("cancel_requested"):
+                fields["cancel_requested"] = True
+            current.update(fields)
             self.store.put("task", current)
             # Observation uncertainty is not a business outcome. Keep the join
             # pending and the workspace quarantined until proof or operator action.
+        return True
 
     def _active_tasks(self, *, include_starting=True):
         """All execution-active tasks, via index-DIRECT single-status scans.
@@ -5405,12 +5582,18 @@ class Service:
                         self.store.put("task", current)
                 return True
             except Fault as error:
+                if self._ssh_channel_gone(task, error):
+                    return True
                 return self._record_observation(task, "cancel", error.code)
         try:
             receipt = self.execution.poll(task)
         except Fault as error:
             # red line: an observation failure never becomes a business
             # state change. (This is the path that used to be connection_lost.)
+            # ssh_transport_retired is not a blip: the channel is gone, so the
+            # attempt is quarantined instead of retried forever.
+            if self._ssh_channel_gone(task, error):
+                return True
             return self._record_observation(task, "poll", error.code)
         changed = self._apply_observation(task, receipt)
         if host.get("transport") == "local":

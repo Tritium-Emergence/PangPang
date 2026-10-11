@@ -748,11 +748,11 @@ npm run test:browser
 **启用进程组协作档（自用 macOS / 无 cgroup Linux）：**
 
 1. 控制端为 L0：POSIX（macOS、Linux）个人启动不传 `--deployment-level`、且没有 `--origin`、不是 `--control-only`，即为 L0。Windows 用 `python -m pangpang --deployment-level L0 …`。Linux 有 systemd --user scope 时探测为 cgroup 协作档，否则为进程组（与 macOS 相同）。Linux 启动脚本不代写 L0。`--control-only` 不因平台变成 L0。`--origin` 也不推断 L0。
-2. 本协调器在 L0（含 POSIX 个人启动推断的 L0）下不把同意当作额外门，也不写 `l0_process_group_consent`。L0 下本机探测为 `posix-pgroup-cooperative` 后即可派活（Linux 无 cgroup scope 时与 macOS 相同）。连接器进程的 Execution 没有部署等级，进程组档要在那台设备上记录当前同意（先停止连接器，再 `python -m pangpang.consent accept`），探测才会是这一档。`macos-pgroup-postverify` 始终拒绝。Windows 上省略 `--deployment-level` 的启动保持未声明。
+2. 本协调器在 L0（含 POSIX 个人启动推断的 L0）下不把同意当作额外门，也不写 `l0_process_group_consent`。L0 下本机探测为 `posix-pgroup-cooperative` 后即可派活（Linux 无 cgroup scope 时与 macOS 相同）。连接器进程的 Execution 没有部署等级，进程组档要在那台设备上记录当前同意（先停止连接器，再 `python -m pangpang.consent accept --data <data>`），探测才会是这一档。`macos-pgroup-postverify` 始终拒绝。Windows 上省略 `--deployment-level` 的启动保持未声明。
 
 **连接器的执行等级（per-device `execution_level`）：**
 
-本机/SSH 执行器的准入档 = 本协调器的 `--deployment-level`。**连接器设备**另有一个服务端写入的可选字段 `host.execution_level`：
+本机执行器的准入档 = 本协调器的 `--deployment-level`。配置里的 `transport: ssh` 主机行仍会加载，并由 inventory 列出；点名它的新任务返回 `ssh_executor_retired`，不会改派到本机或 Connector。已经在途的 SSH attempt 变为 `unknown`，要由操作员收口。**连接器设备**另有一个服务端写入的可选字段 `host.execution_level`：
 
 - 设置时**覆盖**继承——该设备按自己的 L0 / L1 / L2 准入，与云端的部署等级无关。
 - 缺省时**继承**云端的 `--deployment-level`（这正是此前就有的契约：云端显式 `--deployment-level L0` 本就放行它的连接器）。
@@ -764,21 +764,21 @@ npm run test:browser
 | L0 | 无 / L1 / L2 | L0（设备级覆盖） |
 | L1 / L2 | L0 | L1 / L2（阻止协作档） |
 
-这个字段**只能**由云端已认证的操作员经 `POST /api/v1/hosts/{host_id}/execution-level`（body `{"level":"L0"}`，`null` 清除覆盖恢复继承）写入；设备自报永远写不到它。连接器用进程组档（`posix-pgroup-cooperative`）时仍要设备本机的 `pangpang.consent accept`——`execution_level=L0`（云端）＋设备同意（本机）是**双重确认**；连接器用 cgroup 档（`linux-cgroup-cooperative`）时不另需设备同意（cgroup.kill 自身即强证据）。
+这个字段**只能**由云端已认证的操作员经 `POST /api/v1/hosts/{host_id}/execution-level`（body `{"level":"L0"}`，`null` 清除覆盖恢复继承）写入；设备自报永远写不到它。连接器用进程组档（`posix-pgroup-cooperative`）时仍要设备本机的 `pangpang.consent accept --data <data>`——`execution_level=L0`（云端）＋设备同意（本机）是**双重确认**；连接器用 cgroup 档（`linux-cgroup-cooperative`）时不另需设备同意（cgroup.kill 自身即强证据）。
 
 **官方 happy path（control-only Mac 云 + Win/Linux 连接器，不传 `--deployment-level`）：**
 
 1. Mac 以 `--control-only --origin https://…` 启动（部署等级因此为“未声明”，不自动推断 L0——正确，公网默认 fail-closed）。
 2. Web 配对码配对 Windows / Linux 两台连接器，二者 online。
 3. Windows 连接器探测为 `windows-job-object`（强监管），任意等级直接可派——无需任何额外步骤。
-4. Linux 连接器探测为 `linux-cgroup-cooperative`（或无 cgroup 时 `posix-pgroup-cooperative`）。给**这一台**设备设 `execution_level=L0`（上面的 POST）；若是进程组档，再在该设备 `pangpang.consent accept`。此后 Linux 连接器正常入选，**无需**把整个 Mac 云降到 `--deployment-level L0`（那会连带放行本机/SSH 的协作档，范围过宽）。
+4. Linux 连接器探测为 `linux-cgroup-cooperative`（或无 cgroup 时 `posix-pgroup-cooperative`）。给**这一台**设备设 `execution_level=L0`（上面的 POST）；若是进程组档，再在该设备 `pangpang.consent accept --data <data>`。此后 Linux 连接器正常入选，**无需**把整个 Mac 云降到 `--deployment-level L0`（那会放行本机协作档，范围过宽）。SSH 不因该部署等级重新成为可执行传输。
 
 
 **该档的已知限制（启用即接受）：**
 
 - 通过 setsid / 双 fork 脱离进程组的后代**不会被发现或终止**，可能继续修改工作区、占用端口/GPU/共享资源；回执仍会是 `pgroup-empty`。需要覆盖全部后代的任务不要放在该档设备上。
 - 同账号 CLI 可读控制目录、Vault、设备令牌与 CLI API key，拿到设备令牌可冒充设备回执；信任本机 CLI 及其项目配置（hooks / MCP / 插件）；不提供已核验只读，不扩大 fast-accept（该档回执不走 fast-accept）。
-- 选路时的监管档冻结为任务的 `supervision_floor`。启动时实际可用档弱于它（如探测为 cgroup、启动时只剩进程组）、或无法确认作用域（`macos-pgroup-postverify` 或裸 `posix-process-group`），runner 在获取资源、启动 CLI **之前**拒绝，任务按 `failed`（`supervision_unavailable`）收口，不静默降级。部署等级不再是 L0 后，本机/SSH 主机即使 probe 仍是协作档也不再接受新的进程组任务。
+- 选路时的监管档冻结为任务的 `supervision_floor`。启动时实际可用档弱于它（如探测为 cgroup、启动时只剩进程组）、或无法确认作用域（`macos-pgroup-postverify` 或裸 `posix-process-group`），runner 在获取资源、启动 CLI **之前**拒绝，任务按 `failed`（`supervision_unavailable`）收口，不静默降级。部署等级不再是 L0 后，本机主机即使 probe 仍是协作档也不再接受新的进程组任务。SSH 新启动仍返回 `ssh_executor_retired`，不随部署等级恢复。
 - 清理/释放失败、组无法确认为空、runner 死亡：沿用 v2 unknown + quarantine；人工 resolve 仍按 v2 记为 `cancelled`，已知结果只留在操作员可见的原始回执/记录里。
 - 仅撤回某个等待用 `cancel_dependency`，不会退役设备、也不释放 unknown 占用。**重装 / 换 host 身份复用旧工作区、共享账号或 NAS 前，先解决旧身份上的 unknown 占用**；系统不会跨 host_id 识别同一块盘。
 - 已退役设备的连接器仍会按退避重试同步（已知限制）。远程 configure / 凭据 / 文件接收的权限闭合尚未实现；网页操作员与设备操作员未被系统独立验证为同一人。

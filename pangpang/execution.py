@@ -1,4 +1,8 @@
-"""Trusted installation configuration and portable SSH transport."""
+"""Trusted installation configuration.
+
+SSH host rows still load so an old config can be inventoried. The SSH
+runner, its bootstrap, and the ssh command channel are not used.
+"""
 import base64
 import binascii
 import hashlib
@@ -6,7 +10,6 @@ import json
 import os
 import platform
 import re
-import shlex
 import subprocess
 import sys
 import tarfile
@@ -33,25 +36,6 @@ def artifact_bytes(artifact, data):
             or (artifact.get("size") is not None and len(raw) != artifact["size"])):
         raise Fault("source_changed")
     return raw
-
-
-BOOTSTRAP = """import json,pathlib,os,subprocess,sys
-s=json.loads(sys.stdin.buffer.read().decode('utf-8')); d=pathlib.Path(s['directory'])
-d.mkdir(parents=True,exist_ok=True,mode=0o700)
-if d.is_symlink() or (hasattr(os,'getuid') and d.stat().st_uid != os.getuid()): raise RuntimeError('unsafe_runner_directory')
-os.chmod(d,0o700)
-(d/'runner.py').write_text(s['runner'],encoding='utf-8')
-if s.get('windows_job'):(d/'windows_job.py').write_text(s['windows_job'],encoding='utf-8')
-if s.get('linux_job'):(d/'linux_job.py').write_text(s['linux_job'],encoding='utf-8')
-if s.get('spec') is not None:
- p=d/'spec.json'
- try:
-  with p.open('x',encoding='utf-8') as f: json.dump(s['spec'],f)
- except FileExistsError:
-  if json.loads(p.read_text(encoding='utf-8')) != s['spec']: raise RuntimeError('execution_spec_conflict')
-os.chmod(d/'runner.py',0o600)
-print('{}')
-"""
 
 
 # Official pi 1.0.3 standalone binaries. A version string is not provenance: the
@@ -376,13 +360,14 @@ def task_interjection_tier(installation, host):
     """Tier a correction to a task on this installation and host can use.
 
     The planner's view and inject_task_message both call this, so the tier the
-    Bot sees is the tier inject accepts. Only local and SSH hosts have a mailbox
-    the runner reads. The runner sends no SIGINT on Windows, so tier 2 there is 3.
+    Bot sees is the tier inject accepts. Only a local host has a mailbox the
+    runner reads. SSH and Connector are tier 3: cancel and redispatch, never an
+    online inject. The runner sends no SIGINT on Windows, so tier 2 there is 3.
     """
     adapter = installation.get("adapter") if isinstance(installation, dict) else None
     tier = interjection_tier_of(ADAPTER_CATALOG.get(adapter))
     host = host if isinstance(host, dict) else {}
-    if tier == 3 or host.get("transport") not in {"local", "ssh"}:
+    if tier == 3 or host.get("transport") != "local":
         return 3
     if tier == 2 and os_family(host.get("os")) == "win":
         return 3
@@ -640,20 +625,15 @@ class Execution:
                     raise Fault("unknown_resource", 400)
 
     def ssh(self, host):
-        return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10", host["target"]]
+        # No ssh argv. A caller cannot fall this host back onto a local shell.
+        raise Fault("ssh_transport_retired")
 
     @staticmethod
     def windows(host):
         return os_family(host.get("os")) == "win"
 
     def remote(self, host, arguments):
-        if self.windows(host):
-            # Encoded PowerShell command keeps shell metacharacters in values
-            # inert. The remote Python runner receives prompts through stdin.
-            code = "& " + " ".join("'" + a.replace("'", "''") + "'" for a in arguments)
-            encoded = base64.b64encode(code.encode("utf-16le")).decode()
-            return self.ssh(host) + ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
-        return self.ssh(host) + [shlex.quote(a) for a in arguments]
+        raise Fault("ssh_transport_retired")
 
     def directory(self, host, execution_id):
         if not re.fullmatch(r"exec-[a-f0-9]{32}", execution_id):
@@ -684,17 +664,9 @@ class Execution:
                     if json.loads(path.read_text(encoding="utf-8")) != spec:
                         raise Fault("execution_spec_conflict")
             return
-        if self.windows(host) and not host.get("runner_root_acl_verified"):
-            raise Fault("windows_runner_acl_not_verified")
-        # Ship every helper runner.py may import on the remote: a Linux host with a
-        # usable systemd --user scope imports linux_job at launch.
-        helpers = {name: Path(runner.__file__).with_name(name + ".py").read_text(encoding="utf-8")
-                   for name in ("windows_job", "linux_job")}
-        payload = {"directory": directory, "runner": Path(runner.__file__).read_text(encoding="utf-8"),
-                   "spec": spec, **helpers}
-        # Base64 avoids nested quote rewriting by Windows' native argv parser.
-        bootstrap = "import base64;exec(base64.b64decode('" + base64.b64encode(BOOTSTRAP.encode()).decode() + "'))"
-        self._run(self.remote(host, [host.get("python", "python3"), "-c", bootstrap]), payload)
+        # No remote bootstrap and no directory copy. Host rows with this
+        # transport still validate above so they can be listed.
+        raise Fault("ssh_transport_retired")
 
     @staticmethod
     def _run(argv, payload=None):
@@ -718,10 +690,9 @@ class Execution:
             raise Fault("invalid_runner_response") from None
 
     def call(self, host, action, directory, payload=None):
-        if host["transport"] == "local":
-            argv = [sys.executable, runner.__file__, action, directory]
-        else:
-            argv = self.remote(host, [host.get("python", "python3"), directory + "/runner.py", action, directory])
+        if host["transport"] != "local":
+            raise Fault("ssh_transport_retired")
+        argv = [sys.executable, runner.__file__, action, directory]
         return self._run(argv, payload)
 
     def inspect_file(self, host, path, action="hash", data=None):
@@ -744,7 +715,9 @@ class Execution:
         h = self.hosts[e["host_id"]]
         if h["transport"] == "connector":
             return self.broker.request(h["id"], "probe", {"installation_id": installation_id})
-        directory = str(self.data / "probe") if h["transport"] == "local" else h["runner_root"] + "/probe"
+        if h["transport"] != "local":
+            raise Fault("ssh_transport_retired")
+        directory = str(self.data / "probe")
         self.prepare(h, directory)
         # Explicit L0 is the operator declaration for the process-group tier.
         # Do not write l0_process_group_consent here, and do not set the flag
@@ -806,6 +779,8 @@ class Execution:
 
     def start(self, task):
         host = self.hosts[task["host_id"]]
+        if host["transport"] == "ssh":
+            raise Fault("ssh_transport_retired")
         if host["transport"] == "connector":
             return self.broker.start(task)
         if host["transport"] == "local":
@@ -821,28 +796,31 @@ class Execution:
         host = self.hosts[task["host_id"]]
         if host["transport"] == "connector":
             return self.broker.poll(task)
+        if host["transport"] != "local":
+            raise Fault("ssh_transport_retired")
         directory = self.directory(host, task["execution_id"])
-        if host["transport"] == "local":
-            # in-process observation — no subprocess spawn per poll. The
-            # runner's inspect is a pure, read-hardened function; a failed read is
-            # reported as 'no receipt' (observation failure), never as a fact.
-            return runner.inspect(Path(directory), include_tail=tail)
-        return self.call(host, "inspect", directory)
+        # in-process observation — no subprocess spawn per poll. The
+        # runner's inspect is a pure, read-hardened function; a failed read is
+        # reported as 'no receipt' (observation failure), never as a fact.
+        return runner.inspect(Path(directory), include_tail=tail)
 
     def cancel(self, task):
         host = self.hosts[task["host_id"]]
         if host["transport"] == "connector":
             return self.broker.cancel(task)
+        if host["transport"] != "local":
+            raise Fault("ssh_transport_retired")
         return self.call(host, "cancel", self.directory(host, task["execution_id"]))
 
     def inject(self, task, message_uuid, text, *, interrupt_id=None):
         """Append one user sentence to a running attempt's steer mailbox.
 
-        `interrupt_id` is the tier-2 interrupt row in the same file. Local and
-        SSH use the runner that already owns the process. Connector has no
-        steer command; the caller treats that as tier 3.
+        `interrupt_id` is the tier-2 interrupt row in the same file. Only a
+        local runner has that mailbox. SSH and Connector are tier 3.
         """
         host = self.hosts[task["host_id"]]
+        if host["transport"] == "ssh":
+            raise Fault("ssh_transport_retired")
         if host["transport"] == "connector":
             raise Fault("interjection_unsupported")
         payload = {"uuid": message_uuid, "text": text}
