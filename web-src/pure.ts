@@ -39,6 +39,34 @@ export function mediaKind(name: string): string {
   return 'other';
 }
 
+export interface PreviewState {text: string; rev: number; done: boolean}
+export interface PreviewFrame {text?: string; delta?: string; rev?: number; base_rev?: number; done?: boolean}
+
+// Ephemeral stream reducer. A `delta` extends the text this client already
+// holds at base_rev. A full `text` replaces it (reconnect, or a new assistant
+// message after a tool round). A gap drops the suffix instead of inventing
+// text; the durable snapshot is what remains after `done`.
+export function applyPreviewFrame(cur: PreviewState | undefined, frame: PreviewFrame): PreviewState | undefined {
+  if (frame.done) {
+    if (!cur) return undefined;
+    return cur.done ? cur : {...cur, done: true};
+  }
+  if (typeof frame.rev !== 'number') return cur;
+  if (cur && frame.rev <= cur.rev) return cur;
+  if (typeof frame.delta === 'string') {
+    if (!cur || frame.base_rev !== cur.rev) return cur;
+    return {text: cur.text + frame.delta, rev: frame.rev, done: false};
+  }
+  if (typeof frame.text === 'string') return {text: frame.text, rev: frame.rev, done: false};
+  return cur;
+}
+
+// message.changed does not alter the dashboard snapshot. Any other event,
+// including a missing type or a reset, still requires the full snapshot.
+export function mergeRefreshScope(pending: 'all' | 'messages', eventType: string | undefined): 'all' | 'messages' {
+  return eventType === 'message.changed' ? pending : 'all';
+}
+
 export const PER_PAGE = 10;
 
 // Pure pagination math: clamp the requested page into range and compute the

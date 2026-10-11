@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {api, ApiError} from './api';
+import {applyPreviewFrame, mergeRefreshScope} from './pure';
 import type {Snapshot, Message} from './types';
 
 // THE single data coordinator: "one root data entry, no second domain
@@ -68,6 +69,8 @@ export function useStore(): Store {
   // single-flight: while a refresh runs, mark dirty and replay once on completion.
   const running = useRef(false);
   const dirty = useRef(false);
+  const dirtyAll = useRef(false);
+  const snapRef = useRef<Snapshot | null>(null);
 
   // Fetch the selected bot's messages, tagged with the bot id so a late response for a
   // previous bot can never overwrite the current one (bot-switch race). Also prunes
@@ -95,16 +98,25 @@ export function useStore(): Store {
     });
   }, []);
 
-  const refresh = useCallback(async () => {
-    if (running.current) { dirty.current = true; return; }
+  const refresh = useCallback(async (scope: 'all' | 'messages' = 'all') => {
+    if (running.current) { dirty.current = true; if (scope === 'all') dirtyAll.current = true; return; }
     running.current = true;
     try {
+      let all = scope === 'all';
       do {
         dirty.current = false;
-        const snap = await api<Snapshot>('snapshot');
-        setAuthed(true);
-        setSnapshot(snap);
-        await loadMessages(selectedRef.current, snap);
+        const thisAll = all || dirtyAll.current;
+        dirtyAll.current = false;
+        all = false;
+        if (thisAll) {
+          const snap = await api<Snapshot>('snapshot');
+          setAuthed(true);
+          snapRef.current = snap;
+          setSnapshot(snap);
+          await loadMessages(selectedRef.current, snap);
+        } else {
+          await loadMessages(selectedRef.current, snapRef.current ?? undefined);
+        }
       } while (dirty.current);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) setAuthed(false);
@@ -155,11 +167,19 @@ export function useStore(): Store {
   useEffect(() => {
     if (!authed) return;
     let timer: number | undefined;
+    let pending: 'all' | 'messages' = 'messages';
     const es = new EventSource('/api/v1/events');
     es.onopen = () => setConnection('connected');
-    es.onmessage = () => {
+    es.onmessage = (ev) => {
+      let type: string | undefined;
+      try { type = JSON.parse(ev.data)?.type; } catch { type = undefined; }
+      pending = mergeRefreshScope(pending, type);
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => void refresh(), 200);
+      timer = window.setTimeout(() => {
+        const scope = pending;
+        pending = 'messages';
+        void refresh(scope);
+      }, 200);
     };
     es.onerror = () => setConnection('reconnecting');
     return () => { window.clearTimeout(timer); es.close(); };
@@ -180,21 +200,21 @@ export function useStore(): Store {
         // Mark the preview done but KEEP it until the durable final message with the
         // same turn_id arrives (pruned in refresh()). This retain-until-persisted
         // handoff prevents a flash gap where neither preview nor final is shown.
+        // Turn completion always re-reads the snapshot: the stream is not authority.
         setPreviews((prev) => {
-          const cur = prev.get(m.turn_id);
-          if (!cur) return prev;
-          const n = new Map(prev); n.set(m.turn_id, {...cur, done: true}); return n;
+          const next = applyPreviewFrame(prev.get(m.turn_id), {done: true});
+          if (!next) return prev;
+          const n = new Map(prev); n.set(m.turn_id, next); return n;
         });
         window.clearTimeout(refreshTimer);
-        refreshTimer = window.setTimeout(() => void refresh(), 50);
+        refreshTimer = window.setTimeout(() => void refresh('all'), 50);
         return;
       }
       setPreviews((prev) => {
         const cur = prev.get(m.turn_id);
-        if (cur && m.rev <= cur.rev) return prev; // rev-monotonic, not length
-        const n = new Map(prev);
-        n.set(m.turn_id, {text: m.text, rev: m.rev, done: false});
-        return n;
+        const next = applyPreviewFrame(cur, m);
+        if (!next || next === cur) return prev;
+        const n = new Map(prev); n.set(m.turn_id, next); return n;
       });
     };
     es.onerror = () => {};
