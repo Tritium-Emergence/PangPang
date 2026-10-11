@@ -204,7 +204,8 @@ class LocalRoutingTests(unittest.TestCase):
             routing = self._resolve("帮我看看")
         self.assertIsNone(routing["work_id"])
         self.assertNotIn(routing["work_id"], (newest, older))
-        self.assertEqual(routing["route_quality"], "confident")
+        self.assertEqual(routing["route_quality"], "deterministic")
+        self.assertNotEqual(routing["route_quality"], "confident")
 
     def test_low_confidence_candidate_without_focus_does_not_attach(self):
         newest = self._seed("最新的工作", "lr-ask")
@@ -230,82 +231,100 @@ class LocalRoutingTests(unittest.TestCase):
         self.assertNotIn(works[-1], candidates)
 
     def test_busy_model_slot_does_not_start_a_second_call_or_open_the_breaker(self):
+        from pangpang.pi_runtime import PiModel
         from pangpang.runtime import Runtime
         self.app.scheduler_config["model_max_concurrency"] = 1
         self.app.LOCAL_ROUTING_TIMEOUT_S = 0.15
         Runtime(self.app)
+        started = []
+
+        def impl(model, *args, **kwargs):
+            started.append(1)
+            raise AssertionError("worker started while the slot was held")
+
         self.assertTrue(self.app.scheduler.acquire_model_call(timeout_s=0))
         work = self._seed("写周报", "lr-busy")
-        fake, calls = self._fake_pi('{"choice": "CURRENT"}')
         try:
-            with fake:
+            with patch.object(PiModel, "_exchange_impl", impl):
                 routing = self._resolve("继续", hint=work)
         finally:
             self.app.scheduler.release_model_call()
-        self.assertEqual(calls, [])
+        self.assertEqual(started, [])
         self.assertIsNone(routing["work_id"])
         self.assertEqual(routing["route_source"], "unconfigured_new")
         self.assertEqual(getattr(self.app, "_local_routing_failures", 0), 0)
 
-    def test_model_slot_serializes_routing_behind_a_supervisor_call(self):
-        import threading
-        import time
+    def test_same_thread_model_call_reuses_the_slot_it_holds(self):
         from pangpang.runtime import Runtime
         self.app.scheduler_config["model_max_concurrency"] = 1
+        Runtime(self.app)
+        sched = self.app.scheduler
+        self.assertTrue(sched.acquire_model_call(timeout_s=0))
+        try:
+            self.assertTrue(sched.acquire_model_call(timeout_s=0))
+            self.assertEqual(sched._model_call_inflight, 1)
+            sched.release_model_call()
+            self.assertEqual(sched._model_call_inflight, 1)
+        finally:
+            sched.release_model_call()
+        self.assertEqual(sched._model_call_inflight, 0)
+
+    def test_pi_model_run_and_routing_share_one_slot(self):
+        import threading
+        import time
+        from pangpang.pi_runtime import PiModel
+        from pangpang.runtime import Runtime
+        from pangpang.store import Fault
+        self.app.scheduler_config["model_max_concurrency"] = 1
         runtime = Runtime(self.app)
-        state = {"current": 0, "peak": 0}
+        state = {"current": 0, "peak": 0, "slot": 0}
         lock = threading.Lock()
         samples = []
 
-        def occupy():
+        def impl(model, profile, history, tools, handler, *args, **kwargs):
             with lock:
                 state["current"] += 1
                 state["peak"] = max(state["peak"], state["current"])
+                state["slot"] = max(state["slot"], self.app.scheduler._model_call_inflight)
             time.sleep(0.03)
             with lock:
                 state["current"] -= 1
+            handler({"type": "assistant", "stop": "stop",
+                     "message": {"role": "assistant", "content": '{"choice": "CURRENT"}'},
+                     "usage": {}})
+            return {"type": "finished", "answer": "supervisor"}
 
-        class SlowModel:
-            def complete(self, profile, messages, tools, on_proc=None, cancelled=None):
-                occupy()
-                return {"content": "supervisor"}, {}
-
-        class RoutingModel:
-            def __init__(self, service):
-                pass
-
-            def complete(self, profile, messages, tools, on_proc=None, cancelled=None):
-                occupy()
-                return {"role": "assistant", "content": '{"choice": "CURRENT"}'}, {}
-
-        runtime.model = SlowModel()
-        work = self._seed("整理季度财报", "lr-slot")
-        turn = {"id": "turn-slot", "bot_id": "bot-main", "run_attempt_id": 1,
-                "history": [{"role": "user", "content": "supervisor"}]}
+        sent = self._seed("整理季度财报", "lr-slot")
+        turn = self.app.store.get("turn", self.app.store.find(
+            "turn", work_id=sent, newest=True, limit=1)[0]["id"])
+        profile = next(iter(self.app.profiles.values()))
 
         def supervisor():
-            runtime.complete(turn, {"id": "test", "model": "test"})
+            try:
+                PiModel(self.app).run(runtime, turn, profile)
+            except Fault:
+                pass
 
-        with patch("pangpang.pi_runtime.PiModel", RoutingModel):
+        with patch.object(PiModel, "_exchange_impl", impl):
             for _ in range(5):
                 thread = threading.Thread(target=supervisor)
                 started = time.perf_counter()
                 thread.start()
                 time.sleep(0.005)
-                routing = self._resolve("继续核对", hint=work)
+                routing = self._resolve("继续核对", hint=sent)
                 thread.join(timeout=2)
                 self.assertFalse(thread.is_alive())
                 samples.append((time.perf_counter() - started) * 1000)
-                self.assertEqual(routing["work_id"], work)
+                self.assertEqual(routing["work_id"], sent)
                 self.assertEqual(routing["route_source"], "local_model")
         self.assertEqual(state["peak"], 1)
+        self.assertEqual(state["slot"], 1)
         samples.sort()
         p50 = samples[len(samples) // 2]
         p95 = samples[max(0, int(round(0.95 * len(samples))) - 1)]
-        # Scripted slot wait, not a live-model TTFT. Printed for the completion report.
         print("model-slot wait ms p50=%.1f p95=%.1f samples=%s" % (
             p50, p95, [round(v, 1) for v in samples]))
-        self.assertLess(p50, 500)
+        self.assertGreaterEqual(p50, 20)
         self.assertLess(p95, 500)
 
 

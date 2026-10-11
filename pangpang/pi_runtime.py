@@ -110,8 +110,30 @@ class PiModel:
             out.append(m)
         return out
 
+    # None waits for a free model slot. Routing sets a finite bound on its own
+    # instance so a busy local model degrades instead of blocking the send.
+    _slot_timeout = None
+
     def exchange(self, profile, history, tools, handler, mode="run", budget=8, cancelled=None, on_proc=None,
                  on_delta=None, turn_id=None, attempt=0):
+        """One model worker. run() and complete() both enter here, so they share
+        one in-flight count with each other."""
+        sched = getattr(self.service, "scheduler", None) if self.service is not None else None
+        held = False
+        if sched is not None:
+            if not sched.acquire_model_call(self._slot_timeout):
+                raise Fault("model_busy")
+            held = True
+        try:
+            return self._exchange_impl(
+                profile, history, tools, handler, mode, budget, cancelled, on_proc,
+                on_delta, turn_id, attempt)
+        finally:
+            if held:
+                sched.release_model_call()
+
+    def _exchange_impl(self, profile, history, tools, handler, mode="run", budget=8, cancelled=None, on_proc=None,
+                       on_delta=None, turn_id=None, attempt=0):
         secret = self.credentials(profile)
         env = {k: v for k, v in os.environ.items()
                if k in {"PATH", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "LANG", "LC_ALL"}}

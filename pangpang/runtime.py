@@ -930,11 +930,12 @@ class Runtime:
         # Model profiles carry no resource_keys (normalize_profile forbids them), so
         # a model call never acquires an executor lock — a busy executor can no
         # longer freeze conversations.
-        # The call itself still shares TurnScheduler's model_max_concurrency with
-        # continuation routing, so a single local model is not asked twice at once.
+        # PiModel.exchange takes the shared model slot. A non-Pi model has no
+        # worker of its own, so this call takes the same slot.
+        from .pi_runtime import PiModel
         sched = getattr(self, "scheduler", None)
         held = False
-        if sched is not None:
+        if sched is not None and not isinstance(self.model, PiModel):
             sched.acquire_model_call()
             held = True
         try:
@@ -946,7 +947,6 @@ class Runtime:
             if sched and tid:
                 on_proc = lambda proc: (sched.register_proc(tid, attempt, proc)
                                         or (lambda: sched.deregister_proc(tid, attempt, proc)))
-            from .pi_runtime import PiModel
             history = self.model_history(turn) if finalizing else turn["history"]
             if isinstance(self.model, PiModel):
                 return self.model.complete(profile, history, selected_tools, on_proc=on_proc)

@@ -288,6 +288,14 @@ class ExplicitContinueHttpTests(unittest.TestCase):
             replayed = self.post("bots/bot-main/messages", body, "replay-key")
         self.assertEqual(sent["work_id"], first["work_id"])
         self.assertEqual(replayed["message_id"], sent["message_id"])
+        moved = dict(body, last_seen_event_id=first["message_id"],
+                     work_hint_id="work-cursor-moved")
+        replayed_cursor = self.post("bots/bot-main/messages", moved, "replay-key")
+        self.assertEqual(replayed_cursor["message_id"], sent["message_id"])
+        self.assertEqual(len(calls), 1)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.post("bots/bot-main/messages", dict(body, text="另一句"), "replay-key")
+        self.assertEqual(json.load(caught.exception)["code"], "idempotency_conflict")
         self.assertEqual(len(calls), 1)
 
     def test_side_effect_correction_is_refused_before_commit(self):

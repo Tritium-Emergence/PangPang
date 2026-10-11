@@ -1580,6 +1580,17 @@ class Service:
         return any(entry.get("role") == "tool" or entry.get("tool_calls")
                    for entry in turn.get("history", []))
 
+    def _message_turn_inflight(self, message):
+        """True while the turn that consumed this message can still dispatch."""
+        turn_id = (message or {}).get("consumed_by_turn_id")
+        if not turn_id:
+            return False
+        try:
+            turn = self.store.get("turn", turn_id)
+        except Fault:
+            return False
+        return turn.get("status") in {"queued", "running"}
+
     def _effective_message_work(self, message):
         if not message:
             return None
@@ -1663,7 +1674,8 @@ class Service:
         previous_for_gate = None
         correction_eligible = False
         if (last_seen is not None and previous is not None
-                and not self._message_has_tool_activity(previous)):
+                and not self._message_has_tool_activity(previous)
+                and not self._message_turn_inflight(previous)):
             correction_eligible = True
             previous_for_gate = {"message_id": previous["id"],
                                  "content": str(previous.get("content", ""))[:1200],
@@ -1804,6 +1816,15 @@ class Service:
                 picked, quality = hint["id"], "default_continue"
             else:
                 picked, quality = None, "fallback"
+        elif choice == "UNSURE":
+            # An unsure call is not a confident attribution. With a real tab
+            # focus, stay on it. With none, start a fresh Work at the same
+            # authority as any other fresh Work.
+            if hint is not None:
+                picked, quality = hint["id"], "default_continue"
+            else:
+                picked = None
+                quality = "deterministic"
         elif choice == "NEW_TOPIC":
             if hint is not None and confidence < switch_threshold:
                 picked, quality = hint["id"], "default_continue"
@@ -1824,14 +1845,6 @@ class Service:
 
         result = dict(base, work_id=picked, route_source=route_source,
                       route_quality=quality, proposal=verdict)
-        try:
-            correction_conf = float(verdict.get("correction_confidence") or 0)
-        except (TypeError, ValueError):
-            correction_conf = 0.0
-        if (correction_eligible and verdict.get("correction")
-                and correction_conf >= correction_threshold):
-            result["correction_target_message_id"] = previous["id"]
-            result["correction_superseded_message_ids"] = superseded
         return result
 
     LOCAL_ROUTING_TIMEOUT_S = 6
@@ -1876,28 +1889,23 @@ class Service:
         state = {"cancelled": False}
         box = {}
         def run():
-            sched = getattr(self, "scheduler", None)
-            held = False
             try:
                 if state["cancelled"]:
                     return
-                if sched is not None and not sched.acquire_model_call(self.LOCAL_ROUTING_TIMEOUT_S):
-                    box["busy"] = True
-                    return
-                held = sched is not None
-                if held:
-                    box["acquired"] = True
-                if state["cancelled"]:
-                    return
-                message, _usage = PiModel(self).complete(
+                model = PiModel(self)
+                model._slot_timeout = self.LOCAL_ROUTING_TIMEOUT_S
+                message, _usage = model.complete(
                     profile, [{"role": "user", "content": prompt}], [],
                     cancelled=lambda: state["cancelled"])
+                box["acquired"] = True
                 box["text"] = str((message or {}).get("content") or "")
+            except Fault as error:
+                if error.code == "model_busy":
+                    box["busy"] = True
+                else:
+                    box["error"] = True
             except Exception:
                 box["error"] = True
-            finally:
-                if held:
-                    sched.release_model_call()
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
         worker.join(timeout=self.LOCAL_ROUTING_TIMEOUT_S)
@@ -1928,9 +1936,7 @@ class Service:
         except (ValueError, AttributeError):
             return self._local_routing_failed("bad_json")
         if choice == "UNSURE":
-            # Low confidence so the caller's hysteresis applies: CURRENT when a
-            # real tab focus exists, and a fresh Work when it does not.
-            mapped, index, confidence = "NEW_TOPIC", 0, 0.0
+            mapped, index, confidence = "UNSURE", 0, 0.0
         else:
             confidence = self._local_choice_confidence(parsed)
             if confidence is None:
@@ -2090,6 +2096,12 @@ class Service:
                 if (target_msg and target_msg.get("bot_id") == bot_id
                         and target_msg.get("stream_id") == meta.get("stream_id")
                         and old_work_id and old_work_id != work["id"]
+                        and (self._message_has_tool_activity(target_msg)
+                             or self._message_turn_inflight(target_msg))):
+                    raise Fault("routing_correction_rejected", 409)
+                if (target_msg and target_msg.get("bot_id") == bot_id
+                        and target_msg.get("stream_id") == meta.get("stream_id")
+                        and old_work_id and old_work_id != work["id"]
                         and not self._message_has_tool_activity(target_msg)):
                     correction = self.store.put("routing_correction", {
                         "id": uid("route-correction"), "target_message_id": target_mid,
@@ -2108,7 +2120,19 @@ class Service:
                           routing_event_id=route_event["id"],
                           routing_correction_id=correction_id)
             return result
-        return self.store.once("send:" + bot_id, key, body, action)
+        return self.store.once("send:" + bot_id, key, self._idempotent_message(body), action)
+
+    @staticmethod
+    def _idempotent_message(body):
+        """Journal identity of one chat send.
+
+        last_seen_event_id and work_hint_id move while a request is in flight.
+        A retry of the same send keeps every other field and must replay.
+        """
+        if not isinstance(body, dict):
+            return body
+        return {k: v for k, v in body.items()
+                if k not in {"last_seen_event_id", "work_hint_id"}}
 
     def link_work(self, turn_id, target_work_id):
         """Rebind the current provisional turn onto an existing Work the model

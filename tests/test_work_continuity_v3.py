@@ -127,17 +127,12 @@ class WorkContinuityV3Tests(unittest.TestCase):
                 "stream_id": "tab-corr", "last_seen_event_id": wrong_answer}
         routing = self.app.resolve_continuation("bot-main", body)
         self.assertEqual(routing["work_id"], a["work_id"])
-        self.assertEqual(routing["correction_target_message_id"], u1["message_id"])
-
+        # A classifier may name a Work. It does not write a correction.
+        self.assertIsNone(routing["correction_target_message_id"])
         corrected = self.app.send("bot-main", body, "corr-u2", routing=routing)
-        self.assertIsNotNone(corrected["routing_correction_id"])
-        # Raw fact is unchanged.
+        self.assertIsNone(corrected["routing_correction_id"])
+        self.assertEqual(self.app.store.find("routing_correction", limit=10), [])
         self.assertEqual(self.app.store.get("message", u1["message_id"])["work_id"], b["work_id"])
-
-        turn = self.app.store.get("turn", corrected["turn_id"])
-        payload = json.dumps(projection(self.app, turn), ensure_ascii=False)
-        self.assertIn("这个涨了多少", payload)
-        self.assertNotIn("压缩机价格上涨了", payload)
 
     def test_weak_route_write_task_is_upgraded_to_approval(self):
         self.app.probe("codex-local")
@@ -278,6 +273,45 @@ class WorkContinuityV3Tests(unittest.TestCase):
         self.assertIn("这个涨了多少", payload)
         self.assertNotIn("压缩机价格上涨了", payload)
 
+    def test_user_correction_refuses_a_turn_that_is_still_queued_or_running(self):
+        target = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-live"}, "live-a")
+        self.app.finish_turn(self.app.store.get("turn", target["turn_id"]), "阿里上下文")
+        for status in ("queued", "running"):
+            wrong = self.app.send("bot-main", {"text": "这个涨了多少", "stream_id": "tab-live"}, "live-" + status)
+            turn = self.app.store.get("turn", wrong["turn_id"])
+            turn["status"] = status
+            self.app.store.put("turn", turn)
+            before = len(self.app.store.find("routing_correction", limit=20))
+            messages = len(self.app.store.find("message", bot_id="bot-main", limit=1000))
+            body = self._user_move(target["work_id"], "tab-live", wrong["message_id"])
+            with self.assertRaises(Fault) as caught:
+                self.app.resolve_continuation("bot-main", body)
+            self.assertEqual(caught.exception.code, "routing_correction_rejected")
+            self.assertEqual(len(self.app.store.find("routing_correction", limit=20)), before)
+            self.assertEqual(len(self.app.store.find("message", bot_id="bot-main", limit=1000)), messages)
+            self.assertEqual(self.app.store.get("turn", wrong["turn_id"])["status"], status)
+            self.app.finish_turn(self.app.store.get("turn", wrong["turn_id"]), "先结束")
+
+    def test_send_refuses_a_correction_once_the_old_turn_is_running(self):
+        target = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-race"}, "race-a")
+        self.app.finish_turn(self.app.store.get("turn", target["turn_id"]), "阿里上下文")
+        wrong = self.app.send("bot-main", {"text": "这个涨了多少", "stream_id": "tab-race"}, "race-b")
+        self.app.finish_turn(self.app.store.get("turn", wrong["turn_id"]), "压缩机")
+        answer = self.app.store.get("state", "bot-main")["last_delivery_ref"]
+        body = self._user_move(target["work_id"], "tab-race", answer)
+        routing = self.app.resolve_continuation("bot-main", body)
+        self.assertEqual(routing["correction_target_message_id"], wrong["message_id"])
+        turn = self.app.store.get("turn", wrong["turn_id"])
+        turn["status"] = "running"
+        self.app.store.put("turn", turn)
+        before = len(self.app.store.find("message", bot_id="bot-main", limit=1000))
+        with self.assertRaises(Fault) as caught:
+            self.app.send("bot-main", body, "race-c", routing=routing)
+        self.assertEqual(caught.exception.code, "routing_correction_rejected")
+        self.assertEqual(len(self.app.store.find("message", bot_id="bot-main", limit=1000)), before)
+        self.assertEqual(self.app.store.find("routing_correction", limit=10), [])
+        self.assertEqual(self.app.store.get("turn", wrong["turn_id"])["status"], "running")
+
     def test_user_correction_refuses_a_turn_that_already_dispatched_a_tool(self):
         calls = []
         self.app.semantic_gate.classify_continuation = lambda *args, **kwargs: calls.append(1)
@@ -313,6 +347,7 @@ class WorkContinuityV3Tests(unittest.TestCase):
         work["constraints"] = ["必须保留的硬约束"]
         self.app.store.put("work", work)
         wrong = self.app.send("bot-main", {"text": "冰箱", "stream_id": "tab-fork"}, "fork-b")
+        self.app.finish_turn(self.app.store.get("turn", wrong["turn_id"]), "冰箱上下文")
         body = self._user_move(delivered["work_id"], "tab-fork", wrong["message_id"])
         routing = self.app.resolve_continuation("bot-main", body)
         sent = self.app.send("bot-main", body, "fork-c", routing=routing)

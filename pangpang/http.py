@@ -456,6 +456,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 routing = [None] # Work router result, computed outside Store transactions.
                 normalized_chat_body = [None]
                 installation_config = [None]
+                journal_body = body
                 def action():
                     if parts == ["settings"]:
                         raise Fault("use_guided_model_and_conversational_setup", 410)
@@ -473,9 +474,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         bot_id, verb = parts[1:]
                         if verb == "messages":
                             # Normal Web chat never supplies authoritative work_id.
-                            # The original HTTP body remains the outer idempotency
-                            # payload; the normalized body is deterministic and the
-                            # server-produced routing result is not part of its digest.
+                            # The outer journal omits the two cursor fields that change
+                            # between retries. The routing result is not part of it.
                             send_body = normalized_chat_body[0] or body
                             return service.send(bot_id, send_body, key, routing=routing[0])
                         if verb == "update": return service.update_bot(bot_id, body)
@@ -557,7 +557,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 # Committed reality wins before any fresh probabilistic judgement.
                 if (len(parts) == 3 and parts[0] == "bots" and parts[2] == "messages"
                         and isinstance(body, dict)):
-                    committed = service.store.once_lookup("http:" + path, key, body)
+                    journal_body = service._idempotent_message(body)
+                    committed = service.store.once_lookup("http:" + path, key, journal_body)
                     if committed is not None:
                         self.respond(committed); return
                     normalized = dict(body)
@@ -571,11 +572,13 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     normalized_chat_body[0] = normalized
                     # If service.send committed but the outer HTTP journal did not
                     # (process crash in between), replay it before paying another Jev RTT.
-                    inner = service.store.once_lookup("send:" + parts[1], key, normalized)
+                    inner = service.store.once_lookup(
+                        "send:" + parts[1], key, service._idempotent_message(normalized))
                     if inner is not None:
-                        self.respond(service.store.journal_once("http:" + path, key, body, inner)); return
+                        self.respond(service.store.journal_once(
+                            "http:" + path, key, journal_body, inner)); return
                     routing[0] = service.resolve_continuation(parts[1], normalized)
-                self.respond(action() if external else service.store.once("http:" + path, key, body, action))
+                self.respond(action() if external else service.store.once("http:" + path, key, journal_body, action))
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except Exception as error:
