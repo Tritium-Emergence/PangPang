@@ -3288,8 +3288,9 @@ class Service:
           unconfigured required setup absent (or an optional capability intentionally off)
           blocked configured but unusable under current policy/runtime/credential state
           unknown an authoritative observation is unavailable (e.g. config_stale)
-        Executor state is taken verbatim from the real admission gate route(), so this
-        projection cannot drift from what the control plane would actually allow."""
+        Executor state reuses route()'s admission gates (enabled, probe, supervision,
+        online). It does not apply work placement: an earlier host, a directory
+        choice, or a credential choice is decided only when a task is submitted."""
         out = []
         # There is always exactly one global model profile (global_profile enforces
         # exactly_one_global_model_required); it is shared by the main Bot and every
@@ -3336,9 +3337,10 @@ class Service:
                         "provider": None, "operator_action_code": code, "operator_action": action,
                         "restart_required": False, "detail": {"installations": []}})
         else:
-            # quiet=True: this is a projection poll, not a submission — do not emit the
-            # "no eligible executor" warning route() logs for a real submit.
-            routing = self.route(bot_id or "bot-main", {"id": "capability-probe"}, {}, quiet=True)
+            # quiet=True: a projection poll, not a submission. placement=False keeps
+            # two available profiles from looking unavailable when their directories differ.
+            routing = self.route(bot_id or "bot-main", {"id": "capability-probe"}, {},
+                                 quiet=True, placement=False)
             per = [{"installation_id": c["installation_id"], "host_id": c["host_id"], "reason": None}
                    for c in routing["candidates"]] + routing["rejected"]
             # discovered / execution_verified come from stored probe and receipt
@@ -3866,8 +3868,19 @@ class Service:
             tuple(sorted(installation.get("resource_keys") or [])),
             tuple(sorted(installation.get("allowed_bots") or [])),
             str(installation.get("endpoint") or ""),
-            bool(installation.get("secret_refs")),
+            self._credential_ids(installation),
         )
+
+    def _credential_ids(self, installation):
+        """Sorted credential ids. secret_refs stores ids, not secret values."""
+        refs = installation.get("secret_refs")
+        if isinstance(refs, dict):
+            ids = [value for value in refs.values() if isinstance(value, str) and value]
+        elif isinstance(refs, (list, tuple)):
+            ids = [value for value in refs if isinstance(value, str) and value]
+        else:
+            ids = []
+        return tuple(sorted(ids))
 
     def _route_affinity(self, work):
         """Host, installation and directory already used by this Work.
@@ -3890,13 +3903,14 @@ class Service:
         facts = {"host_id": host_id}
         if art_hosts:
             facts["artifact_host"] = host_id
-        insts = {t.get("installation_id") for t in tasks if t.get("installation_id")}
         cwds = {t.get("cwd") for t in tasks if isinstance(t.get("cwd"), str) and t.get("cwd")}
-        if len(insts) == 1 and len(cwds) == 1:
-            facts["installation_id"] = next(iter(insts))
+        insts = {t.get("installation_id") for t in tasks if t.get("installation_id")}
+        if len(cwds) > 1:
+            facts["directory_conflict"] = True
+        elif len(cwds) == 1:
             facts["cwd"] = next(iter(cwds))
-        else:
-            facts["directory_unknown"] = True
+            if len(insts) == 1:
+                facts["installation_id"] = next(iter(insts))
         return facts
 
     def _same_host_scope_conflict(self, candidates):
@@ -3915,14 +3929,14 @@ class Service:
             installation = self.execution.installations[candidate["installation_id"]]
             env = installation.get("env") if isinstance(installation.get("env"), dict) else {}
             envs.add(tuple(sorted((str(k), str(v)) for k, v in env.items())))
-            secrets.add(bool(installation.get("secret_refs")))
+            secrets.add(self._credential_ids(installation))
             risks.add(installation.get("risk") or "write")
         if len(risks) > 1 or len(secrets) > 1:
             return True
         return len(envs) > 1 and any(envs)
 
     def _affinity_decision(self, candidates, rejected, facts):
-        if facts.get("conflict"):
+        if facts.get("conflict") or facts.get("directory_conflict"):
             return None, {"code": "ambiguous_executor", "advice": (
                 "这项工作的历史设备或目录不一致，不能改派。请指定 installation_id。")}
         host_id = facts.get("host_id")
@@ -3963,7 +3977,7 @@ class Service:
             "这项工作此前在设备 %s 的目录 %s 执行。该位置现在不可用，不会改派到其他机器或目录。"
             % (host_id, shown))}
 
-    def route(self, bot_id, work, body, *, quiet=False):
+    def route(self, bot_id, work, body, *, quiet=False, placement=True):
         body = self._resolve_executor_intent(body)
         candidates, rejected = [], []
         for e in self.execution.installations.values():
@@ -4028,28 +4042,29 @@ class Service:
             if reason:
                 log.debug("route reject id=%s host=%s reason=%s", e["id"], e["host_id"], reason)
             (rejected if reason else candidates).append({"installation_id": e["id"], "host_id": e["host_id"], "reason": reason})
-        explicit = bool(body.get("host_id") or body.get("installation_id")
-                        or work.get("required_host_id") or work.get("required_installation_id"))
-        facts = None if explicit or body.get("intent_ambiguity") else self._route_affinity(work)
-        if facts and facts.get("artifact_host") and not facts.get("conflict"):
-            pinned = facts["artifact_host"]
-            kept = []
-            for candidate in candidates:
-                if candidate["host_id"] == pinned:
-                    kept.append(candidate)
-                else:
-                    rejected.append(dict(candidate, reason="files_on_other_host"))
-            candidates = kept
         candidates.sort(key=lambda c: (self._route_priority(self.execution.installations[c["installation_id"]]), c["installation_id"]))
         block = None
-        if facts:
-            choice, block = self._affinity_decision(candidates, rejected, facts)
-            if choice and not block:
-                candidates = [choice] + [c for c in candidates if c["installation_id"] != choice["installation_id"]]
-        elif not explicit and not body.get("intent_ambiguity") and len(candidates) > 1 and self._material_auto_conflict(candidates):
-            ids = "、".join(sorted(c["installation_id"] for c in candidates))
-            block = {"code": "ambiguous_executor", "advice": (
-                "这些执行器的目录、凭据或权限不同，不能按优先级挑选：%s。请指定 installation_id。" % ids)}
+        if placement:
+            explicit = bool(body.get("host_id") or body.get("installation_id")
+                            or work.get("required_host_id") or work.get("required_installation_id"))
+            facts = None if explicit or body.get("intent_ambiguity") else self._route_affinity(work)
+            if facts and facts.get("artifact_host") and not facts.get("conflict"):
+                pinned = facts["artifact_host"]
+                kept = []
+                for candidate in candidates:
+                    if candidate["host_id"] == pinned:
+                        kept.append(candidate)
+                    else:
+                        rejected.append(dict(candidate, reason="files_on_other_host"))
+                candidates = kept
+            if facts:
+                choice, block = self._affinity_decision(candidates, rejected, facts)
+                if choice and not block:
+                    candidates = [choice] + [c for c in candidates if c["installation_id"] != choice["installation_id"]]
+            elif not explicit and not body.get("intent_ambiguity") and len(candidates) > 1 and self._material_auto_conflict(candidates):
+                ids = "、".join(sorted(c["installation_id"] for c in candidates))
+                block = {"code": "ambiguous_executor", "advice": (
+                    "这些执行器的目录、凭据或权限不同，不能按优先级挑选：%s。请指定 installation_id。" % ids)}
         if block:
             for candidate in candidates:
                 rejected.append(dict(candidate, reason="work_directory_held"))

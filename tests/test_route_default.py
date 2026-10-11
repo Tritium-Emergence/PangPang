@@ -145,6 +145,62 @@ class WorkAffinityTests(unittest.TestCase):
         r = self.app.route('bot-main', self.work, {'installation_id': 'codex-desk'})
         self.assertEqual(r['selected']['installation_id'], 'codex-desk')
 
+    def test_several_directories_are_not_collapsed_onto_one_candidate(self):
+        self._ran('codex-home', 'home', '/home/dev/proj')
+        self.app.store.put('task', {
+            'id': 'task-other-dir', 'work_id': self.work['id'], 'status': 'succeeded',
+            'host_id': 'home', 'installation_id': 'codex-home', 'cwd': '/home/dev/notes',
+            'receipt': {'status': 'succeeded'}, 'created': 2.0})
+        r = self.app.route('bot-main', self.work, {})
+        self.assertIsNone(r['selected'])
+        self.assertEqual(r['routing_block']['code'], 'ambiguous_executor')
+
+    def test_one_directory_matches_every_installation_that_used_it(self):
+        notes = {'id': 'claude-home', 'host_id': 'home', 'adapter': 'claude-code',
+                 'argv': [sys.executable, '-c', 'print(1)'], 'cwd': '/home/dev/proj',
+                 'risk': 'write', 'priority': 1, 'use_when': '同一目录'}
+        self.app.execution.installations['claude-home'] = notes
+        _probe(self.app, 'claude-home')
+        self._ran('codex-home', 'home', '/home/dev/proj')
+        self.app.store.put('task', {
+            'id': 'task-claude-same-dir', 'work_id': self.work['id'], 'status': 'succeeded',
+            'host_id': 'home', 'installation_id': 'claude-home', 'cwd': '/home/dev/proj',
+            'receipt': {'status': 'succeeded'}, 'created': 2.0})
+        r = self.app.route('bot-main', self.work, {})
+        self.assertEqual(r['selected']['installation_id'], 'claude-home')
+        self.assertNotIn('routing_block', r)
+
+    def test_different_credential_ids_are_not_chosen_by_priority(self):
+        self.app.execution.installations['codex-home']['secret_refs'] = {'CODEX_API_KEY': 'ref-home'}
+        self.app.execution.installations['codex-desk']['secret_refs'] = {'CODEX_API_KEY': 'ref-desk'}
+        r = self.app.route('bot-main', self.work, {})
+        self.assertIsNone(r['selected'])
+        self.assertEqual(r['routing_block']['code'], 'ambiguous_executor')
+        self.assertNotIn('ref-home', str(r))
+        self.assertNotIn('ref-desk', str(r))
+
+    def test_the_same_credential_id_still_follows_priority(self):
+        self.app.execution.installations['codex-home']['secret_refs'] = {'CODEX_API_KEY': 'ref-shared'}
+        self.app.execution.installations['codex-desk']['secret_refs'] = {'CODEX_API_KEY': 'ref-shared'}
+        r = self.app.route('bot-main', self.work, {})
+        self.assertEqual(r['selected']['installation_id'], 'codex-desk')
+
+    def test_preflight_keeps_the_routing_block(self):
+        from pangpang.runtime import Runtime
+        self._ran('codex-home', 'home', '/home/dev/proj')
+        self.app.broker._last_seen.pop('home', None)
+        runtime = Runtime(self.app)
+        current = {'bot_id': 'bot-main', 'work_id': self.work['id']}
+        with self.assertRaises(Fault) as blocked:
+            runtime._semantic_preflight(current, 'submit_task', {'prompt': '继续'})
+        self.assertEqual(blocked.exception.code, 'executor_host_offline')
+        self.assertIn('不会改派', blocked.exception.advice)
+        with self.assertRaises(Fault) as missing:
+            runtime._semantic_preflight(current, 'submit_task',
+                                        {'prompt': '继续', 'installation_id': 'missing'})
+        self.assertEqual(missing.exception.code, 'no_eligible_executor')
+        self.assertIsNone(missing.exception.advice)
+
     def test_unknown_directory_does_not_guess_another_machine(self):
         notes = {'id': 'claude-home', 'host_id': 'home', 'adapter': 'claude-code',
                  'argv': [sys.executable, '-c', 'print(1)'], 'cwd': '/home/dev/notes',
@@ -269,6 +325,19 @@ class SameHostProfileTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, 'ambiguous_executor')
         pinned = self.app.route('bot-main', self.work, {'installation_id': 'codex-notes'})
         self.assertEqual(pinned['selected']['installation_id'], 'codex-notes')
+
+    def test_readiness_stays_ready_when_directories_differ(self):
+        entry = next(row for row in self.app.effective_capabilities() if row['capability'] == 'executor')
+        self.assertEqual(entry['state'], 'ready')
+        reasons = {row['reason'] for row in entry['detail']['installations'] if row['reason']}
+        self.assertNotIn('work_directory_held', reasons)
+        submitted = self.app.route('bot-main', self.work, {})
+        self.assertIsNone(submitted['selected'])
+        self.assertEqual(submitted['routing_block']['code'], 'ambiguous_executor')
+        for installation in self.app.execution.installations.values():
+            installation['enabled'] = False
+        blocked = next(row for row in self.app.effective_capabilities() if row['capability'] == 'executor')
+        self.assertEqual(blocked['state'], 'blocked')
 
     def test_same_directory_and_rights_follow_priority(self):
         self.app.execution.installations['codex-notes']['cwd'] = self.app.execution.installations['codex-dev']['cwd']

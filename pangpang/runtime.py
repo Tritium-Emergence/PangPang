@@ -488,8 +488,10 @@ class Runtime:
             # remains the sole authoritative commit path and re-runs its full route
             # mapping; this check only avoids a pointless Jev call when Python
             # already knows there is no eligible executor.
-            if not self.service.route(bot_id, work, body).get("selected"):
-                raise Fault("no_eligible_executor")
+            routed = self.service.route(bot_id, work, body)
+            if not routed.get("selected"):
+                block = routed.get("routing_block") or {}
+                raise Fault(block.get("code") or "no_eligible_executor", advice=block.get("advice"))
             return
 
     def _log_semantic_gate(self, current, name, mode, *, snapshot=None,
