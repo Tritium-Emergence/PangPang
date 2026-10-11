@@ -59,7 +59,10 @@ export default {
     model_request_failed: 'Model request failed. Check the endpoint, model name and network.',
     model_rate_limited: 'Model rate-limited (429/quota). Retry later or check your quota.',
     model_timeout: 'The model timed out. Retry later or check whether the endpoint is reachable.',
-    model_auth_failed: 'Authentication failed (401/403): the API key may be wrong or expired; a subscription login credential usually cannot be used directly as an API key; use a key issued by the API service. Verify and retry.',
+    model_auth_failed: 'Authentication failed (401/403): the API key may be wrong or expired; a subscription login credential usually cannot be used directly as an API key; use a key issued by the API service. Verify and retry.',
+    invalid_output_tokens: 'Invalid output cap. Unknown models need at least 4096; lower than that truncates tool calls.',
+    output_exceeds_context_window: 'The output cap does not fit in the context window (the prompt still needs room). On a 32K window, set the cap the model actually accepts, for example 8192.',
+    invalid_context_window: 'Invalid context window. Use an integer of at least 5120, and not above the catalog window for this model.',
   },
   workpane: {
     prevPage: 'Prev', nextPage: 'Next',
@@ -107,7 +110,12 @@ export default {
     provider: 'Model provider', providerCustom: 'Custom / local / third-party compatible service', modelName: 'Model name',
     apiProtocol: 'API protocol', protocolOpenaiCompletions: 'OpenAI Chat Completions (for most compatible services)',
     apiBaseUrl: 'API base URL', outputCap: 'Output cap (tokens)',
-    outputCapHint: 'Max tokens generated per reply, minimum {{min}}. Too low will truncate replies that use tool calls.',
+    contextWindow: 'Context window (tokens)',
+    outputCapHint: 'Max tokens generated per reply, minimum {{min}}. Too low truncates tool calls. A 32K window cannot use 32768; set the cap the model accepts and leave room for the prompt.',
+    concurrency: 'Simultaneous model conversations',
+    concurrencyRestart: 'Concurrency is saved. Restart the coordinator before it runs at the new limit.',
+    statusBar: 'Status',
+    optionalGate: 'Optional; chat does not depend on it',
     reasoningLevel: 'Reasoning effort', reasoningDefault: 'Server default (no forced toggle)', reasoningOff: 'Off / lowest level the model allows',
     advancedSettings: 'Advanced settings for compatible services',
     advancedHint: "Follow your provider's documentation. A model named Qwen may still use different API parameters; Default sends no thinking parameter.",
@@ -225,6 +233,7 @@ export default {
   login: {
     failed: 'Login failed', headline: 'A place for every piece of work.', subtitle: 'One steward, a team of long-term bots, connected to all your computers.',
     accessKey: 'Access key', enter: 'Enter the studio →',
+    keyHint: 'The key is shown once in the coordinator terminal on first start. To see it again, run pangpang cloud --show-access-key on that computer (an interactive terminal is required). The key is never written into chat.',
   },
   facts: { createdAt: 'Created' },
 } as const;

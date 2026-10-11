@@ -60,6 +60,9 @@ export default {
     model_rate_limited: '模型限流（429/配额）：稍后重试，或检查配额。',
     model_timeout: '模型响应超时：可稍后重试，或检查该端点是否可用。',
     model_auth_failed: '鉴权失败（401/403）：API Key 可能不正确或已过期；订阅登录凭据通常不能直接当 API Key 用，请使用该 API 服务签发的密钥。请核对后重试。',
+    invalid_output_tokens: '输出上限无效。未知模型最低 4096；过小会截断工具调用。',
+    output_exceeds_context_window: '输出上限大于上下文窗口能容纳的长度（须为提示词留出空间）。32K 窗口请把输出上限降到模型实际接受的值，例如 8192。',
+    invalid_context_window: '上下文窗口无效。须为整数，且不小于 5120，也不能超过该模型目录给出的窗口。',
   },
   workpane: {
     prevPage: '上一页', nextPage: '下一页',
@@ -107,7 +110,12 @@ export default {
     provider: '模型服务商', providerCustom: '自定义／本地／第三方兼容服务', modelName: '模型名称',
     apiProtocol: '接口协议', protocolOpenaiCompletions: 'OpenAI Chat Completions（常见兼容服务）',
     apiBaseUrl: 'API 基础地址', outputCap: '输出上限（token）',
-    outputCapHint: '每轮回复最多生成的 token 数，最小 {{min}}。太小会让带工具调用的回复被截断。',
+    contextWindow: '上下文窗口（token）',
+    outputCapHint: '每轮回复最多生成的 token 数，最小 {{min}}。太小会截断工具调用。32K 窗口不能用 32768，请填模型实际接受的上限，并给提示词留出空间。',
+    concurrency: '同时进行的模型对话数',
+    concurrencyRestart: '并行数已保存。重启协调器后才会按新的并行数运行。',
+    statusBar: '状态',
+    optionalGate: '可选，不影响对话',
     reasoningLevel: '思考强度', reasoningDefault: '服务端默认（不强制开关）', reasoningOff: '关闭／模型允许的最低档',
     advancedSettings: '兼容服务高级设置',
     advancedHint: '按服务端文档选择。模型叫 Qwen 不代表接口参数相同；选择默认时不发送思考开关。',
@@ -226,6 +234,7 @@ export default {
   login: {
     failed: '登录失败', headline: '让工作各有所归。', subtitle: '一个管家，长期陪伴的 Bot，与你的每一台电脑。',
     accessKey: '访问密钥', enter: '进入工作室 →',
+    keyHint: '密钥在协调器首次启动的终端里显示一次。找回：在那台电脑上执行 pangpang cloud --show-access-key（需要交互终端）。密钥不会写入聊天。',
   },
   facts: { createdAt: '创建于' },
 } as const;

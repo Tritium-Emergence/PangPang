@@ -86,7 +86,7 @@ test(' the settings dialog shows and sets the output cap, never below the floor'
   await page.locator('#settings').click();
   const cap = page.locator('#model-output-tokens');
   await expect(cap).toHaveValue('32768');
-  await expect(cap).toHaveAttribute('min', '32768');
+  await expect(cap).toHaveAttribute('min', '4096');
   // A catalog model whose own maximum is lower: that maximum is both the value and the floor.
   const low = await page.evaluate(async () => {
     const c = await (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json();
