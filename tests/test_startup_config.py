@@ -54,8 +54,12 @@ class StartupConfigTests(unittest.TestCase):
             self.assertEqual(app.semantic_gate.mode, "shadow")
             self.assertFalse(app.semantic_gate.continuation_routing)
             self.assertEqual(self._ignored(), [])
+            self.assertEqual(self._replacements(), [])
         finally:
             app.store.close()
+
+    def _replacements(self):
+        return [message for message in self._messages() if "replaced stored" in message]
 
     def test_later_start_applies_turn_budget_and_semantic_gate_only(self):
         first = empty_config()
@@ -103,6 +107,38 @@ class StartupConfigTests(unittest.TestCase):
             self.assertEqual(app2.config["turn_budget"], 5)
             self.assertEqual(app2.semantic_gate.mode, "off")
             self.assertEqual(self._ignored(), [])
+            self.assertEqual(self._replacements(), [])
+        finally:
+            app2.store.close()
+
+    def test_replaced_keys_are_logged_when_nothing_else_differs(self):
+        first = empty_config()
+        first["turn_budget"] = 12
+        first["semantic_gate"] = {"mode": "enforce", "continuation_routing": True}
+        app = Service(first, self.data)
+        try:
+            app.commit_managed_config(copy.deepcopy(app.config))
+            stored = copy.deepcopy(app.config)
+        finally:
+            app.store.close()
+        self.records.clear()
+        second = copy.deepcopy(stored)
+        second["turn_budget"] = 8
+        second["semantic_gate"] = {"mode": "off", "continuation_routing": True}
+        app2 = Service(second, self.data)
+        try:
+            self.assertEqual(app2.config["turn_budget"], 8)
+            self.assertEqual(app2.semantic_gate.mode, "off")
+            self.assertTrue(app2.semantic_gate.continuation_routing)
+            self.assertEqual(self._ignored(), [])
+            text = "\n".join(self._replacements())
+            self.assertIn("replaced stored turn_budget: 12 -> 8", text)
+            # Stored JSON sorts keys, so the logged old value is that order.
+            self.assertIn(
+                "replaced stored semantic_gate: %r -> %r" % (
+                    {"continuation_routing": True, "mode": "enforce"},
+                    second["semantic_gate"]),
+                text)
         finally:
             app2.store.close()
 

@@ -9,8 +9,8 @@ from pangpang.model_config import WINDOW_FIT_OUTPUT_TOKENS
 
 ROOT = Path(__file__).resolve().parents[1]
 _CJK = re.compile(r"[\u4e00-\u9fff]")
-_PRIVATE = ("伍定远", "胖胖", "linux-gpu", "win-a", "win-b", "mac-a", "mac-b",
-            "qwen-shared", "cloud-small")
+_FLEET_MARKERS = ("linux-gpu", "linux-remote", "win-a", "win-b", "mac-a", "mac-b",
+                  "cloud-small", "qwen-shared")
 
 
 class PublicSampleTests(unittest.TestCase):
@@ -41,8 +41,9 @@ class PublicSampleTests(unittest.TestCase):
         self.assertEqual(runtime["resources"], [])
         self.assertEqual(runtime["turn_budget"], 8)
         blob = json.dumps({"persons": persons, "runtime": runtime}, ensure_ascii=False)
-        for private in _PRIVATE:
-            self.assertNotIn(private, blob)
+        self.assertNotRegex(blob, _CJK)
+        for marker in _FLEET_MARKERS:
+            self.assertNotIn(marker, blob)
 
 
 if __name__ == "__main__":

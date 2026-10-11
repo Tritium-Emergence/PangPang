@@ -173,7 +173,7 @@ class CollectProvenanceTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name)
         run = _init_repo(path)
-        (path / ".gitignore").write_text("build/\n*.egg-info/\n", encoding="utf-8")
+        (path / ".gitignore").write_text("/build/\n/*.egg-info/\n", encoding="utf-8")
         run("add", ".gitignore")
         run("commit", "-qm", "ignore build artifacts")
         (path / "build" / "lib").mkdir(parents=True)
@@ -190,8 +190,36 @@ class CollectProvenanceTests(unittest.TestCase):
 
     def test_repo_gitignore_covers_setuptools_artifacts(self):
         text = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn("\nbuild/\n", "\n" + text)
-        self.assertIn("*.egg-info/", text)
+        lines = {line.strip() for line in text.splitlines()}
+        self.assertIn("/build/", lines)
+        self.assertIn("/*.egg-info/", lines)
+        self.assertNotIn("build/", lines)
+        self.assertNotIn("*.egg-info/", lines)
+
+    def test_strict_mode_refuses_untracked_package_build_module(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name)
+        run = _init_repo(path)
+        gitignore = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
+        (path / ".gitignore").write_text(gitignore, encoding="utf-8")
+        run("add", ".gitignore")
+        run("commit", "-qm", "gitignore")
+        nested = path / "pangpang" / "build"
+        nested.mkdir(parents=True)
+        (nested / "__init__.py").write_text("untracked = True\n", encoding="utf-8")
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=str(path), capture_output=True, text=True, check=True)
+        self.assertIn("pangpang/build/__init__.py", status.stdout)
+        with self.assertRaises(SystemExit) as raised:
+            build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertIn("untracked", str(raised.exception))
+        (path / "build").mkdir()
+        (path / "build" / "lib.py").write_text("artifact\n", encoding="utf-8")
+        (nested / "__init__.py").unlink()
+        info = build_provenance.collect_provenance(require=True, root=str(path))
+        self.assertEqual(len(info["BUILD_COMMIT"]), 40)
 
     def _commit_version(self, path, version):
         run = _init_repo(path)

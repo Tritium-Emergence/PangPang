@@ -367,18 +367,26 @@ _STARTUP_CONFIG_KEYS = ("turn_budget", "semantic_gate")
 
 def _take_startup_overrides(live, file_config):
     """Copy turn_budget and semantic_gate from the startup config onto live
-    settings. Returns True when some other startup key does not match."""
+    settings. Returns (replacements, other_keys_differ). Each replacement is
+    (key, old value, new value) for a stored value the file actually changed."""
     if not isinstance(file_config, dict) or not isinstance(live, dict):
-        return False
+        return [], False
+    replacements = []
     for key in _STARTUP_CONFIG_KEYS:
-        if key in file_config and file_config[key] != live.get(key):
-            live[key] = copy.deepcopy(file_config[key])
+        if key not in file_config or file_config[key] == live.get(key):
+            continue
+        old = copy.deepcopy(live.get(key))
+        new = copy.deepcopy(file_config[key])
+        live[key] = new
+        replacements.append((key, old, new))
+    other = False
     for key, value in file_config.items():
         if key in _STARTUP_CONFIG_KEYS:
             continue
         if live.get(key) != value:
-            return True
-    return False
+            other = True
+            break
+    return replacements, other
 
 
 class Service:
@@ -448,7 +456,10 @@ class Service:
             if error.status != 404:
                 raise
         else:
-            if _take_startup_overrides(self.config, file_config):
+            replacements, other_ignored = _take_startup_overrides(self.config, file_config)
+            for key, old, new in replacements:
+                log.warning("startup config replaced stored %s: %r -> %r", key, old, new)
+            if other_ignored:
                 log.warning("startup config is not the live settings after the first start; "
                             "only turn_budget and semantic_gate are read from it, and other keys "
                             "stay in the stored settings")
