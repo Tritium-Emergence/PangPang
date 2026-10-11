@@ -5,8 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# System unit. Create a dedicated user and group before enabling.
+# User= and Group= must stay. Without them the process runs as root.
+# If this connector must read a person's workspace, change both lines to that
+# account. Do not use root.
 # pip install pangpang first. Pair once in a terminal before enabling this unit.
-# StateDirectory creates /var/lib/pangpang-connector.
+# StateDirectory creates /var/lib/pangpang-connector for that user.
+User=pangpang
+Group=pangpang
 StateDirectory=pangpang-connector
 WorkingDirectory=/var/lib/pangpang-connector
 ExecStart=/usr/bin/env python3 -m pangpang.cli connector --data /var/lib/pangpang-connector
@@ -18,4 +24,4 @@ UMask=0077
 NoNewPrivileges=true
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

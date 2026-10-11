@@ -163,13 +163,29 @@ def _parser():
     return parser
 
 
+def note_empty_install_directory(role, data, explicit, source_checkout):
+    """Tell the operator before an installed package creates a new empty tree.
+
+    Only the current directory is searched for a legacy relative tree. Data
+    that lives somewhere else has to be selected with ``--data``.
+    """
+    if explicit or source_checkout or _has_data_evidence(data):
+        return
+    sys.stderr.write(
+        "当前目录没有旧的 %s。将在稳定目录 %s 创建新的空数据。"
+        "若已有数据在其他路径，请停止并用 --data 指向该绝对路径。\n"
+        % (_LEGACY_DATA[role], data))
+
+
 def dispatch(args, rest, parser):
     """In-process cloud/connector start. ``sys.argv`` matches the historical launch contract."""
     from pangpang.layout import is_source_checkout
     try:
-        data = resolve_data_dir(args.role, args.data, source_checkout=is_source_checkout())
+        source = is_source_checkout()
+        data = resolve_data_dir(args.role, args.data, source_checkout=source)
     except DataLocationError as error:
         parser.error(str(error))
+    note_empty_install_directory(args.role, data, args.data, source)
     if args.role == "cloud":
         os.environ["PANGPANG_TOKEN"] = resolve_access_token(data, args.show_access_key, parser)
         from pangpang.__main__ import main as role_main

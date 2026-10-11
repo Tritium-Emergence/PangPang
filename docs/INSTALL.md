@@ -125,6 +125,13 @@ python -m pangpang.cli connector \
 
 显式 `--data` 始终优先。如果当前目录里已经有带数据库、Vault 或进程锁的旧相对 `data-v2` / `connector-data`，正式安装的启动会停下来并打印两条路径：不会把旧目录搬进新位置，也不会另建一个看起来是空白新用户的目录。
 
+从别的目录启动时，只检查当前目录下的那个相对路径。找不到、而稳定目录里也还没有数据时，程序会先向标准错误打印一行，说明即将在稳定目录创建新的空数据。已有数据若不在当前目录，先不要继续，用 `--data` 指向旧目录的绝对路径：
+
+```bash
+python -m pangpang.cli cloud --data /old/repo/data-v2
+python -m pangpang.cli connector --data /old/repo/connector-data
+```
+
 `python -m pangpang.cli` 是已安装环境的入口，不创建 `.venv`，也不用 `npm ci --omit=dev` 删掉开发依赖。`python launch.py` 仍是源码 / Release zip 的引导入口，会准备仓库内 `.venv`，并在没有自带 Bun worker 时用 `npm ci --omit=dev` 安装生产用 Node 依赖。
 
 ## 升级与回退
@@ -136,8 +143,8 @@ python -m pangpang.cli backup --data /absolute/data --dest /absolute/backup --co
 python -m pangpang.cli restore --backup /absolute/backup --data /absolute/restore-drill --confirm
 ```
 
-非交互环境不带 `--confirm` 会直接退出，不写文件。进程锁被占用、磁盘空间不足、缺少 Vault 时也会退出，不留下一份声称成功的备份。清单里若仍有未终结任务、unknown、SSH 主机，或 semantic gate 不是 `off`，备份可以留下，但退出码为 3，升级不得继续。本命令不迁移这些记录。
+非交互环境不带 `--confirm` 会直接退出，不写文件。进程锁被占用、磁盘空间不足、缺少 Vault 时也会退出，不留下一份声称成功的备份。清单里若仍有未终结任务、unknown、SSH 主机、尚未 acknowledged 的连接器 `local_run`，或 semantic gate 不是 `off`，备份可以留下，但退出码为 3，升级不得继续。本命令不迁移这些记录。`adapters.json` 若存在会一并写入清单，其中的执行器环境与 Vault 同样敏感。
 
-恢复演练应指向一份空目录或已停止的同一数据目录，并核对访问密钥与设备身份仍在。旧二进制会拒绝已升到 v2 的库；回滚是旧程序加上这份升级前的备份，不是只看 `--version`。
+恢复先把校验过的文件写到目标旁边的暂存目录，再次核对后才改名进入目标。中途失败会留下原来的数据目录，不留下半份 Vault。演练可以指向一份空目录或已停止的同一数据目录，并核对访问密钥与设备身份仍在。旧二进制会拒绝已升到 v2 的库；回滚是旧程序加上这份升级前的备份，不是只看 `--version`。
 
-服务示例在 `deploy/`：按 pip 安装后的 `python -m pangpang.cli` 启动，数据目录是绝对路径。示例里没有密钥。非交互首次启动另需环境变量 `PANGPANG_TOKEN`（至少 24 位）；本机执行器的非交互确认用已有的 `--allow-local-exec`。
+服务示例在 `deploy/`。`pangpang-cloud.service` 与 `pangpang-connector.service` 是系统单元，`User=` 和 `Group=` 都是 `pangpang`。启用前先创建该用户和组；不要删掉这两行，否则进程会以 root 运行。连接器若要读写某人的工作区，把这两行改成那个账号，不要改成 root。按 pip 安装后的 `python -m pangpang.cli` 启动，数据目录是绝对路径。示例里没有密钥。非交互首次启动另需环境变量 `PANGPANG_TOKEN`（至少 24 位）；本机执行器的非交互确认用已有的 `--allow-local-exec`。

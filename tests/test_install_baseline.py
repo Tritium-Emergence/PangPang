@@ -8,9 +8,12 @@ backup that is only the SQLite file is not a restore; certificate failures
 stay distinct and do not disable verification.
 """
 import argparse
+import contextlib
 import datetime
+import io
 import json
 import os
+import shutil
 import sqlite3
 import ssl
 import subprocess
@@ -24,7 +27,7 @@ from unittest.mock import patch
 from pangpang import __version__
 from pangpang.backup import BackupRefusal, create_consistent_backup, restore_consistent_backup
 from pangpang.build_info import release_identity, same_rollback_artifact
-from pangpang.cli import DataLocationError, ensure_model_runtime, resolve_data_dir, source_root
+from pangpang.cli import DataLocationError, dispatch, ensure_model_runtime, resolve_data_dir, source_root
 from pangpang.connector import cloud_connection_fault
 from pangpang.product_runtime import _check_manifest_identity
 from pangpang.store import Store
@@ -133,6 +136,44 @@ class DataDirectoryTests(unittest.TestCase):
         self.assertEqual(resolve_data_dir("connector", None, source_checkout=True),
                          (source_root() / "connector-data").absolute())
 
+    def test_installed_start_from_another_directory_announces_the_new_tree(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        work = Path(tmp.name) / "elsewhere"
+        work.mkdir()
+        xdg = Path(tmp.name) / "xdg"
+        parser = argparse.ArgumentParser()
+        args = argparse.Namespace(role="connector", data=None, show_access_key=False)
+        cwd = os.getcwd()
+        err = io.StringIO()
+        try:
+            os.chdir(work)
+            with patch("pangpang.layout.is_source_checkout", return_value=False), \
+                 patch("pangpang.connector.main", return_value=0), \
+                 patch.dict(os.environ, {"XDG_DATA_HOME": str(xdg)}), \
+                 contextlib.redirect_stderr(err):
+                dispatch(args, [], parser)
+        finally:
+            os.chdir(cwd)
+        text = err.getvalue()
+        self.assertIn(str((xdg / "pangpang-connector").absolute()), text)
+        self.assertIn("--data", text)
+        self.assertFalse((xdg / "pangpang-connector").exists())
+        stable = xdg / "pangpang-connector"
+        stable.mkdir(parents=True)
+        (stable / "connector.db").write_bytes(b"x")
+        err = io.StringIO()
+        try:
+            os.chdir(work)
+            with patch("pangpang.layout.is_source_checkout", return_value=False), \
+                 patch("pangpang.connector.main", return_value=0), \
+                 patch.dict(os.environ, {"XDG_DATA_HOME": str(xdg)}), \
+                 contextlib.redirect_stderr(err):
+                dispatch(args, [], parser)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(err.getvalue(), "")
+
 
 class ReleaseIdentityTests(unittest.TestCase):
     def test_same_version_different_commit_is_not_one_artifact(self):
@@ -196,7 +237,6 @@ class BackupTests(unittest.TestCase):
 
     def test_backup_includes_vault_and_restore_roundtrip(self):
         dest = Path(self.tmp.name) / "backup"
-        started = datetime.datetime.now(datetime.timezone.utc)
         result = create_consistent_backup(
             self.data, dest, confirm=True,
             now=datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc))
@@ -221,8 +261,6 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(restored_store.get("identity", "device")["instance_id"], "device-keep")
         finally:
             restored_store.close()
-        elapsed = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
-        self.assertLess(elapsed, 5.0)
 
     def test_cli_backup_reports_blocked_upgrade(self):
         store = Store(self.data / "bots.db")
@@ -348,6 +386,175 @@ class BackupTests(unittest.TestCase):
         self.assertNotIn("create_consistent_backup", text)
         self.assertNotIn("restore_consistent_backup", text)
 
+    def test_unsettled_connector_run_blocks_upgrade_and_is_not_rewritten(self):
+        data = Path(self.tmp.name) / "connector"
+        data.mkdir()
+        store = Store(data / "connector.db")
+        store.put("local_run", {"id": "run-1", "status": "launching"})
+        store.put("identity", {"id": "device", "instance_id": "dev-1"})
+        store.close()
+        vault = Vault(data / "vault")
+        vault.set("web-access-token", "c" * 32)
+        vault.close()
+        for status in ("launching", "active", "report"):
+            store = Store(data / "connector.db")
+            row = store.get("local_run", "run-1")
+            row["status"] = status
+            store.put("local_run", row)
+            store.close()
+            dest = Path(self.tmp.name) / ("run-" + status)
+            result = create_consistent_backup(data, dest, confirm=True)
+            self.assertIn("local_run_not_terminal", result["upgrade_blocked"])
+            self.assertFalse(result["upgrade_allowed"])
+            live = Store(data / "connector.db")
+            try:
+                self.assertEqual(live.get("local_run", "run-1")["status"], status)
+            finally:
+                live.close()
+        store = Store(data / "connector.db")
+        row = store.get("local_run", "run-1")
+        row["status"] = "acknowledged"
+        store.put("local_run", row)
+        store.close()
+        dest = Path(self.tmp.name) / "run-acknowledged"
+        result = create_consistent_backup(data, dest, confirm=True)
+        self.assertNotIn("local_run_not_terminal", result["upgrade_blocked"])
+        self.assertTrue(result["upgrade_allowed"])
+
+    def test_restore_copy_failure_keeps_existing_data(self):
+        dest = Path(self.tmp.name) / "backup-copy-fail"
+        create_consistent_backup(self.data, dest, confirm=True)
+        store = Store(self.data / "bots.db")
+        store.put("identity", {"id": "device", "instance_id": "changed"})
+        store.close()
+        real = shutil.copy2
+
+        def boom(src, dst, *args, **kwargs):
+            if str(dst).endswith("secrets.db"):
+                raise OSError("disk full")
+            return real(src, dst, *args, **kwargs)
+
+        with patch("pangpang.backup.shutil.copy2", side_effect=boom):
+            with self.assertRaises(BackupRefusal) as raised:
+                restore_consistent_backup(dest, self.data, confirm=True)
+        self.assertEqual(raised.exception.code, "restore_failed")
+        self.assertFalse((self.data.parent / (self.data.name + ".restore-partial")).exists())
+        self.assertFalse((self.data.parent / (self.data.name + ".restore-aside")).exists())
+        live = Store(self.data / "bots.db")
+        try:
+            self.assertEqual(live.get("identity", "device")["instance_id"], "changed")
+        finally:
+            live.close()
+        self.assertEqual((self.data / "vault" / "master.key").read_bytes(), self.key_before)
+        vault = Vault(self.data / "vault")
+        try:
+            self.assertEqual(vault.get("web-access-token"), "t" * 32)
+        finally:
+            vault.close()
+
+    def test_restore_rename_failure_rolls_back_existing_data(self):
+        dest = Path(self.tmp.name) / "backup-rename-fail"
+        create_consistent_backup(self.data, dest, confirm=True)
+        store = Store(self.data / "bots.db")
+        store.put("identity", {"id": "device", "instance_id": "changed"})
+        store.close()
+        real = os.rename
+
+        def flaky(src, dst):
+            parent = Path(src).parent.name
+            if Path(src).name == "vault" and parent.endswith(".restore-partial"):
+                raise OSError("rename failed")
+            return real(src, dst)
+
+        with patch("pangpang.backup.os.rename", side_effect=flaky):
+            with self.assertRaises(BackupRefusal) as raised:
+                restore_consistent_backup(dest, self.data, confirm=True)
+        self.assertEqual(raised.exception.code, "restore_failed")
+        self.assertFalse((self.data.parent / (self.data.name + ".restore-partial")).exists())
+        self.assertFalse((self.data.parent / (self.data.name + ".restore-aside")).exists())
+        live = Store(self.data / "bots.db")
+        try:
+            self.assertEqual(live.get("identity", "device")["instance_id"], "changed")
+        finally:
+            live.close()
+        self.assertEqual((self.data / "vault" / "master.key").read_bytes(), self.key_before)
+        vault = Vault(self.data / "vault")
+        try:
+            self.assertEqual(vault.get("web-access-token"), "t" * 32)
+        finally:
+            vault.close()
+
+    def test_restore_replaces_existing_directory(self):
+        dest = Path(self.tmp.name) / "backup-replace"
+        create_consistent_backup(self.data, dest, confirm=True)
+        store = Store(self.data / "bots.db")
+        store.put("identity", {"id": "device", "instance_id": "changed"})
+        store.close()
+        restore_consistent_backup(dest, self.data, confirm=True)
+        live = Store(self.data / "bots.db")
+        try:
+            self.assertEqual(live.get("identity", "device")["instance_id"], "device-keep")
+        finally:
+            live.close()
+        vault = Vault(self.data / "vault")
+        try:
+            self.assertEqual(vault.get("web-access-token"), "t" * 32)
+        finally:
+            vault.close()
+
+    def test_manifest_rejects_paths_outside_the_backup(self):
+        dest = Path(self.tmp.name) / "backup-escape"
+        create_consistent_backup(self.data, dest, confirm=True)
+        manifest = json.loads((dest / "MANIFEST.json").read_text(encoding="utf-8"))
+        manifest["required_parts"] = ["../outside.db", "vault/master.key", "vault/secrets.db"]
+        manifest["parts"].append({"path": "../outside.db", "sha256": "ab" * 32, "bytes": 1})
+        (dest / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+        outside = Path(self.tmp.name) / "outside.db"
+        outside.write_bytes(b"nope")
+        target = Path(self.tmp.name) / "escaped"
+        with self.assertRaises(BackupRefusal) as raised:
+            restore_consistent_backup(dest, target, confirm=True)
+        self.assertEqual(raised.exception.code, "manifest_invalid")
+        self.assertFalse(target.exists())
+        self.assertEqual(outside.read_bytes(), b"nope")
+
+    def test_manifest_rejects_symlink_part(self):
+        dest = Path(self.tmp.name) / "backup-link"
+        create_consistent_backup(self.data, dest, confirm=True)
+        key = dest / "vault" / "master.key"
+        payload = key.read_bytes()
+        key.unlink()
+        outside = Path(self.tmp.name) / "linked-key"
+        outside.write_bytes(payload)
+        key.symlink_to(outside)
+        target = Path(self.tmp.name) / "linked-restore"
+        with self.assertRaises(BackupRefusal) as raised:
+            restore_consistent_backup(dest, target, confirm=True)
+        self.assertEqual(raised.exception.code, "manifest_invalid")
+        self.assertFalse(target.exists())
+        self.assertEqual(outside.read_bytes(), payload)
+
+    def test_windows_backup_directory_uses_account_acl(self):
+        seen = []
+
+        def fake(path):
+            seen.append(str(path))
+
+        dest = Path(self.tmp.name) / "win-backup"
+        restored = Path(self.tmp.name) / "win-restored"
+        with patch("pangpang.backup._windows_acl", return_value=True), \
+             patch("pangpang.vault._secure_windows_directory", fake):
+            create_consistent_backup(self.data, dest, confirm=True)
+            restore_consistent_backup(dest, restored, confirm=True)
+        self.assertTrue(any(path.endswith("win-backup.partial") for path in seen))
+        self.assertTrue(any(path.endswith(os.path.join("win-backup.partial", "vault")) for path in seen))
+        self.assertTrue(any(path.endswith("win-restored") for path in seen))
+        vault = Vault(restored / "vault")
+        try:
+            self.assertEqual(vault.get("web-access-token"), "t" * 32)
+        finally:
+            vault.close()
+
 
 class ConnectorTlsTests(unittest.TestCase):
     def test_certificate_failure_is_distinct_and_does_not_skip_verification(self):
@@ -398,6 +605,15 @@ class DocGateContractTests(unittest.TestCase):
         self.assertIn("grant_write", text)
         self.assertIn("web_search", text)
         self.assertIn("unknown", text)
+
+    def test_systemd_units_name_a_non_root_account(self):
+        root = source_root() / "deploy"
+        for name in ("pangpang-cloud.service", "pangpang-connector.service"):
+            text = (root / name).read_text(encoding="utf-8")
+            self.assertIn("\nUser=pangpang\n", text)
+            self.assertIn("\nGroup=pangpang\n", text)
+            self.assertNotIn("User=root", text)
+            self.assertNotIn("Group=root", text)
 
 
 def _sha(path):

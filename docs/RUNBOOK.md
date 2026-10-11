@@ -636,10 +636,10 @@ curl -s \
 python -m pangpang.cli backup --data /absolute/data --dest /absolute/backup --confirm
 ```
 
-清单同时包含 SQLite、`vault/master.key`、`vault/secrets.db`。只复制数据库文件不会生成清单，也不能拿来恢复。启动程序不会自动复制这些文件。
+清单同时包含 SQLite、`vault/master.key`、`vault/secrets.db`；若有 `adapters.json` 也会写入，它和 Vault 一样敏感。只复制数据库文件不会生成清单，也不能拿来恢复。启动程序不会自动复制这些文件。
 
-5. 若退出码为 3，清单写明了未终结任务、unknown、SSH 主机或非 `off` 的 semantic gate。备份可以留下，升级停在这里。本命令不改这些记录，也不做语义迁移。
-6. 用 `restore` 向一个空目录做一次恢复演练，核对访问密钥和设备身份，再换代码。
+5. 若退出码为 3，清单写明了未终结任务、unknown、SSH 主机、尚未 acknowledged 的连接器 `local_run`，或非 `off` 的 semantic gate。备份可以留下，升级停在这里。本命令不改这些记录，也不做语义迁移。
+6. 用 `restore` 向一个空目录做一次恢复演练，核对访问密钥和设备身份，再换代码。恢复先写暂存目录，失败时原数据目录保持可用。
 7. 启动后先跑 reconcile/diagnostics，再开放新工作。
 
 **不要在新版本已经写入数据库后，直接启动旧二进制消费同一数据库。**回滚是升级前的这份备份加上当时的旧程序，不是只看 `--version`。

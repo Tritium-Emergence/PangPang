@@ -21,8 +21,14 @@ from .build_info import release_identity
 FORMAT = "pangpang-backup-v1"
 # Task rows outside this set are still in flight or not a confirmed terminal.
 TERMINAL_TASK = {"succeeded", "failed", "cancelled"}
+# A connector run is settled only after the coordinator has acknowledged it.
+# launching, active, and report are still in flight or not yet recorded upstream.
+_SETTLED_LOCAL_RUN = {"acknowledged"}
 _DB_NAME = {"cloud": "bots.db", "connector": "connector.db"}
 _LOCK_NAME = {"cloud": "coordinator.lock", "connector": "connector.lock"}
+_ALLOWED_PARTS = frozenset({
+    "bots.db", "connector.db", "vault/master.key", "vault/secrets.db", "adapters.json",
+})
 
 
 class BackupRefusal(Exception):
@@ -136,6 +142,11 @@ def _inventory(db_path):
     ssh_hosts = [host.get("id") for host in hosts if isinstance(host, dict) and host.get("transport") == "ssh"]
     if ssh_hosts:
         blocked.append("ssh_host_present")
+    runs = _read_rows(db_path, "local_run")
+    open_runs = [{"id": row.get("id"), "status": row.get("status")}
+                 for row in runs if row.get("status") not in _SETTLED_LOCAL_RUN]
+    if open_runs:
+        blocked.append("local_run_not_terminal")
     gate = managed.get("semantic_gate") if isinstance(managed.get("semantic_gate"), dict) else {}
     mode = str((gate or {}).get("mode", "off")).lower()
     if mode not in {"off", "shadow", "enforce"}:
@@ -146,6 +157,7 @@ def _inventory(db_path):
     return {
         "task_nonterminal": nonterminal,
         "open_claim_ids": open_claims,
+        "local_run_nonterminal": open_runs,
         "ssh_host_ids": ssh_hosts,
         "semantic_gate_mode": mode,
         "device_instance_ids": [row.get("instance_id") for row in identities if row.get("instance_id")],
@@ -161,8 +173,9 @@ def _part(root, relative):
 def create_consistent_backup(data, dest, *, confirm=False, interactive=None, now=None):
     """Copy the recoverable set into a new directory and write a manifest last.
 
-    ``upgrade_allowed`` is false when a non-terminal task, an SSH host, or a
-    non-off semantic-gate mode is present. Those rows are left unchanged.
+    ``upgrade_allowed`` is false when a non-terminal task, an unacknowledged
+    connector run, an SSH host, or a non-off semantic-gate mode is present.
+    Those rows are left unchanged.
     """
     data = Path(data).expanduser().absolute()
     dest = Path(dest).expanduser().absolute()
@@ -192,11 +205,13 @@ def create_consistent_backup(data, dest, *, confirm=False, interactive=None, now
     lock = _require_stopped(data, role)
     try:
         partial.mkdir(mode=0o700)
+        _restrict_directory(partial)
         try:
             database = partial / _DB_NAME[role]
             _copy_sqlite(data / _DB_NAME[role], database)
             vault_dir = partial / "vault"
             vault_dir.mkdir(mode=0o700)
+            _restrict_directory(vault_dir)
             for name in ("master.key", "secrets.db"):
                 target = vault_dir / name
                 shutil.copy2(data / "vault" / name, target)
@@ -245,9 +260,44 @@ def create_consistent_backup(data, dest, *, confirm=False, interactive=None, now
     return {"path": str(dest), "upgrade_allowed": not blocked, "upgrade_blocked": blocked, "manifest": manifest}
 
 
+def _windows_acl():
+    return os.name == "nt"
+
+
+def _restrict_directory(path):
+    """Same account boundary as the vault directory. POSIX mode, Windows ACL."""
+    if _windows_acl():
+        from .vault import _secure_windows_directory
+        _secure_windows_directory(path)
+    else:
+        os.chmod(path, 0o700)
+
+
+def _part_name_ok(name):
+    return isinstance(name, str) and name in _ALLOWED_PARTS
+
+
+def _part_file(root, name):
+    """A whitelisted file under ``root``. Rejects links and any other name."""
+    if not _part_name_ok(name):
+        raise BackupRefusal("manifest_invalid", "清单部件不在允许列表内。")
+    current = Path(root)
+    for piece in name.split("/"):
+        current = current / piece
+        if current.is_symlink():
+            raise BackupRefusal("manifest_invalid", "清单部件是符号链接，已拒绝：%s" % name)
+    if not current.is_file():
+        raise BackupRefusal("checksum_mismatch", "组件校验失败：%s。不会写入目标数据目录。" % name)
+    root_resolved = Path(root).resolve()
+    resolved = current.resolve()
+    if root_resolved != resolved and root_resolved not in resolved.parents:
+        raise BackupRefusal("manifest_invalid", "清单部件不在备份目录内。")
+    return current
+
+
 def _load_manifest(backup):
     path = Path(backup) / "MANIFEST.json"
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         raise BackupRefusal("manifest_missing", "备份里没有 MANIFEST.json。")
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -258,23 +308,139 @@ def _load_manifest(backup):
     if manifest.get("sqlite_only_is_rollback") is not False:
         raise BackupRefusal("sqlite_only_not_rollback", "清单声称仅 SQLite 即可回滚，已拒绝恢复。")
     required = manifest.get("required_parts")
-    parts = {part.get("path"): part for part in manifest.get("parts") or [] if isinstance(part, dict)}
-    if (not isinstance(required, list) or any(name not in parts for name in required)
-            or not any(name in required for name in _DB_NAME.values())):
+    raw_parts = manifest.get("parts")
+    if not isinstance(required, list) or not isinstance(raw_parts, list):
+        raise BackupRefusal("manifest_invalid", "清单部件格式不正确。")
+    if any(not _part_name_ok(name) for name in required):
+        raise BackupRefusal("manifest_invalid", "清单部件不在允许列表内。")
+    parts = {}
+    for part in raw_parts:
+        if not isinstance(part, dict) or not _part_name_ok(part.get("path")):
+            raise BackupRefusal("manifest_invalid", "清单部件不在允许列表内。")
+        parts[part["path"]] = part
+    role = manifest.get("role")
+    database = _DB_NAME.get(role)
+    if database is None or database not in required:
+        raise BackupRefusal("incomplete_backup", "清单缺少数据库或 Vault 组件，不能恢复。")
+    other = "connector.db" if role == "cloud" else "bots.db"
+    if other in parts or other in required:
+        raise BackupRefusal("manifest_invalid", "清单同时包含两种数据库。")
+    if any(name not in parts for name in required):
         raise BackupRefusal("incomplete_backup", "清单缺少数据库或 Vault 组件，不能恢复。")
     for name in ("vault/master.key", "vault/secrets.db"):
         if name not in required:
             raise BackupRefusal("incomplete_backup", "清单没有把 %s 列为恢复所必需。只恢复 SQLite 不能回滚。" % name)
     for name, part in parts.items():
-        file_path = Path(backup) / name
+        file_path = _part_file(backup, name)
         recorded = part.get("sha256")
-        if not file_path.is_file() or not recorded or _sha256(file_path) != recorded:
+        if not isinstance(recorded, str) or _sha256(file_path) != recorded:
             raise BackupRefusal("checksum_mismatch", "组件校验失败：%s。不会写入目标数据目录。" % name)
+    manifest["parts"] = parts
     return manifest
 
 
+def _restore_names(manifest):
+    names = list(manifest["required_parts"])
+    if "adapters.json" in manifest["parts"] and "adapters.json" not in names:
+        names.append("adapters.json")
+    return names
+
+
+def _top_levels(names):
+    tops = []
+    for name in names:
+        top = name.split("/", 1)[0]
+        if top not in tops:
+            tops.append(top)
+    return tops
+
+
+def _aside_names(top):
+    """Files that must leave with this top-level entry so a replaced database keeps no old journal."""
+    if top.endswith(".db"):
+        return [top, top + "-wal", top + "-shm"]
+    return [top]
+
+
+def _fill_staging(backup, staging, names):
+    staging.mkdir(mode=0o700)
+    _restrict_directory(staging)
+    for name in names:
+        source = _part_file(backup, name)
+        dest = staging / name
+        dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if dest.parent != staging:
+            _restrict_directory(dest.parent)
+        shutil.copy2(source, dest)
+        if not _windows_acl():
+            os.chmod(dest, 0o600)
+
+
+def _rollback_swap(data, aside, tops, moved_out):
+    """Put aside files back. Return False when a previous file could not be returned."""
+    restored = True
+    for top in tops:
+        landed = data / top
+        if landed.exists() or landed.is_symlink():
+            junk = aside / (top + ".incoming")
+            try:
+                if junk.exists() or junk.is_symlink():
+                    if junk.is_dir() and not junk.is_symlink():
+                        shutil.rmtree(junk)
+                    else:
+                        junk.unlink()
+                os.rename(landed, junk)
+            except OSError:
+                restored = False
+    for name in reversed(moved_out):
+        src = aside / name
+        dest = data / name
+        if not (src.exists() or src.is_symlink()):
+            continue
+        if dest.exists() or dest.is_symlink():
+            restored = False
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.rename(src, dest)
+        except OSError:
+            restored = False
+    return restored
+
+
+def _swap_into(staging, data, tops):
+    """Move verified tops into an existing directory. On failure the previous files return."""
+    aside = data.parent / (data.name + ".restore-aside")
+    if aside.exists():
+        raise BackupRefusal("dest_exists", "未完成的恢复暂存已存在：%s。不会继续写入。" % aside)
+    aside.mkdir(mode=0o700)
+    _restrict_directory(aside)
+    moved_out = []
+    try:
+        for top in tops:
+            for name in _aside_names(top):
+                src = data / name
+                if src.exists() or src.is_symlink():
+                    dest = aside / name
+                    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    os.rename(src, dest)
+                    moved_out.append(name)
+        for top in tops:
+            os.rename(staging / top, data / top)
+    except Exception:
+        if _rollback_swap(data, aside, tops, moved_out):
+            shutil.rmtree(aside, ignore_errors=True)
+        raise
+    shutil.rmtree(aside, ignore_errors=True)
+
+
 def restore_consistent_backup(backup, data, *, confirm=False, interactive=None):
-    """Replace the recoverable set from a verified manifest. Does not start or migrate."""
+    """Replace the recoverable set from a verified manifest. Does not start or migrate.
+
+    Files are written to a sibling staging directory and checked again. The
+    previous directory is renamed aside only after that, and put back if the
+    swap fails.
+    """
     backup = Path(backup).expanduser().absolute()
     data = Path(data).expanduser().absolute()
     manifest = _load_manifest(backup)
@@ -282,29 +448,43 @@ def restore_consistent_backup(backup, data, *, confirm=False, interactive=None):
         interactive = sys.stdin.isatty()
     _confirm("恢复到", data, confirm, interactive)
     role = manifest.get("role")
-    if role not in _DB_NAME:
-        raise BackupRefusal("manifest_invalid", "清单没有合法角色。")
     if data.exists() and any((data / name).exists() for name in ("bots.db", "connector.db", "vault")):
         existing = _role(data) if (data / "bots.db").is_file() or (data / "connector.db").is_file() else role
         if existing != role:
             raise BackupRefusal("role_mismatch", "目标目录的角色与备份不一致，已停止。")
-    data.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock = _require_stopped(data, role)
+    names = _restore_names(manifest)
+    parent = data.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    needed = sum((backup / name).stat().st_size for name in names)
+    if shutil.disk_usage(parent).free < needed + 1024 * 1024:
+        raise BackupRefusal("insufficient_space", "目标卷剩余空间不足，已停止，未写入备份。")
+    staging = parent / (data.name + ".restore-partial")
+    if staging.exists():
+        raise BackupRefusal("dest_exists", "未完成的恢复暂存已存在：%s。不会继续写入。" % staging)
+    lock = _require_stopped(data, role) if data.exists() else None
     try:
-        for name in manifest["required_parts"]:
-            target = data / name
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            shutil.copy2(backup / name, target)
-            os.chmod(target, 0o600)
-        adapters = backup / "adapters.json"
-        if adapters.is_file():
-            target = data / "adapters.json"
-            shutil.copy2(adapters, target)
-            os.chmod(target, 0o600)
-        os.chmod(data, 0o700)
+        try:
+            _fill_staging(backup, staging, names)
+            for name in names:
+                file_path = _part_file(staging, name)
+                if _sha256(file_path) != manifest["parts"][name]["sha256"]:
+                    raise BackupRefusal("checksum_mismatch", "组件校验失败：%s。不会写入目标数据目录。" % name)
+            if data.exists():
+                _swap_into(staging, data, _top_levels(names))
+                shutil.rmtree(staging, ignore_errors=True)
+            else:
+                os.rename(staging, data)
+        except BackupRefusal:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        except Exception as error:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise BackupRefusal("restore_failed", "恢复没有完成，目标目录保持原样：%s" % error) from None
+        _restrict_directory(data)
         vault_dir = data / "vault"
-        if vault_dir.is_dir():
-            os.chmod(vault_dir, 0o700)
+        if vault_dir.is_dir() and not vault_dir.is_symlink():
+            _restrict_directory(vault_dir)
     finally:
-        lock.close()
+        if lock is not None:
+            lock.close()
     return {"path": str(data), "role": role, "source_data": manifest.get("source_data")}
