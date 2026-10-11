@@ -265,6 +265,45 @@ class ExplicitContinueHttpTests(unittest.TestCase):
         after = len(self.app.store.find("message", bot_id="bot-main", limit=1000))
         self.assertEqual(before, after)
 
+    def test_replayed_post_does_not_call_the_model_again(self):
+        from unittest.mock import patch
+        first = self.app.send("bot-main", {"text": "阿里估值"}, "seed-replay")
+        calls = []
+
+        class FakePiModel:
+            def __init__(self, service):
+                pass
+
+            def complete(self, profile, messages, tools, on_proc=None, cancelled=None):
+                calls.append(1)
+                return {"role": "assistant", "content": '{"choice": "CURRENT"}'}, {}
+
+        body = {"text": "继续核对毛利率", "work_hint_id": first["work_id"], "stream_id": "tab-replay"}
+        with patch("pangpang.pi_runtime.PiModel", FakePiModel):
+            sent = self.post("bots/bot-main/messages", body, "replay-key")
+            replayed = self.post("bots/bot-main/messages", body, "replay-key")
+        self.assertEqual(sent["work_id"], first["work_id"])
+        self.assertEqual(replayed["message_id"], sent["message_id"])
+        self.assertEqual(len(calls), 1)
+
+    def test_side_effect_correction_is_refused_before_commit(self):
+        target = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-http"}, "http-a")
+        wrong = self.app.send("bot-main", {"text": "冰箱", "stream_id": "tab-http"}, "http-b")
+        turn = self.app.store.get("turn", wrong["turn_id"])
+        turn["history"] = [{"role": "tool", "content": "{\"task_id\": \"task-already\"}"}]
+        self.app.store.put("turn", turn)
+        before = len(self.app.store.find("message", bot_id="bot-main", limit=1000))
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.post("bots/bot-main/messages", {
+                "text": "移到阿里", "correct_to_work_id": target["work_id"],
+                "stream_id": "tab-http", "last_seen_event_id": wrong["message_id"],
+            }, "http-deny")
+        self.assertEqual(caught.exception.code, 409)
+        self.assertEqual(json.load(caught.exception)["code"], "routing_correction_rejected")
+        after = len(self.app.store.find("message", bot_id="bot-main", limit=1000))
+        self.assertEqual(before, after)
+        self.assertEqual(self.app.store.find("routing_correction", limit=10), [])
+
 
 STORE_TS = Path(__file__).resolve().parents[1] / "web-src" / "store.ts"
 # The harness below transpiles store.ts in-process, so it needs the installed

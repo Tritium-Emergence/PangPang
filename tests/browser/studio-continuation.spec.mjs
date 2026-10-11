@@ -51,6 +51,9 @@ test('continuation target & attachments clear on Bot switch; send targets the ex
   // the one-shot target is cleared afterward.
   await selectBot(page, BOT.main);
   await startContinue(page);
+  // The move control is part of the one-shot target. Leaving it unchecked must
+  // not send a correction.
+  await expect(page.getByTestId('move-previous-message')).toBeVisible();
   const [req] = await Promise.all([
     page.waitForRequest(r => r.url().includes('/messages') && r.method() === 'POST'),
     (async () => {
@@ -59,5 +62,28 @@ test('continuation target & attachments clear on Bot switch; send targets the ex
     })(),
   ]);
   expect(req.postDataJSON().continue_work_id).toBe(target.id);
+  expect(req.postDataJSON().correct_to_work_id).toBeFalsy();
   await expect(page.getByTestId('continue-target')).toBeHidden();
+});
+
+test('checking move-previous sends correct_to_work_id and does not hide a rejected move', async ({page}) => {
+  await login(page);
+  await selectBot(page, BOT.main);
+  await startContinue(page);
+  await page.getByTestId('move-previous-message').check();
+  const [req] = await Promise.all([
+    page.waitForRequest(r => r.url().includes('/messages') && r.method() === 'POST'),
+    (async () => {
+      await page.getByRole('textbox').fill('把上一条也归到这个工作');
+      await page.getByRole('button', {name: '发送 →'}).click();
+    })(),
+  ]);
+  const body = req.postDataJSON();
+  // The checkbox names the same Work the continue chip is already showing.
+  expect(body.continue_work_id).toBeTruthy();
+  expect(body.correct_to_work_id).toBe(body.continue_work_id);
+  // This tab has no adjacent previous message, so the server rejects the move
+  // and the one-shot target stays. A rejected correction must not look successful.
+  await expect(page.getByTestId('continue-target')).toBeVisible();
+  await expect(page.getByRole('button', {name: '发送 →'})).toBeEnabled();
 });

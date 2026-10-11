@@ -41,6 +41,10 @@ class TurnScheduler:
         self._procs = {} # turn_id -> {"attempt": int, "procs": set()}
         self._timed_out = set() # (turn_id, run_attempt_id) hard-timed-out
         self._reg_lock = threading.Lock()
+        # Continuation routing and supervisor turns share this counter. It is
+        # not a second queue or a worker: callers wait on the scheduler lock.
+        self._model_call_inflight = 0
+        self._model_call_cv = threading.Condition(self._reg_lock)
 
     @property
     def draining(self):
@@ -101,6 +105,34 @@ class TurnScheduler:
         MUST be called after the outer transaction commits (rule B), never under
         Store.lock."""
         self._wake.set()
+
+    def acquire_model_call(self, timeout_s=None):
+        """Take one unit of model_max_concurrency for one real model call.
+
+        Continuation routing and an admitted supervisor turn both call this, so
+        model_max_concurrency=1 cannot start a second provider request. A finite
+        timeout returns False instead of starting the call. None waits until a
+        unit is free (the turn already passed admission)."""
+        max_c = max(1, int(self.config["model_max_concurrency"]))
+        deadline = None if timeout_s is None else time.monotonic() + max(0.0, float(timeout_s))
+        with self._model_call_cv:
+            while self._model_call_inflight >= max_c:
+                if deadline is None:
+                    self._model_call_cv.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._model_call_cv.wait(timeout=remaining)
+            self._model_call_inflight += 1
+            return True
+
+    def release_model_call(self):
+        """Return one unit taken by acquire_model_call. Extra releases are ignored."""
+        with self._model_call_cv:
+            if self._model_call_inflight:
+                self._model_call_inflight -= 1
+            self._model_call_cv.notify()
 
     # --- runnable filter (single authority) -------------------------------
     def _running_count(self):

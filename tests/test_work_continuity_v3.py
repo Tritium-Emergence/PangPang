@@ -7,7 +7,7 @@ from pathlib import Path
 from test_bot_runtime import config
 from pangpang.context import projection
 from pangpang.service import Service
-from pangpang.store import uid
+from pangpang.store import Fault, uid
 
 
 class WorkContinuityV3Tests(unittest.TestCase):
@@ -242,6 +242,97 @@ class WorkContinuityV3Tests(unittest.TestCase):
             "text": "继续", "work_hint_id": first["work_id"], "stream_id": "stream-nokey"})
         self.assertIsNone(routing["work_id"])
         self.assertEqual(routing["route_quality"], "deterministic")
+
+    def _user_move(self, target_work_id, stream_id, last_seen, text="这条属于那件工作"):
+        return {
+            "text": text,
+            "correct_to_work_id": target_work_id,
+            "stream_id": stream_id,
+            "last_seen_event_id": last_seen,
+        }
+
+    def test_user_correction_is_append_only_and_does_not_call_the_model(self):
+        calls = []
+        self.app.semantic_gate.classify_continuation = lambda *args, **kwargs: calls.append(1)
+        target = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-user"}, "user-a")
+        self.app.finish_turn(self.app.store.get("turn", target["turn_id"]), "阿里上下文")
+        wrong = self.app.send("bot-main", {"text": "这个涨了多少", "stream_id": "tab-user"}, "user-b")
+        self.app.finish_turn(self.app.store.get("turn", wrong["turn_id"]), "压缩机价格上涨了")
+        answer = self.app.store.get("state", "bot-main")["last_delivery_ref"]
+        kept = self.app.store.get("work", target["work_id"])
+        kept["grant_write"] = False
+        self.app.store.put("work", kept)
+        body = self._user_move(target["work_id"], "tab-user", answer)
+        routing = self.app.resolve_continuation("bot-main", body)
+        self.assertEqual(calls, [])
+        self.assertEqual(routing["route_source"], "user_correction")
+        self.assertEqual(routing["route_quality"], "deterministic")
+        self.assertEqual(routing["work_id"], target["work_id"])
+        self.assertEqual(routing["correction_target_message_id"], wrong["message_id"])
+        corrected = self.app.send("bot-main", body, "user-c", routing=routing)
+        self.assertIsNotNone(corrected["routing_correction_id"])
+        self.assertEqual(self.app.store.get("message", wrong["message_id"])["work_id"], wrong["work_id"])
+        self.assertFalse(self.app.store.get("work", target["work_id"])["grant_write"])
+        payload = json.dumps(projection(self.app, self.app.store.get("turn", corrected["turn_id"])),
+                             ensure_ascii=False)
+        self.assertIn("这个涨了多少", payload)
+        self.assertNotIn("压缩机价格上涨了", payload)
+
+    def test_user_correction_refuses_a_turn_that_already_dispatched_a_tool(self):
+        calls = []
+        self.app.semantic_gate.classify_continuation = lambda *args, **kwargs: calls.append(1)
+        target = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-side"}, "side-a")
+        wrong = self.app.send("bot-main", {"text": "这个涨了多少", "stream_id": "tab-side"}, "side-b")
+        turn = self.app.store.get("turn", wrong["turn_id"])
+        turn["history"] = [{"role": "assistant", "tool_calls": [
+            {"id": "call-1", "type": "function", "function": {"name": "submit_task", "arguments": "{}"}}]}]
+        self.app.store.put("turn", turn)
+        before = len(self.app.store.find("routing_correction", limit=20))
+        body = self._user_move(target["work_id"], "tab-side", wrong["message_id"])
+        with self.assertRaises(Fault) as caught:
+            self.app.resolve_continuation("bot-main", body)
+        self.assertEqual(caught.exception.code, "routing_correction_rejected")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(self.app.store.find("routing_correction", limit=20)), before)
+        self.assertEqual(self.app.store.get("message", wrong["message_id"])["work_id"], wrong["work_id"])
+
+    def test_user_correction_refuses_a_different_stream(self):
+        target = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-a"}, "stream-move-a")
+        wrong = self.app.send("bot-main", {"text": "冰箱", "stream_id": "tab-b"}, "stream-move-b")
+        body = self._user_move(target["work_id"], "tab-a", wrong["message_id"])
+        with self.assertRaises(Fault) as caught:
+            self.app.resolve_continuation("bot-main", body)
+        self.assertEqual(caught.exception.code, "routing_correction_rejected")
+
+    def test_user_correction_of_a_delivered_work_forks_instead_of_reviving(self):
+        delivered = self.app.send("bot-main", {"text": "阿里估值", "stream_id": "tab-fork"}, "fork-a")
+        work = self.app.store.get("work", delivered["work_id"])
+        work["grant_write"] = False
+        work["status"] = "delivered"
+        work["constraints"] = ["必须保留的硬约束"]
+        self.app.store.put("work", work)
+        wrong = self.app.send("bot-main", {"text": "冰箱", "stream_id": "tab-fork"}, "fork-b")
+        body = self._user_move(delivered["work_id"], "tab-fork", wrong["message_id"])
+        routing = self.app.resolve_continuation("bot-main", body)
+        sent = self.app.send("bot-main", body, "fork-c", routing=routing)
+        self.assertNotEqual(sent["work_id"], delivered["work_id"])
+        fork = self.app.store.get("work", sent["work_id"])
+        self.assertEqual(fork["continued_from"], delivered["work_id"])
+        self.assertEqual(fork["constraints"], ["必须保留的硬约束"])
+        self.assertEqual(self.app.store.get("work", delivered["work_id"])["status"], "delivered")
+        self.assertFalse(self.app.store.get("work", delivered["work_id"])["grant_write"])
+
+    def test_explicit_continue_is_not_rewritten_by_a_local_or_jev_choice(self):
+        calls = []
+        self.app.semantic_gate.classify_continuation = (
+            lambda *args, **kwargs: calls.append("jev") or {"choice": "NEW_TOPIC", "confidence": 0.99})
+        first = self.app.send("bot-main", {"text": "阿里估值"}, "ex-model")
+        body = {"text": "冰箱怎么修", "continue_work_id": first["work_id"], "stream_id": "tab-ex"}
+        routing = self.app.resolve_continuation("bot-main", body)
+        self.assertEqual(calls, [])
+        self.assertEqual(routing["route_source"], "explicit")
+        self.assertEqual(routing["work_id"], first["work_id"])
 
 
 if __name__ == "__main__":

@@ -174,6 +174,25 @@ class JevBreakerTests(unittest.TestCase):
         self.assertEqual(row["reason"], "jev_endpoint_breaker_open")
         self.assertNotIn("test-key", json.dumps(row))
 
+    def test_enforce_and_shadow_are_not_rewritten_to_off(self):
+        # Removing continuation from the Jev object must not fail-open the
+        # pre-commit gate or the task-result gate. Those modes still mean
+        # what they meant: enforce stays enforce.
+        for mode in ("enforce", "shadow"):
+            cfg = config(self.root)
+            cfg["semantic_gate"] = {"mode": mode, "continuation_routing": True}
+            cfg["task_result_gate"] = {"mode": mode}
+            app = Service(cfg, self.root / ("gate-" + mode))
+            try:
+                self.assertEqual(app.semantic_gate.mode, mode)
+                self.assertTrue(app.semantic_gate.is_guarded("submit_task"))
+                self.assertTrue(app.semantic_gate.is_guarded("delegate"))
+                self.assertTrue(app.semantic_gate.is_guarded("link_work"))
+                self.assertEqual(app.task_result_gate.mode, mode)
+                self.assertEqual(app.task_result_gate.enforcing(), mode == "enforce")
+            finally:
+                app.store.close()
+
     def test_self_check_keyless_stays_unconfigured(self):
         self.key.stop()
         row = self._semantic_gate_row()

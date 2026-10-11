@@ -14,10 +14,21 @@ export interface KV {
 
 export const pendingKey = (botId: string) => 'pending-send:' + botId;
 
-export interface SendIntent {text: string; refs: string[]; continueWorkId: string | null}
+export interface SendIntent {
+  text: string;
+  refs: string[];
+  continueWorkId: string | null;
+  // Explicit "move the previous message" target. Same class of stable intent as
+  // continueWorkId: a retry that drops the move must not replay the correction.
+  correctToWorkId?: string | null;
+}
 
 async function fingerprint(botId: string, intent: SendIntent, subtle: SubtleCrypto): Promise<string> {
-  const payload = JSON.stringify({text: intent.text, refs: intent.refs, continue_work_id: intent.continueWorkId});
+  const payload = JSON.stringify({
+    text: intent.text, refs: intent.refs,
+    continue_work_id: intent.continueWorkId,
+    correct_to_work_id: intent.correctToWorkId ?? null,
+  });
   const bytes = await subtle.digest('SHA-256', new TextEncoder().encode(botId + payload));
   return Array.from(new Uint8Array(bytes), (x) => x.toString(16).padStart(2, '0')).join('');
 }

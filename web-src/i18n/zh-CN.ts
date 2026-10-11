@@ -170,6 +170,7 @@ export default {
     fileTooLarge: '{{name}}: 单个文件最大 8MB', pastedImage: '粘贴的图片',
     hint: '直接说要做什么；胖胖会自己关联已有工作和项目。', uploadFile: '上传文件', referenceDeviceFile: '引用设备文件',
     uploadingSuffix: '（上传中…）', removeFile: '移除 {{name}}', continueTarget: '下一条消息将继续此 Work：{{goal}}',
+    movePrevious: '把上一条也移到这个工作',
     placeholder: '直接告诉胖胖你的新要求、补充或改方向…（回车发送，Shift+Enter 换行）', send: '发送',
   },
   msg: {
