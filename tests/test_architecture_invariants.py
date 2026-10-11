@@ -211,8 +211,10 @@ class ArchitectureTests(unittest.TestCase):
         task = self.task(work["work_id"])
         task.update(status="starting", started=time.time(), attempt_uuid="attempt")
         self.app.store.put("task", task)
-        self.app.execution.hosts["local"]["transport"] = "ssh"
-        self.app.execution.hosts["local"]["os"] = "linux" # ssh hosts need a known OS
+        # Remote stand-in is Connector. SSH launches are refused before this
+        # lost-ACK path; Connector still has no local process view.
+        self.app.execution.hosts["local"]["transport"] = "connector"
+        self.app.execution.hosts["local"]["os"] = "linux"
         with patch.object(self.app.execution, "start", side_effect=Fault("transport_unavailable")), \
              patch.object(self.app.execution, "poll", return_value={"status": "unknown"}) as poll:
             for _ in range(self.app.START_ATTEMPT_BUDGET):

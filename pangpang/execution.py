@@ -806,6 +806,10 @@ class Execution:
 
     def start(self, task):
         host = self.hosts[task["host_id"]]
+        if host["transport"] == "ssh":
+            # Refuse before prepare/bootstrap. poll/cancel of an attempt that
+            # already has a runner stay available so a real receipt can close it.
+            raise Fault("ssh_transport_retired")
         if host["transport"] == "connector":
             return self.broker.start(task)
         if host["transport"] == "local":

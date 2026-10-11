@@ -685,6 +685,13 @@ class ConsentToolTests(unittest.TestCase):
         self.assertIn("detached", consent.RISK_TEXT)
         self.assertIn("密钥", consent.RISK_TEXT)
 
+    def test_l0_risk_text_is_not_an_os_sandbox(self):
+        # The supported macOS path is: stop the service, then on the device
+        # `python -m pangpang.consent accept --data <data>`, then an explicit
+        # L0 start or a reprobe. The text itself says this tier is not isolation.
+        self.assertIn("不是隔离", consent.RISK_TEXT)
+        self.assertIn("同一账号", consent.RISK_TEXT)
+
     def test_consent_is_part_of_device_policy_digest(self):
         cfg = not_consenting(self.root)
         before = policy_digest(cfg, "codex-local")
