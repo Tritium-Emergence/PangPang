@@ -533,7 +533,8 @@ def validate_extra_argv(adapter, extra_argv):
     exec-only flag is rejected because the protocol rewrite DROPS it — storing
     a flag the launched process never receives would be a silent lie. For the
     same reason bare tokens are rejected there: the rewrite repositions them
-    before the app-server subcommand."""
+    before the app-server subcommand, and the tokens the rewrite drops outright
+    ('-', '{prompt}' templates) are rejected too."""
     if not isinstance(extra_argv, list) or len(extra_argv) > MAX_EXTRA_ARGV_ITEMS:
         raise Fault("invalid_extra_argv", 400,
                     advice="extra_argv must be a list of at most %d strings" % MAX_EXTRA_ARGV_ITEMS)
@@ -565,6 +566,11 @@ def validate_extra_argv(adapter, extra_argv):
                 raise Fault("invalid_extra_argv", 400,
                             advice="'--listen' is owned by the app-server bridge (stdio only); "
                                    "any other transport is rejected at launch, so storing it here would only defer the failure")
+            if item == "-" or "{prompt}" in item:
+                raise Fault("invalid_extra_argv", 400,
+                            advice="'%s' is dropped by the app-server protocol rewrite before launch "
+                                   "and the process never receives it; storing it here would be a "
+                                   "silent lie" % item)
             if not item.startswith("-"):
                 raise Fault("invalid_extra_argv", 400,
                             advice="'%s' is a bare token: the app-server protocol rewrite repositions it "

@@ -71,6 +71,16 @@ class ValidateExtraArgvTests(unittest.TestCase):
         validate_extra_argv("codex", ["--enable", "feature", "--config", "a=b"])
         validate_extra_argv("qwen-claude", ["login"])
 
+    def test_codex_dropped_tokens_rejected_not_silent(self):
+        for items in (["-"], ["--foo={prompt}"], ["{prompt}"], ["-", "--strict-config"]):
+            with self.subTest(items=items):
+                with self.assertRaises(Fault) as ctx:
+                    validate_extra_argv("codex", items)
+                self.assertEqual(ctx.exception.code, "invalid_extra_argv")
+                self.assertIn("dropped", ctx.exception.advice)
+        validate_extra_argv("codex", ["-c", "model={prompt}"])
+        validate_extra_argv("qwen-claude", ["-", "--user={prompt}"])
+
 
 class ExecutionExtraArgvTests(unittest.TestCase):
     def setUp(self):
