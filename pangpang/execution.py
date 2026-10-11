@@ -1,8 +1,7 @@
 """Trusted installation configuration.
 
 SSH host rows still load so an old config can be inventoried. The SSH
-runner, its bootstrap, and the ssh command channel are not used. Do not
-merge this removal until upgrade backup and rollback can restore those rows.
+runner, its bootstrap, and the ssh command channel are not used.
 """
 import base64
 import binascii
@@ -665,9 +664,8 @@ class Execution:
                     if json.loads(path.read_text(encoding="utf-8")) != spec:
                         raise Fault("execution_spec_conflict")
             return
-        # HELD: no remote bootstrap and no directory copy. Old host rows still
-        # validate above so inventory can list them; revert this commit to
-        # observe an in-flight attempt again.
+        # No remote bootstrap and no directory copy. Host rows with this
+        # transport still validate above so they can be listed.
         raise Fault("ssh_transport_retired")
 
     @staticmethod

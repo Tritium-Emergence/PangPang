@@ -1246,8 +1246,8 @@ class SshRetireGateTests(unittest.TestCase):
         self.assertEqual(len(self.app.store.find("task")), 1)
 
     def test_removed_ssh_channel_does_not_spawn_or_settle(self):
-        # Held deletion: poll/prepare/probe/cancel must not open ssh, and a
-        # running attempt stays running instead of being marked succeeded.
+        # poll/prepare/probe/cancel must not open ssh, and a running attempt
+        # stays running instead of being marked succeeded.
         sent = self._send("channel")
         submitted = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "live"})
         task = self.app.store.get("task", submitted["task_id"])
