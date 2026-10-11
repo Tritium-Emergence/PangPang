@@ -1,7 +1,6 @@
-"""S5 regressions for mobile bytes: snapshot gzip and stream suffixes.
+"""Snapshot gzip and live stream frames.
 
-The durable snapshot stays the authority. These tests measure bytes; they do
-not claim a handset or a 3,002-Work production database.
+The durable snapshot stays the authority. Byte checks use a synthetic workload.
 """
 import gzip
 import json
@@ -13,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from pangpang.http import live_stream_frame, serve
+from pangpang.http import live_stream_frame, serve, stream_deltas_requested
 from pangpang.service import Service
 from pangpang.store import encode
 from test_bot_runtime import config
@@ -28,7 +27,7 @@ class StreamFrameTests(unittest.TestCase):
         full_bytes = 0
         for i in range(1, 201):
             text += "token "
-            frame = live_stream_frame("turn-1", {"text": text, "rev": i}, sent, sent_rev)
+            frame = live_stream_frame("turn-1", {"text": text, "rev": i}, sent, sent_rev, deltas=True)
             delta_bytes += len(encode(frame).encode())
             full_bytes += len(encode({"turn_id": "turn-1", "rev": i, "text": text}).encode())
             if i == 1:
@@ -41,9 +40,25 @@ class StreamFrameTests(unittest.TestCase):
             sent, sent_rev = text, i
         self.assertLessEqual(delta_bytes * 10, full_bytes, "delta=%s full=%s" % (delta_bytes, full_bytes))
         print("stream_delta=%d stream_full=%d ratio=%.2f" % (delta_bytes, full_bytes, full_bytes / delta_bytes))
-        restarted = live_stream_frame("turn-1", {"text": "ok", "rev": 202}, sent, sent_rev)
+        restarted = live_stream_frame("turn-1", {"text": "ok", "rev": 202}, sent, sent_rev, deltas=True)
         self.assertEqual(restarted["text"], "ok")
         self.assertNotIn("delta", restarted)
+
+    def test_default_frames_keep_the_full_text(self):
+        text = ""
+        sent = ""
+        sent_rev = -1
+        for i in range(1, 6):
+            text += "token "
+            frame = live_stream_frame("turn-1", {"text": text, "rev": i}, sent, sent_rev)
+            self.assertEqual(frame["text"], text)
+            self.assertNotIn("delta", frame)
+            self.assertNotIn("base_rev", frame)
+            sent, sent_rev = text, i
+        self.assertFalse(stream_deltas_requested(None))
+        self.assertFalse(stream_deltas_requested({}))
+        self.assertFalse(stream_deltas_requested({"deltas": ["true"]}))
+        self.assertTrue(stream_deltas_requested({"deltas": ["1"]}))
 
 
 class SnapshotByteTests(unittest.TestCase):

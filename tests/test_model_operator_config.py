@@ -1,4 +1,4 @@
-"""S5 regressions: a 32K window can take a real output cap, concurrency persists,
+"""A 32K window can take an output cap that fits, concurrency persists,
 and a private-network HTTP endpoint stays refused.
 """
 import tempfile
@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pangpang.model_config import WINDOW_FIT_OUTPUT_TOKENS, setup_profile
+from pangpang.model_config import WINDOW_FIT_OUTPUT_TOKENS, catalog, operator_catalog, setup_profile
 from pangpang.onboarding import endpoint
 from pangpang.service import Service, normalize_profile
 from pangpang.store import Fault
@@ -47,6 +47,30 @@ class ContextCapTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "endpoint_requires_https_or_loopback")
         self.assertEqual(endpoint("http://127.0.0.1:11434/v1"), "http://127.0.0.1:11434/v1")
         self.assertEqual(endpoint("https://llm.example/v1"), "https://llm.example/v1")
+
+    def test_catalog_bounds_are_the_values_a_save_accepts(self):
+        wide = operator_catalog(40000)
+        gpt = wide["providers"]["openai"]["gpt-4"]
+        self.assertEqual((gpt["output_floor"], gpt["output_ceiling"]), (7168, 7168))
+        self.assertNotIn("output_floor", catalog()["providers"]["openai"]["gpt-4"])
+        old = {"endpoint": "https://local.example/v1", "model": "qwen", "provider": "custom",
+               "context_window_tokens": 40000, "output_tokens": 8192}
+        saved = setup_profile(old, {"provider": "openai", "model": "gpt-4", "output_tokens": 7168})
+        self.assertEqual(saved["output_tokens"], 7168)
+        with self.assertRaises(Fault) as caught:
+            setup_profile(old, {"provider": "openai", "model": "gpt-4", "output_tokens": 8192})
+        self.assertEqual(caught.exception.code, "output_exceeds_context_window")
+        tight = operator_catalog(32000)
+        model = tight["providers"]["anthropic"]["claude-haiku-4-5"]
+        self.assertEqual((model["output_floor"], model["output_ceiling"]), (30976, 30976))
+        stored = {"endpoint": "https://local.example/v1", "model": "qwen", "provider": "custom",
+                  "api": "openai-completions", "context_window_tokens": 32000, "output_tokens": 8192}
+        saved = setup_profile(stored, {"provider": "anthropic", "model": "claude-haiku-4-5", "output_tokens": 30976})
+        self.assertEqual(saved["output_tokens"], 30976)
+        self.assertEqual(saved["context_window_tokens"], 32000)
+        with self.assertRaises(Fault) as caught:
+            setup_profile(stored, {"provider": "anthropic", "model": "claude-haiku-4-5", "output_tokens": 32768})
+        self.assertEqual(caught.exception.code, "output_exceeds_context_window")
 
 
 class ConcurrencyPersistTests(unittest.TestCase):

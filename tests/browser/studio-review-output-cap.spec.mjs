@@ -85,18 +85,23 @@ test(' the settings dialog shows and sets the output cap, never below the floor'
   await page.locator('[data-view="hosts"]').click();
   await page.locator('#settings').click();
   const cap = page.locator('#model-output-tokens');
+  const catalog = await page.evaluate(async () => (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json());
   await expect(cap).toHaveValue('32768');
-  await expect(cap).toHaveAttribute('min', '4096');
-  // A catalog model whose own maximum is lower: that maximum is both the value and the floor.
-  const low = await page.evaluate(async () => {
-    const c = await (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json();
-    for (const [provider, models] of Object.entries(c.providers))
-      for (const [id, m] of Object.entries(models)) if (m.maxTokens < 32768) return {provider, id, max: String(m.maxTokens)};
-  });
+  await expect(cap).toHaveAttribute('min', String(catalog.custom.output_floor));
+  await expect(cap).toHaveAttribute('max', String(catalog.custom.output_ceiling));
+  // A catalog model whose own maximum is lower: the form uses the bounds the catalog response carries.
+  let low;
+  for (const [provider, models] of Object.entries(catalog.providers)) {
+    for (const [id, m] of Object.entries(models)) {
+      if (m.maxTokens < 32768 && m.output_floor <= m.output_ceiling) { low = {provider, id, floor: String(m.output_floor), ceiling: String(m.output_ceiling)}; break; }
+    }
+    if (low) break;
+  }
   await page.locator('#model-provider').selectOption(low.provider);
   await page.locator('#model-name').fill(low.id);
-  await expect(cap).toHaveValue(low.max);
-  await expect(cap).toHaveAttribute('min', low.max);
+  await expect(cap).toHaveValue(low.floor);
+  await expect(cap).toHaveAttribute('min', low.floor);
+  await expect(cap).toHaveAttribute('max', low.ceiling);
   await page.locator('#model-provider').selectOption('custom');
   await page.locator('#model-name').fill('qwen-local');
   await page.locator('#model-endpoint').fill('http://127.0.0.1:9999/v1');
@@ -110,8 +115,72 @@ test(' the settings dialog shows and sets the output cap, never below the floor'
   await cap.fill('1200');
   await page.locator('#model-save').click(); // below the floor: the form does not submit
   expect(submitted).toBeUndefined();
-  await cap.fill('65536');
+  await cap.fill(String(catalog.custom.output_ceiling + 1));
+  await page.locator('#model-save').click();
+  expect(submitted).toBeUndefined();
+  await cap.fill(String(catalog.custom.output_ceiling));
   await page.locator('#model-save').click();
   await expect(page.locator('#model-error')).toContainText('fixture_stop');
-  expect(submitted).toMatchObject({provider: 'custom', model: 'qwen-local', output_tokens: 65536});
+  expect(submitted).toMatchObject({provider: 'custom', model: 'qwen-local', output_tokens: catalog.custom.output_ceiling});
+});
+
+test('a catalog model whose window cannot hold its max tokens offers the server ceiling', async ({page}) => {
+  await login(page);
+  await page.locator('[data-view="hosts"]').click();
+  await page.locator('#settings').click();
+  const cap = page.locator('#model-output-tokens');
+  const gpt = await page.evaluate(async () => {
+    const c = await (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json();
+    return c.providers.openai['gpt-4'];
+  });
+  await page.locator('#model-provider').selectOption('openai');
+  await page.locator('#model-name').fill('gpt-4');
+  await expect(cap).toHaveValue(String(gpt.output_floor));
+  await expect(cap).toHaveAttribute('min', String(gpt.output_floor));
+  await expect(cap).toHaveAttribute('max', String(gpt.output_ceiling));
+  let submitted;
+  await page.route('**/api/v1/setup/model', async (route) => {
+    submitted = route.request().postDataJSON();
+    await route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({code: 'fixture_stop', message: 'fixture_stop', retryable: false})});
+  });
+  await cap.fill(String(gpt.maxTokens));
+  await page.locator('#model-save').click();
+  expect(submitted).toBeUndefined();
+  await cap.fill(String(gpt.output_ceiling));
+  await page.locator('#model-save').click();
+  await expect(page.locator('#model-error')).toContainText('fixture_stop');
+  expect(submitted.output_tokens).toBe(gpt.output_ceiling);
+  expect(submitted.output_tokens).toBeLessThan(gpt.maxTokens);
+});
+
+test('a 32K profile switched to a catalog model can submit the ceiling and not 32768', async ({page}) => {
+  await project(page, (s) => { s.setup.model.context_window_tokens = 32000; });
+  await login(page);
+  await page.locator('[data-view="hosts"]').click();
+  await page.locator('#settings').click();
+  const cap = page.locator('#model-output-tokens');
+  const picked = await page.evaluate(async () => {
+    const c = await (await fetch('/api/v1/setup/model-catalog?context_window_tokens=32000', {credentials: 'same-origin'})).json();
+    const [id, m] = Object.entries(c.providers.anthropic)[0];
+    return {id, floor: m.output_floor, ceiling: m.output_ceiling};
+  });
+  expect(picked.ceiling).toBeLessThan(32768);
+  expect(picked.floor).toBe(picked.ceiling);
+  await page.locator('#model-provider').selectOption('anthropic');
+  await page.locator('#model-name').fill(picked.id);
+  await expect(cap).toHaveValue(String(picked.floor));
+  await expect(cap).toHaveAttribute('min', String(picked.floor));
+  await expect(cap).toHaveAttribute('max', String(picked.ceiling));
+  let submitted;
+  await page.route('**/api/v1/setup/model', async (route) => {
+    submitted = route.request().postDataJSON();
+    await route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({code: 'fixture_stop', message: 'fixture_stop', retryable: false})});
+  });
+  await cap.fill('32768');
+  await page.locator('#model-save').click();
+  expect(submitted).toBeUndefined();
+  await cap.fill(String(picked.ceiling));
+  await page.locator('#model-save').click();
+  await expect(page.locator('#model-error')).toContainText('fixture_stop');
+  expect(submitted.output_tokens).toBe(picked.ceiling);
 });

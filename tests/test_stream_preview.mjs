@@ -1,4 +1,4 @@
-// S5 stream reducer. The same function store.ts uses for the live preview.
+// Stream preview reducer used by the live message view.
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {applyPreviewFrame, mergeRefreshScope} from '../web-src/pure.ts';

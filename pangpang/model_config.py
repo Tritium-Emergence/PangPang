@@ -56,6 +56,47 @@ def output_floor(profile):
     return min(floor, output_ceiling(profile))
 
 
+def parse_context_window(raw):
+    """A context window an operator named. Anything else is absent."""
+    if type(raw) is int:
+        value = raw
+    elif isinstance(raw, str) and raw.isdigit():
+        value = int(raw)
+    else:
+        return None
+    if MIN_CONTEXT_WINDOW_TOKENS <= value <= 2_000_000:
+        return value
+    return None
+
+
+def operator_catalog(stored_window=None):
+    """Catalog plus the output bounds a save will enforce.
+
+    A catalog choice keeps min(stored window, that model's window). The numbers
+    are computed here so the settings form does not keep a second copy of the rule.
+    """
+    raw = catalog()
+    window = stored_window if type(stored_window) is int and stored_window > 0 else None
+    providers = {}
+    for provider, models in raw["providers"].items():
+        copied = {}
+        for name, model in models.items():
+            entry = dict(model)
+            model_window = int(model["contextWindow"])
+            chosen = min(window, model_window) if window is not None else model_window
+            prof = {"provider": provider, "model": name, "context_window_tokens": chosen}
+            entry["output_floor"] = output_floor(prof)
+            entry["output_ceiling"] = output_ceiling(prof)
+            copied[name] = entry
+        providers[provider] = copied
+    custom = {"provider": "custom", "model": "custom"}
+    if window is not None:
+        custom["context_window_tokens"] = window
+    return {"pi_version": raw.get("pi_version"), "providers": providers,
+            "custom": {"output_floor": output_floor(custom), "output_ceiling": output_ceiling(custom),
+                       "fitted_output": fitted_output(custom)}}
+
+
 def fitted_output(profile):
     """Replacement cap when the stored value is missing, below the floor, or
     larger than the window. A tight window gets WINDOW_FIT_OUTPUT_TOKENS, not

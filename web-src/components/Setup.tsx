@@ -5,7 +5,7 @@ import type {Store} from '../store';
 import type {Capability, SetupRequest} from '../types';
 import {api} from '../api';
 import {sealCredential, type SecretTarget} from '../crypto';
-import {capabilityLabel, capabilityStateLabel, friendlyError, DEFAULT_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS} from '../display';
+import {capabilityLabel, capabilityStateLabel, friendlyError, DEFAULT_OUTPUT_TOKENS} from '../display';
 
 // Conversational-setup surface. Mirrors setup.js: the model settings dialog, the
 // pending setup-request panel (approve + sealed-secret), and credential sealing. RCB:
@@ -27,14 +27,39 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
   const [outputTokens, setOutputTokens] = useState(String(model.output_tokens || DEFAULT_OUTPUT_TOKENS));
   const [contextWindow, setContextWindow] = useState(model.context_window_tokens ? String(model.context_window_tokens) : '');
   const [concurrency, setConcurrency] = useState(String(store.snapshot!.setup.model_max_concurrency || 4));
-  type CatalogModel = {api: string; baseUrl: string; name: string; reasoning: boolean; maxTokens: number; thinkingLevelMap?: Record<string, string | null>};
+  type CatalogModel = {api: string; baseUrl: string; name: string; reasoning: boolean; maxTokens: number; contextWindow: number; output_floor: number; output_ceiling: number; thinkingLevelMap?: Record<string, string | null>};
+  type CustomBounds = {output_floor: number; output_ceiling: number; fitted_output: number};
   const [catalog, setCatalog] = useState<Record<string, Record<string, CatalogModel>>>({});
+  const [customBounds, setCustomBounds] = useState<CustomBounds | null>(null);
   useEffect(() => {
     let active = true;
-    api<{providers: typeof catalog}>('setup/model-catalog').then(v => {if (active) setCatalog(v.providers);})
-.catch(() => {if (active) setError(t('setup.modelCatalogLoadFailed'));});
+    const stored = model.context_window_tokens;
+    const q = stored ? `?context_window_tokens=${stored}` : '';
+    api<{providers: typeof catalog; custom: CustomBounds}>('setup/model-catalog' + q).then(v => {
+      if (!active) return;
+      setCatalog(v.providers);
+      setCustomBounds(v.custom);
+    }).catch(() => {if (active) setError(t('setup.modelCatalogLoadFailed'));});
     return () => {active = false;};
-  }, []);
+  }, [model.context_window_tokens]);
+  useEffect(() => {
+    if (provider !== 'custom' || !contextWindow) return;
+    const typed = Number(contextWindow);
+    if (!Number.isInteger(typed) || typed === model.context_window_tokens) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      api<{custom: CustomBounds}>(`setup/model-catalog?context_window_tokens=${typed}`).then(v => {
+        if (!active) return;
+        setCustomBounds(v.custom);
+        setOutputTokens(prev => {
+          const current = Number(prev);
+          if (!Number.isInteger(current) || current < v.custom.output_floor || current > v.custom.output_ceiling) return String(v.custom.fitted_output);
+          return prev;
+        });
+      }).catch(() => {});
+    }, 200);
+    return () => {active = false; window.clearTimeout(timer);};
+  }, [provider, contextWindow, model.context_window_tokens]);
   const [name, setName] = useState(model.model);
   const [secret, setSecret] = useState('');
   const [noAuth, setNoAuth] = useState(false);
@@ -44,9 +69,13 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
   const [status, setStatus] = useState('');
 
   const known = catalog[provider]?.[name];
-  const resetThinking = (maxTokens?: number) => {setReasoning('default'); setFormat('auto'); setBudgetField(''); setBudget(''); setTokenField('auto'); setOutputTokens(String(Math.min(DEFAULT_OUTPUT_TOKENS, maxTokens ?? DEFAULT_OUTPUT_TOKENS)));};
-  // Same floor as the server (model_config.output_floor): catalog min(32768, maxTokens), else 4096.
-  const outputMin = known ? Math.min(DEFAULT_OUTPUT_TOKENS, known.maxTokens): MIN_OUTPUT_TOKENS;
+  const applyCap = (cap?: number) => { if (typeof cap === 'number') setOutputTokens(String(cap)); };
+  const resetThinking = (selected?: {output_floor: number}) => {
+    setReasoning('default'); setFormat('auto'); setBudgetField(''); setBudget(''); setTokenField('auto');
+    applyCap(selected ? selected.output_floor : customBounds?.fitted_output);
+  };
+  const outputMin = known ? known.output_floor : customBounds?.output_floor;
+  const outputMax = known ? known.output_ceiling : customBounds?.output_ceiling;
   const levels = ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter(level =>
     level === 'default' || (!known || (known.reasoning || level === 'off') && known.thinkingLevelMap?.[level] !== null));
   return (
@@ -67,7 +96,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
           {provider !== 'custom' && !catalog[provider] ? <option value={provider}>{provider}</option>: null}
         </select></label>
         <label className="mt-2 block text-sm">{t('setup.modelName')}<input id="model-name" list="pi-models" required value={name} onChange={e => {
-          const selected = catalog[provider]?.[e.target.value]; setName(e.target.value); resetThinking(selected?.maxTokens);
+          const selected = catalog[provider]?.[e.target.value]; setName(e.target.value); resetThinking(selected);
           if (selected) {setProtocol(selected.api); setEndpoint(selected.baseUrl);}
         }} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         <datalist id="pi-models">{Object.entries(catalog[provider] || {}).map(([id, m]) => <option key={id} value={id}>{m.name}</option>)}</datalist>
@@ -78,7 +107,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
         </select></label>: null}
         <label className="mt-2 block text-sm">{t('setup.apiBaseUrl')}<input id="model-endpoint" type="url" required value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         {provider === 'custom' ? <label className="mt-2 block text-sm">{t('setup.contextWindow')}<input id="model-context-window" type="number" min={5120} max={2000000} step="1" value={contextWindow} onChange={e => setContextWindow(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>: null}
-        <label className="mt-2 block text-sm">{t('setup.outputCap')}<input id="model-output-tokens" type="number" required min={outputMin} max={known ? known.maxTokens: 1048576} step="1" value={outputTokens} onChange={e => setOutputTokens(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
+        <label className="mt-2 block text-sm">{t('setup.outputCap')}<input id="model-output-tokens" type="number" required min={outputMin} max={outputMax} step="1" value={outputTokens} onChange={e => setOutputTokens(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         <p className="mt-1 text-xs text-muted">{t('setup.outputCapHint', {min: outputMin})}</p>
         <label className="mt-2 block text-sm">{t('setup.concurrency')}<input id="model-concurrency" type="number" required min={1} max={16} step="1" value={concurrency} onChange={e => setConcurrency(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         {store.snapshot?.setup.model_concurrency_restart_required ? <p className="mt-1 text-xs text-warn">{t('setup.concurrencyRestart')}</p>: null}

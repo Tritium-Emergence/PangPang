@@ -25,13 +25,18 @@ ARTIFACT_PREVIEW_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", 
                           "video/mp4", "video/webm", "video/ogg", "application/pdf"}
 
 
-def live_stream_frame(turn_id, entry, sent_text, sent_rev):
-    """One UI stream payload. The first frame and any non-extension send the full
-    text. A suffix of what this connection already delivered sends only `delta`.
-    Durable truth stays on the snapshot; this buffer is ephemeral."""
+def stream_deltas_requested(query):
+    """Suffix frames are opt-in. A client that does not ask still receives `text`."""
+    return ((query or {}).get("deltas") or []) == ["1"]
+
+
+def live_stream_frame(turn_id, entry, sent_text, sent_rev, *, deltas=False):
+    """One UI stream payload. The default frame is the full text, which is what an
+    already-open page reads. A caller that set deltas=1 receives a suffix when this
+    connection already holds the prefix. Durable truth stays on the snapshot."""
     text = entry.get("text") or ""
     rev = entry.get("rev")
-    if sent_text and text.startswith(sent_text):
+    if deltas and sent_text and text.startswith(sent_text):
         return {"turn_id": turn_id, "rev": rev, "delta": text[len(sent_text):], "base_rev": sent_rev}
     return {"turn_id": turn_id, "rev": rev, "text": text}
 
@@ -168,7 +173,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     self.events(query)
                     return
                 if len(parts) == 3 and parts[0] == "bots" and parts[2] == "stream":
-                    self.bot_stream(parts[1])
+                    self.bot_stream(parts[1], query)
                     return
                 if path == "/api/v1/diagnostics":
                     # Operator-only observability aggregation. authenticate()
@@ -273,8 +278,12 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                                   "probes": service.store.find("probe")})
                     return
                 if path == "/api/v1/setup/model-catalog":
-                    from .model_config import catalog
-                    self.respond(catalog()); return
+                    from .model_config import operator_catalog, parse_context_window
+                    asked = parse_context_window((query.get("context_window_tokens") or [None])[0])
+                    if asked is None:
+                        live = next(iter(service.profiles.values()), {}).get("context_window_tokens")
+                        asked = live if type(live) is int else None
+                    self.respond(operator_catalog(asked)); return
                 if path == "/api/v1/settings":
                     self.respond(public_config(service.config)); return
                 if parts == ["hosts"]:
@@ -387,7 +396,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 self.wfile.flush()
                 time.sleep(1)
 
-        def bot_stream(self, bot_id):
+        def bot_stream(self, bot_id, query=None):
             """Per-bot live token stream (UI-only). Tails service.live_deltas for
             this bot and pushes accumulated assistant text as it grows, keyed by rev
             (never by text length — a post-tool assistant message restarts empty).
@@ -400,12 +409,13 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
             self.end_headers()
             self.close_connection = True
             sent = {} # (turn_id, attempt) -> {"rev": int, "done": bool, "text": str}
+            deltas = stream_deltas_requested(query)
             for _ in range(150): # ~150 * 120ms ≈ 18s, then the client reconnects
                 snap = service.snapshot_deltas(bot_id)
                 for (turn_id, _attempt), entry in snap.items():
                     prior = sent.get((turn_id, _attempt), {"rev": -1, "done": False, "text": ""})
                     if entry["rev"] > prior["rev"]:
-                        payload = live_stream_frame(turn_id, entry, prior.get("text") or "", prior.get("rev", -1))
+                        payload = live_stream_frame(turn_id, entry, prior.get("text") or "", prior.get("rev", -1), deltas=deltas)
                         self.wfile.write(f"data: {encode(payload)}\n\n".encode())
                         prior = {"rev": entry["rev"], "done": prior["done"], "text": entry.get("text") or ""}
                     if entry.get("done") and not prior["done"]:

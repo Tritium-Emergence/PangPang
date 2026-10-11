@@ -191,7 +191,7 @@ export function useStore(): Store {
     if (!authed) return;
     const bot = selected;
     let refreshTimer: number | undefined;
-    const es = new EventSource('/api/v1/bots/' + bot + '/stream');
+    const es = new EventSource('/api/v1/bots/' + bot + '/stream?deltas=1');
     es.onmessage = (e) => {
       let m: any;
       try { m = JSON.parse(e.data); } catch { return; }
