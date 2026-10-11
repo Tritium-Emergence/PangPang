@@ -180,8 +180,14 @@ def main():
         return 1
     from .onboarding import empty_config
     config_file = Path(args.config)
-    service = Service(json.loads(config_file.read_text(encoding="utf-8")) if config_file.exists() else empty_config(), data,
-                      control_only=args.control_only, deployment_level=args.deployment_level)
+    try:
+        service = Service(json.loads(config_file.read_text(encoding="utf-8")) if config_file.exists() else empty_config(), data,
+                          control_only=args.control_only, deployment_level=args.deployment_level)
+    except Fault as error:
+        _SYS.stderr.write("%s: %s\n" % (error.code, error.advice or error.code))
+        _SYS.stderr.flush()
+        lock.file.close()
+        return 1
     service.config_path = Path(args.config).resolve()
     # A model cannot start a process, so registration cannot be triggered by a
     # bot. First-run registration additionally requires the operator's explicit

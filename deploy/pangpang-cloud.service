@@ -13,6 +13,8 @@ User=pangpang
 Group=pangpang
 StateDirectory=pangpang
 WorkingDirectory=/var/lib/pangpang
+# --port 8790
+# --allow-local-exec registers this machine as a local execution host: the CLI runs as this account in the workspace, outside a sandbox, with the configured API key injected.
 ExecStart=/usr/bin/env python3 -m pangpang.cli cloud --data /var/lib/pangpang
 EnvironmentFile=-/etc/pangpang/cloud.env
 Restart=on-failure

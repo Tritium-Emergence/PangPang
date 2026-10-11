@@ -120,8 +120,25 @@ def _read_rows(db_path, kind):
         connection.close()
 
 
-def _inventory(db_path):
-    """Read-only facts. Does not migrate SSH hosts or semantic-gate mode."""
+def _known_adapter_names(data_dir):
+    """Built-in catalog plus a readable adapters.json. A bad file does not block backup."""
+    from .adapters_file import load
+    from .execution import ADAPTER_CATALOG
+    from .store import Fault
+    names = set(ADAPTER_CATALOG)
+    try:
+        names.update(load(Path(data_dir) / "adapters.json"))
+    except Fault:
+        return names
+    return names
+
+
+def _inventory(db_path, data_dir):
+    """Read-only facts. Does not migrate SSH hosts or semantic-gate mode.
+
+    Installations whose adapter is outside the built-in catalog and
+    adapters.json are listed. That list does not block upgrade.
+    """
     blocked = []
     tasks = _read_rows(db_path, "task")
     nonterminal = [{"id": task.get("id"), "status": task.get("status")}
@@ -151,6 +168,21 @@ def _inventory(db_path):
     if mode != "off":
         blocked.append("semantic_gate_mode_not_off")
     identities = _read_rows(db_path, "identity")
+    from .execution import unknown_adapter_advice
+    known = _known_adapter_names(data_dir)
+    installations = managed.get("installations") or []
+    if not isinstance(installations, list):
+        installations = []
+    unknown_adapters = []
+    for inst in installations:
+        if not isinstance(inst, dict) or inst.get("adapter") in known:
+            continue
+        unknown_adapters.append({
+            "id": inst.get("id"),
+            "adapter": inst.get("adapter"),
+            "advice": unknown_adapter_advice(data_dir, inst.get("id"), inst.get("adapter")),
+        })
+    unknown_adapters.sort(key=lambda row: (str(row.get("id")), str(row.get("adapter"))))
     return {
         "task_nonterminal": nonterminal,
         "open_claim_ids": open_claims,
@@ -159,6 +191,7 @@ def _inventory(db_path):
         "semantic_gate_mode": mode,
         "device_instance_ids": [row.get("instance_id") for row in identities if row.get("instance_id")],
         "host_ids": [host.get("id") for host in hosts if isinstance(host, dict) and host.get("id")],
+        "unknown_adapter_installations": unknown_adapters,
     }, blocked
 
 
@@ -235,7 +268,7 @@ def create_consistent_backup(data, dest, *, confirm=False, interactive=None, now
                 copied = partial / "adapters.json"
                 shutil.copy2(adapters, copied)
                 os.chmod(copied, 0o600)
-            inventory, blocked = _inventory(database)
+            inventory, blocked = _inventory(database, data)
             if now is None:
                 now = datetime.datetime.now(datetime.timezone.utc)
             parts = [_part(partial, _DB_NAME[role]),
