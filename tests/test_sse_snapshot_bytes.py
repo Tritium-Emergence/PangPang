@@ -40,6 +40,7 @@ class StreamFrameTests(unittest.TestCase):
                 self.assertNotIn("text", frame)
             sent, sent_rev = text, i
         self.assertLessEqual(delta_bytes * 10, full_bytes, "delta=%s full=%s" % (delta_bytes, full_bytes))
+        print("stream_delta=%d stream_full=%d ratio=%.2f" % (delta_bytes, full_bytes, full_bytes / delta_bytes))
         restarted = live_stream_frame("turn-1", {"text": "ok", "rev": 202}, sent, sent_rev)
         self.assertEqual(restarted["text"], "ok")
         self.assertNotIn("delta", restarted)
@@ -86,6 +87,7 @@ class SnapshotByteTests(unittest.TestCase):
         inflated = gzip.decompress(wired)
         self.assertEqual(inflated, plain)
         self.assertLessEqual(len(wired) * 10, len(plain), "wire=%s plain=%s" % (len(wired), len(plain)))
+        print("snapshot_plain=%d snapshot_gzip=%d ratio=%.2f" % (len(plain), len(wired), len(plain) / len(wired)))
         body = json.loads(plain)
         self.assertGreaterEqual(len(body["work"]), 1000)
 
