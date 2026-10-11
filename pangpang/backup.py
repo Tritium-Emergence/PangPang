@@ -391,9 +391,16 @@ def _fill_staging(backup, staging, names):
 
 
 def _rollback_swap(data, aside, tops, moved_out):
-    """Put aside files back. Return False when a previous file could not be returned."""
+    """Put aside files back. Return False when a previous file could not be returned.
+
+    A top still in the target and absent from ``moved_out`` never left. It is
+    the original file, not a file brought in from the staging directory.
+    """
     restored = True
+    moved = set(moved_out)
     for top in tops:
+        if top not in moved:
+            continue
         landed = data / top
         if landed.exists() or landed.is_symlink():
             junk = aside / (top + ".incoming")
@@ -420,6 +427,15 @@ def _rollback_swap(data, aside, tops, moved_out):
         except OSError:
             restored = False
     return restored
+
+
+def _recovery_left_behind(aside):
+    """True when aside still holds a database, vault, or a vault moved aside as incoming."""
+    relatives = (
+        "vault/master.key", "vault/secrets.db", "bots.db", "connector.db", "adapters.json",
+        "vault.incoming/master.key", "vault.incoming/secrets.db",
+    )
+    return any((aside / name).exists() or (aside / name).is_symlink() for name in relatives)
 
 
 def _remove_tree(path):
@@ -455,7 +471,7 @@ def _swap_into(staging, data, tops):
                 "恢复没有完成。目标目录 %s 可能缺件，或与 %s 里的旧文件混合。"
                 "不要使用该目录。旧文件在 %s。回滚错误：%s。前向错误：%s"
                 % (data, aside, aside, rollback_error, error)) from None
-        if not restored:
+        if not restored or _recovery_left_behind(aside):
             raise BackupRefusal(
                 "restore_incomplete",
                 "恢复没有完成。目标目录 %s 缺件，或与 %s 里的旧文件混合。"

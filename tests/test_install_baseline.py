@@ -536,6 +536,47 @@ class BackupTests(unittest.TestCase):
         self.assertFalse((self.data / "vault" / "master.key").exists())
         self.assertEqual((aside / "vault" / "master.key").read_bytes(), self.key_before)
 
+    def test_restore_move_out_failure_keeps_the_original_vault(self):
+        dest = Path(self.tmp.name) / "backup-move-out"
+        create_consistent_backup(self.data, dest, confirm=True)
+        store = Store(self.data / "bots.db")
+        store.put("identity", {"id": "device", "instance_id": "changed"})
+        store.close()
+        real = os.rename
+
+        def flaky(src, dst):
+            source, target = Path(src), Path(dst)
+            if (source.name == "vault" and source.parent.name == self.data.name
+                    and target.name == "vault" and target.parent.name.endswith(".restore-aside")):
+                raise OSError("move out failed")
+            return real(src, dst)
+
+        with patch("pangpang.backup.os.rename", side_effect=flaky):
+            with self.assertRaises(BackupRefusal) as raised:
+                restore_consistent_backup(dest, self.data, confirm=True)
+        key = self.data / "vault" / "master.key"
+        secrets = self.data / "vault" / "secrets.db"
+        aside = self.data.parent / (self.data.name + ".restore-aside")
+        self.assertTrue(key.is_file())
+        self.assertEqual(key.read_bytes(), self.key_before)
+        self.assertTrue(secrets.is_file())
+        self.assertFalse((aside / "vault.incoming" / "master.key").exists())
+        vault = Vault(self.data / "vault")
+        try:
+            self.assertEqual(vault.get("web-access-token"), "t" * 32)
+        finally:
+            vault.close()
+        live = Store(self.data / "bots.db")
+        try:
+            self.assertEqual(live.get("identity", "device")["instance_id"], "changed")
+        finally:
+            live.close()
+        if raised.exception.code == "restore_incomplete":
+            self.assertIn(str(aside), str(raised.exception))
+        else:
+            self.assertEqual(raised.exception.code, "restore_failed")
+            self.assertIn("保持原样", str(raised.exception))
+
     def test_restore_aside_cleanup_failure_is_not_success(self):
         dest = Path(self.tmp.name) / "backup-cleanup-fail"
         create_consistent_backup(self.data, dest, confirm=True)
