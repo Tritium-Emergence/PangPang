@@ -82,7 +82,7 @@ class ClaudeCodeGrantTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("bypassPermissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("Bash", CLAUDE_CODE_ARGV)
-        self.assertEqual(ADAPTER_CATALOG["qwen-claude"]["argv"], ["-p"])
+        self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
 
     def _connector(self, installations):
@@ -111,14 +111,14 @@ class ClaudeCodeGrantTests(unittest.TestCase):
         # Loading the stored installation does not rewrite its argv.
         self.assertEqual(holder.execution.installations["claude-code-local"]["argv"], old)
         inventory = [{"adapter": "claude-code", "binary": str(self.stub), "version": "stub"},
-                     {"adapter": "qwen-claude", "binary": "/opt/qwen-claude", "version": "stub"}]
+                     {"adapter": "gemini", "binary": "/opt/gemini", "version": "stub"}]
         with patch.object(LocalSetup, "discover", return_value={"inventory": inventory}):
             setup.configure({"adapter": "claude-code"})
-            setup.configure({"adapter": "qwen-claude"})
+            setup.configure({"adapter": "gemini"})
         granted = holder.execution.installations["claude-code-local"]["argv"]
         self.assertEqual(granted, [str(self.stub), *CLAUDE_CODE_ARGV])
-        self.assertEqual(holder.execution.installations["qwen-claude-local"]["argv"],
-                         ["/opt/qwen-claude", "-p"])
+        self.assertEqual(holder.execution.installations["gemini-local"]["argv"],
+                         ["/opt/gemini", "--skip-trust"])
         # The codex installation was not reconfigured, so its stored argv stays.
         self.assertEqual(holder.execution.installations["codex-local"]["argv"],
                          ["/opt/old/codex", "exec", "-"])

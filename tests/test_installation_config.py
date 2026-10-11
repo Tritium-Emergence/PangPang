@@ -202,16 +202,81 @@ class InstallationConfigTests(unittest.TestCase):
         cfg = __import__('copy').deepcopy(self.app.config)
         cfg['hosts'].append({'id': 'dev1', 'transport': 'connector', 'os': 'Linux',
                              'credential_hash': 'x' * 64, 'allowed_roots': []})
-        cfg['installations'].append({'id': 'qwen-dev1', 'host_id': 'dev1', 'adapter': 'qwen-claude',
+        cfg['installations'].append({'id': 'codex-dev1', 'host_id': 'dev1', 'adapter': 'codex',
                                      'argv': ['device-owned-command'], 'cwd': '/tmp', 'risk': 'write',
                                      'max_concurrency': 2, 'enabled': True, 'prompt_mode': 'stdin'})
         app2 = Service(cfg, self.root.parent / 'data2')
         try:
             with self.assertRaises(Fault) as cm:
-                app2.configure_installation('qwen-dev1', {'max_concurrency': 4})
+                app2.configure_installation('codex-dev1', {'max_concurrency': 4})
             self.assertEqual(cm.exception.code, 'only_local_installations_editable')
+            self.assertEqual(app2.execution.installations['codex-dev1']['max_concurrency'], 2)
         finally:
             app2.store.close()
+
+    def _connector(self):
+        cfg = __import__('copy').deepcopy(self.app.config)
+        cfg['hosts'].append({'id': 'dev1', 'transport': 'connector', 'os': 'Linux',
+                             'credential_hash': 'x' * 64, 'allowed_roots': []})
+        cfg['installations'].append({'id': 'codex-dev1', 'host_id': 'dev1', 'adapter': 'codex',
+                                     'argv': ['device-owned-command'], 'cwd': '/home/dev/proj', 'risk': 'write',
+                                     'max_concurrency': 2, 'enabled': True, 'prompt_mode': 'stdin'})
+        app = Service(cfg, self.root.parent / 'data-remote')
+        app.store.put('probe', {'id': 'codex-dev1', 'available': True, 'policy_digest': 'device-digest',
+                                'supervision': 'windows-job-object'})
+        return app
+
+    def test_connector_routing_metadata_keeps_execution_fields_and_digest(self):
+        app = self._connector()
+        try:
+            saved = app.configure_installation('codex-dev1', {'use_when': '家里的开发机：改这个项目', 'priority': 4})
+            self.assertEqual(saved['use_when'], '家里的开发机：改这个项目')
+            self.assertEqual(saved['priority'], 4)
+            inst = app.execution.installations['codex-dev1']
+            self.assertEqual(inst['argv'], ['device-owned-command'])
+            self.assertEqual(inst['cwd'], '/home/dev/proj')
+            self.assertEqual(inst['max_concurrency'], 2)
+            self.assertEqual(app.store.get('probe', 'codex-dev1')['policy_digest'], 'device-digest')
+            self.assertFalse((self.root.parent / 'data-remote' / 'knowledge.db').exists())
+        finally:
+            app.store.close()
+
+    def test_connector_execution_fields_are_refused_without_partial_apply(self):
+        app = self._connector()
+        try:
+            for field, value in (('cwd', '/elsewhere'), ('enabled', False), ('timeout_s', 60),
+                                 ('extra_argv', ['--flag']), ('max_concurrency', 3)):
+                with self.subTest(field=field):
+                    with self.assertRaises(Fault) as cm:
+                        app.configure_installation('codex-dev1', {'priority': 4, field: value})
+                    self.assertEqual(cm.exception.code, 'only_local_installations_editable')
+            inst = app.execution.installations['codex-dev1']
+            self.assertNotIn('priority', inst)
+            self.assertEqual(inst['cwd'], '/home/dev/proj')
+            self.assertEqual(inst['max_concurrency'], 2)
+            for field, value in (('argv', ['evil']), ('env', {'CODEX_HOME': '/x'}),
+                                 ('policy_digest', 'forged'), ('secret_refs', {'K': 'v'})):
+                with self.subTest(field=field):
+                    with self.assertRaises(Fault) as cm:
+                        app.configure_installation('codex-dev1', {field: value})
+                    self.assertEqual(cm.exception.code, 'unsupported_installation_field')
+            self.assertEqual(app.store.get('probe', 'codex-dev1')['policy_digest'], 'device-digest')
+        finally:
+            app.store.close()
+
+    def test_connector_routing_edit_conflicts_on_a_stale_prepare(self):
+        app = self._connector()
+        try:
+            prepared = app.prepare_installation_config('codex-dev1', {'use_when': '先写的说明'})
+            app.configure_installation('codex-dev1', {'priority': 8})
+            with self.assertRaises(Fault) as cm:
+                app.commit_installation_config('codex-dev1', prepared)
+            self.assertEqual(cm.exception.code, 'installation_config_changed')
+            inst = app.execution.installations['codex-dev1']
+            self.assertEqual(inst['priority'], 8)
+            self.assertNotIn('use_when', inst)
+        finally:
+            app.store.close()
 
 
 if __name__ == '__main__':

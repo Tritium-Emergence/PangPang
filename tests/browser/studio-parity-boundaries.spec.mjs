@@ -152,6 +152,34 @@ test('installation failures show friendly explanation plus exact server error an
   }
 });
 
+test('a remote installation saves purpose only', async ({page}) => {
+  await project(page, s => {
+    s.hosts.push({id: 'home-pc', name: '家里的开发机', transport: 'connector'});
+    s.devices.push({id: 'home-pc', online: true});
+    s.installations.push({id: 'codex-home-pc', host_id: 'home-pc', adapter: 'codex', cwd: '/home/dev/proj',
+      max_concurrency: 1, timeout_s: 3600, enabled: true, priority: 30, use_when: '写代码'});
+  });
+  const bodies = [];
+  await page.route('**/api/v1/installations/codex-home-pc/config', r => {
+    bodies.push(r.request().postDataJSON());
+    return r.fulfill({json: {id: 'codex-home-pc', max_concurrency: 1, timeout_s: 3600, cwd: '/home/dev/proj',
+      enabled: true, priority: 4, use_when: '家里的开发机：改这个项目'}});
+  });
+  await login(page);
+  await page.locator('[data-view="hosts"]').click();
+  const remote = page.locator('#hosts .device-section').filter({hasText: '家里的开发机'});
+  await expect(remote.locator('[data-config="purpose"]')).toHaveCount(1);
+  await expect(remote.getByText('并行数')).toHaveCount(0);
+  await expect(remote.getByText('工作目录')).toHaveCount(0);
+  const config = remote.locator('[data-config="purpose"]');
+  await config.locator('summary').click();
+  await config.getByLabel('用途说明').fill('家里的开发机：改这个项目');
+  await config.getByLabel('优先级').fill('4');
+  await config.getByRole('button', {name: '保存配置'}).click();
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toEqual({priority: 4, use_when: '家里的开发机：改这个项目'});
+});
+
 test('sidebar avatar and busy indicator follow server attention, not raw work status', async ({page}) => {
   let attention = 'working';
   await project(page, s => { s.work = [{id: 'busy-proof', owner_bot_id: 'bot-main', status: 'active', attention}]; });

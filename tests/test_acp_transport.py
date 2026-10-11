@@ -42,7 +42,7 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNone(execution.declared_session_protocol(None))
         self.assertIsNone(execution.declared_session_protocol({"session_protocol": "nope"}))
         self.assertEqual(execution.declared_session_protocol(row), "acp")
-        for name in ("qwen-claude", "claude-code", "codex", "gemini", "pi"):
+        for name in ("claude-code", "codex", "gemini", "pi"):
             self.assertNotIn("session_protocol", ADAPTER_CATALOG[name])
             self.assertIsNone(execution.session_protocol_for(name))
         self.assertEqual(execution.session_protocol_for("acp"), "acp")

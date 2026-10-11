@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_bot_runtime import config
-from pangpang.execution import Execution, installation_id, validate_profile_env
+from pangpang.execution import ADAPTER_CATALOG, Execution, installation_id, validate_profile_env
 from pangpang.local_setup import LocalSetup
 from pangpang.onboarding import empty_config
 from pangpang.service import Service
@@ -128,6 +128,21 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(installed["codex-personal-local"]["env"], {"CODEX_HOME": "/home/a/.codex-personal"})
         self.assertNotIn("env", installed["codex-local"])
 
+    def test_profiles_keep_separate_directories_without_a_link(self):
+        work = self.root / "codex-work"
+        personal = self.root / "codex-personal"
+        work.mkdir()
+        personal.mkdir()
+        self.configure({"adapter": "codex", "profile": "work", "env": {"CODEX_HOME": str(work)}})
+        self.configure({"adapter": "codex", "profile": "personal", "env": {"CODEX_HOME": str(personal)}})
+        installed = self.holder.execution.installations
+        self.assertEqual(installed["codex-work-local"]["env"]["CODEX_HOME"], str(work))
+        self.assertEqual(installed["codex-personal-local"]["env"]["CODEX_HOME"], str(personal))
+        self.assertFalse(work.is_symlink())
+        self.assertFalse(personal.is_symlink())
+        self.assertFalse((work / "AGENTS.md").exists())
+        self.assertFalse((personal / "CLAUDE.md").exists())
+
     def test_reconfigure_keeps_profile_env_until_replaced(self):
         self.configure({"adapter": "codex", "profile": "work", "env": {"CODEX_HOME": "/a"}})
         self.configure({"adapter": "codex", "profile": "work"})
@@ -237,6 +252,69 @@ class OnboardingProfileTests(unittest.TestCase):
                                    "adapter": "codex", "cwd": str(self.root)}})
         self.assertEqual(ctx.exception.code, "command_result_conflict")
         self.assertNotIn("codex-" + host_id, self.app.execution.installations)
+
+    def test_device_report_keeps_cloud_routing_metadata(self):
+        host_id = self.paired_host()
+        req = self.request(host_id, {"action": "configure", "adapter": "codex"})
+        self.app.onboarding.approve(req["request_id"], {"profile": "work"})
+        command = [c for c in self.app.store.find("command", action="configure")
+                   if c["payload"].get("request_id") == req["request_id"]][0]
+        installation_id = "codex-work-" + host_id
+        reported = {"installation": {"id": installation_id, "host_id": host_id,
+                                     "adapter": "codex", "cwd": str(self.root),
+                                     "use_when": "from-device", "priority": 1,
+                                     "max_concurrency": 1},
+                    "probe": {"available": True, "version": "1", "os": "Linux",
+                              "supervision": "windows-job-object", "policy_digest": "device-digest"}}
+        self.app.onboarding.report(command, reported)
+        self.app.configure_installation(installation_id, {"use_when": "家里的开发机", "priority": 4})
+        again = {"installation": {"id": installation_id, "host_id": host_id,
+                                  "adapter": "codex", "cwd": str(self.root),
+                                  "use_when": "from-device", "priority": 1, "max_concurrency": 1},
+                 "probe": {"available": True, "policy_digest": "device-digest-2",
+                           "supervision": "windows-job-object"}}
+        self.app.onboarding.report(command, again)
+        landed = self.app.execution.installations[installation_id]
+        self.assertEqual(landed["use_when"], "家里的开发机")
+        self.assertEqual(landed["priority"], 4)
+        self.assertEqual(landed["argv"], ["device-owned-command"])
+        self.assertEqual(landed["cwd"], str(self.root))
+        self.assertNotIn("env", landed)
+        self.assertEqual(self.app.store.get("probe", installation_id)["policy_digest"], "device-digest-2")
+
+    def test_setup_agent_accepts_gemini_pi_and_custom_rows(self):
+        from pangpang.runtime import TOOLS
+        from pangpang.validation import validate
+        from pangpang import adapters_file
+        described = next(t for t in TOOLS if t["function"]["name"] == "setup_agent")
+        schema = described["function"]["parameters"]
+        self.assertNotIn("enum", schema["properties"]["adapter"])
+        self.assertNotIn("uses_qwen", schema["properties"])
+        for adapter in ("gemini", "pi", "my-custom-row"):
+            validate({"host_id": "h", "action": "configure", "adapter": adapter}, schema)
+        host_id = self.paired_host()
+        work = self.app.send("bot-main", {"text": "connect"}, "setup-names")
+        for adapter in ("gemini", "pi"):
+            accepted = self.app.onboarding.request(
+                "bot-main", work["work_id"], {"host_id": host_id, "action": "configure", "adapter": adapter})
+            self.assertEqual(accepted["status"], "needs_approval", adapter)
+        row = {"binary": "opencode", "argv": ["run"], "concurrency": 1, "priority": 15,
+               "use_when": "自定义行。"}
+        path = self.root.parent / "cloud" / "adapters.json"
+        path.write_text(__import__("json").dumps({"opencode-test": row}), encoding="utf-8")
+        path.chmod(0o644)
+        adapters_file.merge(path)
+        def drop_custom():
+            ADAPTER_CATALOG.pop("opencode-test", None)
+            adapters_file._merged_names.discard("opencode-test")
+        self.addCleanup(drop_custom)
+        custom = self.app.onboarding.request(
+            "bot-main", work["work_id"], {"host_id": host_id, "action": "configure", "adapter": "opencode-test"})
+        self.assertEqual(custom["status"], "needs_approval")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.request(
+                "bot-main", work["work_id"], {"host_id": host_id, "action": "configure", "adapter": "qwen-claude"})
+        self.assertEqual(ctx.exception.code, "adapter_required")
 
     def test_approve_rejects_bad_profile_and_env(self):
         host_id = self.paired_host()

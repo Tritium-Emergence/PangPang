@@ -49,7 +49,7 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("--yolo", ADAPTER_CATALOG["acp"]["argv"])
         self.assertIsNone(permission_bridge_for(None))
         self.assertIsNone(permission_bridge_for("nope"))
-        for name in ("qwen-claude", "claude-code", "codex", "gemini", "pi"):
+        for name in ("claude-code", "codex", "gemini", "pi"):
             self.assertNotIn("permission_bridge", ADAPTER_CATALOG[name])
             self.assertIsNone(permission_bridge_for(name))
 

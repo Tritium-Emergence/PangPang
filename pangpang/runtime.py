@@ -49,7 +49,7 @@ TOOLS = [
          {"work_id": S, "phase": S, "summary": S, "completed": L,
           "next_actions": L, "blocked_on": L, "evidence_refs": L}, ["work_id"]),
     tool("link_work", "Associate the current new conversation instruction to a confirmed existing work of your own; use only on a unique hit after find_work/read_work.", {"work_id": S}, ["work_id"]),
-    tool("submit_task", "Submit heavy CLI work; the body must contain the task goal and acceptance criteria. Optional host_id/installation_id express which machine/executor to use — an adapter name seen in catalog (e.g. qwen-claude) or an installation id both work, the system resolves it; add host only when several machines have same-named executors. Choose the executor from each catalog.installations entry's use_when (it states what each executor is good at and may have been customized by an operator — go by the actual use_when content, not a fixed impression); when unsure do not specify installation_id, let the system auto-pick by priority (smaller first). Executor availability is adjudicated by the system; no need to pre-check. Returns asynchronously and ends this round. required_outputs: when this task is only delivered if specific files are produced, list each artifact's EXACT relative path here (relative to the execution output dir $XPP_OUTPUT_DIR, e.g. report.docx or out/chart.png), not a type label (do not write docx/image). The system deterministically injects these paths into the executor prompt, and on receipt verifies each file truly exists and is non-empty; missing any one fails delivery; leave empty when no file artifact is mandatory. outputs: artifacts to register are file paths, not type labels (do not write docx/image).",
+    tool("submit_task", "Submit heavy CLI work; the body must contain the task goal and acceptance criteria. Optional host_id/installation_id express which machine/executor to use — an adapter name seen in catalog (e.g. codex) or an installation id both work, the system resolves it; add host only when several machines have same-named executors. Choose the executor from each catalog.installations entry's use_when (it states what each executor is good at and may have been customized by an operator — go by the actual use_when content, not a fixed impression); when unsure do not specify installation_id, let the system auto-pick by priority (smaller first) only among executors that share the same directory and permissions. Executor availability is adjudicated by the system; no need to pre-check. Returns asynchronously and ends this round. required_outputs: when this task is only delivered if specific files are produced, list each artifact's EXACT relative path here (relative to the execution output dir $XPP_OUTPUT_DIR, e.g. report.docx or out/chart.png), not a type label (do not write docx/image). The system deterministically injects these paths into the executor prompt, and on receipt verifies each file truly exists and is non-empty; missing any one fails delivery; leave empty when no file artifact is mandatory. outputs: artifacts to register are file paths, not type labels (do not write docx/image).",
          {"prompt": S, "host_id": S, "installation_id": S, "artifact_refs": L, "outputs": L, "required_outputs": L}, ["prompt"]),
     tool("inspect_task", "Read your own task's status and artifacts; does not poll or wait.", {"task_id": S}, ["task_id"]),
     tool("cancel_dependency", "Deterministically withdraw a dependency the current work created (child_work / synchronous peer request / task). dep_id comes from read_work's dependencies. Withdrawing a child_work recursively cancels that child Work and its downstream dependencies; no need to wake the target Bot to interpret 'stop' again. On an explicit stop by the user, withdraw this dependency first. For a running task whose target.interjection_tier is 3 or absent, on a user correction or reversal also withdraw the old dependency first, then resubmit per the new request. For a tier 1 or 2 correction or redirection, first send into the same session via send_bot_message's dep_id, and only cancel-and-resubmit when that call returns that it cannot be accepted online.",
@@ -76,10 +76,9 @@ TOOLS.extend([
     tool("list_routines", "List visible routines with their next/last run.", {}),
     tool("setup_agent", "Supervisor probes or configures a device CLI per the user's intent. The model may not specify an API endpoint or resource-management command; those come only from an operator / device-trusted policy. Secrets are requested only via the secure window.",
          {"host_id": S, "action": {"type": "string", "enum": ["discover", "configure", "credential", "delete_credential"]},
-          "adapter": {"type": "string", "enum": ["codex", "claude-code", "qwen-claude"]},
+          "adapter": S,
           "installation_id": S, "cwd": S,
-          "auth": {"type": "string", "enum": ["existing", "api_key"]},
-          "uses_qwen": B},
+          "auth": {"type": "string", "enum": ["existing", "api_key"]}},
          ["host_id", "action"])
 ])
 
@@ -489,8 +488,10 @@ class Runtime:
             # remains the sole authoritative commit path and re-runs its full route
             # mapping; this check only avoids a pointless Jev call when Python
             # already knows there is no eligible executor.
-            if not self.service.route(bot_id, work, body).get("selected"):
-                raise Fault("no_eligible_executor")
+            routed = self.service.route(bot_id, work, body)
+            if not routed.get("selected"):
+                block = routed.get("routing_block") or {}
+                raise Fault(block.get("code") or "no_eligible_executor", advice=block.get("advice"))
             return
 
     def _log_semantic_gate(self, current, name, mode, *, snapshot=None,

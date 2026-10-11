@@ -37,7 +37,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(ADAPTER_CATALOG["codex"]["stdin_protocol"], "codex-app-server")
         # Stored invocation is still exec. The runner rewrites it at launch.
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["qwen-claude"]), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("qwen-claude")), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(
             {"interjection_tier": 1, "stdin_protocol": "gemini-stream"}), 3)
