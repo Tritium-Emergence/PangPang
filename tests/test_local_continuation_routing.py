@@ -269,6 +269,60 @@ class LocalRoutingTests(unittest.TestCase):
             sched.release_model_call()
         self.assertEqual(sched._model_call_inflight, 0)
 
+    def test_nested_hold_keeps_its_count_beside_another_caller(self):
+        import threading
+        from pangpang.runtime import Runtime
+        self.app.scheduler_config["model_max_concurrency"] = 2
+        Runtime(self.app)
+        sched = self.app.scheduler
+        held = threading.Event()
+        drop_inner = threading.Event()
+        inner_dropped = threading.Event()
+        drop_outer = threading.Event()
+
+        def owner():
+            self.assertTrue(sched.acquire_model_call(timeout_s=1))
+            self.assertTrue(sched.acquire_model_call(timeout_s=0))
+            held.set()
+            self.assertTrue(drop_inner.wait(2))
+            sched.release_model_call()
+            inner_dropped.set()
+            self.assertTrue(drop_outer.wait(2))
+            sched.release_model_call()
+
+        thread = threading.Thread(target=owner)
+        thread.start()
+        self.assertTrue(held.wait(2))
+        self.assertEqual(sched._model_call_inflight, 1)
+        self.assertTrue(sched.acquire_model_call(timeout_s=1))
+        self.assertEqual(sched._model_call_inflight, 2)
+
+        def try_once(box, timeout_s):
+            box.append(sched.acquire_model_call(timeout_s=timeout_s))
+
+        blocked = []
+        extra = threading.Thread(target=try_once, args=(blocked, 0.05))
+        extra.start()
+        extra.join(2)
+        self.assertEqual(blocked, [False])
+        self.assertEqual(sched._model_call_inflight, 2)
+        drop_inner.set()
+        self.assertTrue(inner_dropped.wait(2))
+        # The nested release must not free the outer hold.
+        self.assertEqual(sched._model_call_inflight, 2)
+        still_blocked = []
+        extra = threading.Thread(target=try_once, args=(still_blocked, 0.05))
+        extra.start()
+        extra.join(2)
+        self.assertEqual(still_blocked, [False])
+        drop_outer.set()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(sched._model_call_inflight, 1)
+        sched.release_model_call()
+        self.assertEqual(sched._model_call_inflight, 0)
+        self.assertEqual(sched._model_call_depth, {})
+
     def test_pi_model_run_and_routing_share_one_slot(self):
         import threading
         import time

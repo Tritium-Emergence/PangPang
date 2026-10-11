@@ -42,11 +42,11 @@ class TurnScheduler:
         self._timed_out = set() # (turn_id, run_attempt_id) hard-timed-out
         self._reg_lock = threading.Lock()
         # One in-flight count for every real model call. Callers wait on this
-        # lock; there is no extra queue. A nested call on the same thread
-        # (a turn compacting inside its own call) reuses the slot it holds.
+        # lock; there is no extra queue. Depth is per thread: a turn that
+        # compacts reuses the slot that thread already holds, and another
+        # thread's acquire cannot erase that depth.
         self._model_call_inflight = 0
-        self._model_call_owner = None
-        self._model_call_depth = 0
+        self._model_call_depth = {}
         self._model_call_cv = threading.Condition(self._reg_lock)
 
     @property
@@ -114,14 +114,16 @@ class TurnScheduler:
 
         PiModel holds this around the worker process. A finite timeout returns
         False instead of starting that process. None waits until a unit is free.
-        The thread that already holds the unit takes it again without waiting,
-        so a call that compacts does not deadlock on itself."""
+        A thread that already holds a unit takes it again without waiting and
+        without consuming another unit, so a call that compacts does not
+        deadlock on itself and does not change the count other threads see."""
         max_c = max(1, int(self.config["model_max_concurrency"]))
         deadline = None if timeout_s is None else time.monotonic() + max(0.0, float(timeout_s))
         me = threading.get_ident()
         with self._model_call_cv:
-            if self._model_call_owner == me:
-                self._model_call_depth += 1
+            depth = self._model_call_depth.get(me, 0)
+            if depth:
+                self._model_call_depth[me] = depth + 1
                 return True
             while self._model_call_inflight >= max_c:
                 if deadline is None:
@@ -132,20 +134,21 @@ class TurnScheduler:
                     return False
                 self._model_call_cv.wait(timeout=remaining)
             self._model_call_inflight += 1
-            self._model_call_owner = me
-            self._model_call_depth = 1
+            self._model_call_depth[me] = 1
             return True
 
     def release_model_call(self):
-        """Return one unit taken by acquire_model_call. Extra releases are ignored."""
+        """Return one unit taken by this thread. A release from a thread that
+        holds nothing is ignored, so one thread cannot drop another's count."""
         me = threading.get_ident()
         with self._model_call_cv:
-            if self._model_call_owner == me and self._model_call_depth > 1:
-                self._model_call_depth -= 1
+            depth = self._model_call_depth.get(me, 0)
+            if depth > 1:
+                self._model_call_depth[me] = depth - 1
                 return
-            if self._model_call_owner == me:
-                self._model_call_owner = None
-                self._model_call_depth = 0
+            if depth != 1:
+                return
+            self._model_call_depth.pop(me, None)
             if self._model_call_inflight:
                 self._model_call_inflight -= 1
             self._model_call_cv.notify()

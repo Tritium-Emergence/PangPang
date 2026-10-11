@@ -1790,11 +1790,6 @@ class Service:
             switch_threshold = 0.75
         switch_threshold = min(0.99, max(0.50, switch_threshold))
         try:
-            correction_threshold = float(cfg.get("correction_threshold", 0.85))
-        except (TypeError, ValueError):
-            correction_threshold = 0.85
-        correction_threshold = min(0.99, max(0.50, correction_threshold))
-        try:
             confidence = float(verdict.get("confidence") or 0)
         except (TypeError, ValueError):
             confidence = 0.0
