@@ -21,9 +21,6 @@ from .build_info import release_identity
 FORMAT = "pangpang-backup-v1"
 # Task rows outside this set are still in flight or not a confirmed terminal.
 TERMINAL_TASK = {"succeeded", "failed", "cancelled"}
-# A connector run is settled only after the coordinator has acknowledged it.
-# launching, active, and report are still in flight or not yet recorded upstream.
-_SETTLED_LOCAL_RUN = {"acknowledged"}
 _DB_NAME = {"cloud": "bots.db", "connector": "connector.db"}
 _LOCK_NAME = {"cloud": "coordinator.lock", "connector": "connector.lock"}
 _ALLOWED_PARTS = frozenset({
@@ -144,7 +141,7 @@ def _inventory(db_path):
         blocked.append("ssh_host_present")
     runs = _read_rows(db_path, "local_run")
     open_runs = [{"id": row.get("id"), "status": row.get("status")}
-                 for row in runs if row.get("status") not in _SETTLED_LOCAL_RUN]
+                 for row in runs if not _local_run_settled(row)]
     if open_runs:
         blocked.append("local_run_not_terminal")
     gate = managed.get("semantic_gate") if isinstance(managed.get("semantic_gate"), dict) else {}
@@ -165,6 +162,23 @@ def _inventory(db_path):
     }, blocked
 
 
+def _local_run_settled(row):
+    """Acknowledged is not settlement. The receipt must be a confirmed terminal.
+
+    The connector also marks an unconfirmed receipt acknowledged so it will
+    not be uploaded again. That run stays open until the receipt proves a
+    terminal outcome.
+    """
+    if row.get("status") != "acknowledged":
+        return False
+    receipt = row.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("status") not in TERMINAL_TASK:
+        return False
+    task = row.get("task") if isinstance(row.get("task"), dict) else {}
+    from .runner import receipt_proof_ok
+    return receipt_proof_ok(receipt, task.get("supervision_floor")) is True
+
+
 def _part(root, relative):
     path = root / relative
     return {"path": relative, "sha256": _sha256(path), "bytes": path.stat().st_size}
@@ -173,9 +187,9 @@ def _part(root, relative):
 def create_consistent_backup(data, dest, *, confirm=False, interactive=None, now=None):
     """Copy the recoverable set into a new directory and write a manifest last.
 
-    ``upgrade_allowed`` is false when a non-terminal task, an unacknowledged
-    connector run, an SSH host, or a non-off semantic-gate mode is present.
-    Those rows are left unchanged.
+    ``upgrade_allowed`` is false when a non-terminal task, a connector run
+    without a confirmed terminal receipt, an SSH host, or a non-off
+    semantic-gate mode is present. Those rows are left unchanged.
     """
     data = Path(data).expanduser().absolute()
     dest = Path(dest).expanduser().absolute()
@@ -408,6 +422,11 @@ def _rollback_swap(data, aside, tops, moved_out):
     return restored
 
 
+def _remove_tree(path):
+    if path.exists() or path.is_symlink():
+        shutil.rmtree(path)
+
+
 def _swap_into(staging, data, tops):
     """Move verified tops into an existing directory. On failure the previous files return."""
     aside = data.parent / (data.name + ".restore-aside")
@@ -427,11 +446,36 @@ def _swap_into(staging, data, tops):
                     moved_out.append(name)
         for top in tops:
             os.rename(staging / top, data / top)
-    except Exception:
-        if _rollback_swap(data, aside, tops, moved_out):
-            shutil.rmtree(aside, ignore_errors=True)
+    except Exception as error:
+        try:
+            restored = _rollback_swap(data, aside, tops, moved_out)
+        except Exception as rollback_error:
+            raise BackupRefusal(
+                "restore_incomplete",
+                "恢复没有完成。目标目录 %s 可能缺件，或与 %s 里的旧文件混合。"
+                "不要使用该目录。旧文件在 %s。回滚错误：%s。前向错误：%s"
+                % (data, aside, aside, rollback_error, error)) from None
+        if not restored:
+            raise BackupRefusal(
+                "restore_incomplete",
+                "恢复没有完成。目标目录 %s 缺件，或与 %s 里的旧文件混合。"
+                "不要使用该目录，先处理 %s。前向错误：%s" % (data, aside, aside, error)) from None
+        try:
+            _remove_tree(aside)
+        except OSError as cleanup_error:
+            raise BackupRefusal(
+                "restore_cleanup_failed",
+                "目标目录 %s 已放回恢复前的文件，但 %s 未能删除（%s）。"
+                "下次恢复前先处理该目录。前向错误：%s" % (data, aside, cleanup_error, error)) from None
         raise
-    shutil.rmtree(aside, ignore_errors=True)
+    try:
+        _remove_tree(aside)
+    except OSError as error:
+        raise BackupRefusal(
+            "restore_cleanup_failed",
+            "恢复已写入 %s，但旧的数据库和 Vault 仍在 %s（%s）。"
+            "不能把这次当作已清理完成。下次恢复前先把该目录移走或删除。"
+            % (data, aside, error)) from None
 
 
 def restore_consistent_backup(backup, data, *, confirm=False, interactive=None):
@@ -471,14 +515,31 @@ def restore_consistent_backup(backup, data, *, confirm=False, interactive=None):
                     raise BackupRefusal("checksum_mismatch", "组件校验失败：%s。不会写入目标数据目录。" % name)
             if data.exists():
                 _swap_into(staging, data, _top_levels(names))
-                shutil.rmtree(staging, ignore_errors=True)
+                try:
+                    _remove_tree(staging)
+                except OSError as error:
+                    raise BackupRefusal(
+                        "restore_cleanup_failed",
+                        "恢复已写入 %s，但暂存目录 %s 未能删除（%s）。下次恢复前先处理该目录。"
+                        % (data, staging, error)) from None
             else:
                 os.rename(staging, data)
-        except BackupRefusal:
-            shutil.rmtree(staging, ignore_errors=True)
+        except BackupRefusal as refusal:
+            try:
+                _remove_tree(staging)
+            except OSError as cleanup_error:
+                raise BackupRefusal(
+                    refusal.code,
+                    "%s 另外，暂存目录 %s 未能删除：%s" % (refusal, staging, cleanup_error)) from None
             raise
         except Exception as error:
-            shutil.rmtree(staging, ignore_errors=True)
+            try:
+                _remove_tree(staging)
+            except OSError as cleanup_error:
+                raise BackupRefusal(
+                    "restore_failed",
+                    "恢复没有完成，目标目录未改入新文件：%s。暂存目录 %s 未能删除：%s"
+                    % (error, staging, cleanup_error)) from None
             raise BackupRefusal("restore_failed", "恢复没有完成，目标目录保持原样：%s" % error) from None
         _restrict_directory(data)
         vault_dir = data / "vault"

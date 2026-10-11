@@ -411,12 +411,39 @@ class BackupTests(unittest.TestCase):
                 self.assertEqual(live.get("local_run", "run-1")["status"], status)
             finally:
                 live.close()
+        blocked_rows = (
+            {"status": "acknowledged"},
+            {"status": "acknowledged", "task": {"id": "task-1"}, "receipt": {
+                "status": "running", "process_tree_confirmed": False}},
+        )
+        for index, row in enumerate(blocked_rows):
+            store = Store(data / "connector.db")
+            current = store.get("local_run", "run-1")
+            current.clear()
+            current.update({"id": "run-1"}, **row)
+            store.put("local_run", current)
+            store.close()
+            dest = Path(self.tmp.name) / ("run-open-%s" % index)
+            result = create_consistent_backup(data, dest, confirm=True)
+            self.assertIn("local_run_not_terminal", result["upgrade_blocked"])
+            self.assertFalse(result["upgrade_allowed"])
+            live = Store(data / "connector.db")
+            try:
+                self.assertEqual(live.get("local_run", "run-1")["status"], "acknowledged")
+            finally:
+                live.close()
         store = Store(data / "connector.db")
-        row = store.get("local_run", "run-1")
-        row["status"] = "acknowledged"
-        store.put("local_run", row)
+        current = store.get("local_run", "run-1")
+        current.clear()
+        current.update({
+            "id": "run-1",
+            "status": "acknowledged",
+            "task": {},
+            "receipt": {"status": "cancelled", "process_tree_confirmed": True},
+        })
+        store.put("local_run", current)
         store.close()
-        dest = Path(self.tmp.name) / "run-acknowledged"
+        dest = Path(self.tmp.name) / "run-settled"
         result = create_consistent_backup(data, dest, confirm=True)
         self.assertNotIn("local_run_not_terminal", result["upgrade_blocked"])
         self.assertTrue(result["upgrade_allowed"])
@@ -483,6 +510,58 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(vault.get("web-access-token"), "t" * 32)
         finally:
             vault.close()
+
+    def test_restore_rollback_failure_names_the_mixed_directory(self):
+        dest = Path(self.tmp.name) / "backup-rollback-fail"
+        create_consistent_backup(self.data, dest, confirm=True)
+        store = Store(self.data / "bots.db")
+        store.put("identity", {"id": "device", "instance_id": "changed"})
+        store.close()
+        real = os.rename
+
+        def flaky(src, dst):
+            parent = Path(src).parent.name
+            if Path(src).name == "vault" and (parent.endswith(".restore-partial") or parent.endswith(".restore-aside")):
+                raise OSError("rename failed")
+            return real(src, dst)
+
+        with patch("pangpang.backup.os.rename", side_effect=flaky):
+            with self.assertRaises(BackupRefusal) as raised:
+                restore_consistent_backup(dest, self.data, confirm=True)
+        aside = self.data.parent / (self.data.name + ".restore-aside")
+        self.assertEqual(raised.exception.code, "restore_incomplete")
+        self.assertIn(str(aside), str(raised.exception))
+        self.assertNotIn("保持原样", str(raised.exception))
+        self.assertTrue((aside / "vault" / "master.key").is_file())
+        self.assertFalse((self.data / "vault" / "master.key").exists())
+        self.assertEqual((aside / "vault" / "master.key").read_bytes(), self.key_before)
+
+    def test_restore_aside_cleanup_failure_is_not_success(self):
+        dest = Path(self.tmp.name) / "backup-cleanup-fail"
+        create_consistent_backup(self.data, dest, confirm=True)
+        store = Store(self.data / "bots.db")
+        store.put("identity", {"id": "device", "instance_id": "changed"})
+        store.close()
+        real = shutil.rmtree
+
+        def boom(path, *args, **kwargs):
+            if Path(path).name.endswith(".restore-aside"):
+                raise OSError("busy")
+            return real(path, *args, **kwargs)
+
+        with patch("pangpang.backup.shutil.rmtree", side_effect=boom):
+            with self.assertRaises(BackupRefusal) as raised:
+                restore_consistent_backup(dest, self.data, confirm=True)
+        aside = self.data.parent / (self.data.name + ".restore-aside")
+        self.assertEqual(raised.exception.code, "restore_cleanup_failed")
+        self.assertIn(str(aside), str(raised.exception))
+        self.assertTrue(aside.is_dir())
+        self.assertTrue((aside / "vault" / "master.key").is_file())
+        live = Store(self.data / "bots.db")
+        try:
+            self.assertEqual(live.get("identity", "device")["instance_id"], "device-keep")
+        finally:
+            live.close()
 
     def test_restore_replaces_existing_directory(self):
         dest = Path(self.tmp.name) / "backup-replace"

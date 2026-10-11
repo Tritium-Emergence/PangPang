@@ -143,8 +143,8 @@ python -m pangpang.cli backup --data /absolute/data --dest /absolute/backup --co
 python -m pangpang.cli restore --backup /absolute/backup --data /absolute/restore-drill --confirm
 ```
 
-非交互环境不带 `--confirm` 会直接退出，不写文件。进程锁被占用、磁盘空间不足、缺少 Vault 时也会退出，不留下一份声称成功的备份。清单里若仍有未终结任务、unknown、SSH 主机、尚未 acknowledged 的连接器 `local_run`，或 semantic gate 不是 `off`，备份可以留下，但退出码为 3，升级不得继续。本命令不迁移这些记录。`adapters.json` 若存在会一并写入清单，其中的执行器环境与 Vault 同样敏感。
+非交互环境不带 `--confirm` 会直接退出，不写文件。进程锁被占用、磁盘空间不足、缺少 Vault 时也会退出，不留下一份声称成功的备份。清单里若仍有未终结任务、unknown、SSH 主机、没有已证实终态回执的连接器 `local_run`，或 semantic gate 不是 `off`，备份可以留下，但退出码为 3，升级不得继续。只看到 `acknowledged` 不够：回执缺失、不是终态，或进程树未被证实，都算未收口。本命令不迁移这些记录。`adapters.json` 若存在会一并写入清单，其中的执行器环境与 Vault 同样敏感。
 
-恢复先把校验过的文件写到目标旁边的暂存目录，再次核对后才改名进入目标。中途失败会留下原来的数据目录，不留下半份 Vault。演练可以指向一份空目录或已停止的同一数据目录，并核对访问密钥与设备身份仍在。旧二进制会拒绝已升到 v2 的库；回滚是旧程序加上这份升级前的备份，不是只看 `--version`。
+恢复先把校验过的文件写到目标旁边的暂存目录，再次核对后才改名进入目标。错误写明「目标目录保持原样」时，原来的数据目录没有被改入新文件。错误写明「缺件或混合」并给出 `.restore-aside` 路径时，不要使用目标目录，旧文件在该路径。错误写明恢复已写入但旧文件仍在 `.restore-aside` 时，新文件已经进入目标，须先处理该目录才能再次恢复。演练可以指向一份空目录或已停止的同一数据目录，并核对访问密钥与设备身份仍在。旧二进制会拒绝已升到 v2 的库；回滚是旧程序加上这份升级前的备份，不是只看 `--version`。
 
 服务示例在 `deploy/`。`pangpang-cloud.service` 与 `pangpang-connector.service` 是系统单元，`User=` 和 `Group=` 都是 `pangpang`。启用前先创建该用户和组；不要删掉这两行，否则进程会以 root 运行。连接器若要读写某人的工作区，把这两行改成那个账号，不要改成 root。按 pip 安装后的 `python -m pangpang.cli` 启动，数据目录是绝对路径。示例里没有密钥。非交互首次启动另需环境变量 `PANGPANG_TOKEN`（至少 24 位）；本机执行器的非交互确认用已有的 `--allow-local-exec`。
