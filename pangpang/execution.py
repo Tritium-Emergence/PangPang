@@ -762,7 +762,7 @@ class Execution:
                 "outputs": task.get("outputs", []), "required_outputs": task.get("required_outputs", []),
                 "timeout_s": task.get("timeout_s", e.get("timeout_s", 3600)),
                 "env_allowlist": e.get("env_allowlist", []),
-                "extra_env": dict(e.get("env", {}), **e.get("extra_env", {})),
+                "extra_env": dict(e.get("extra_env", {}), **e.get("env", {})),
                 "secret_refs": e.get("secret_refs", {}),
                 "vault_path": str(self.data / "vault") if h["transport"] == "local" else None,
                 "resources": [self.resources[k] for k in e.get("resource_keys", [])]}

@@ -61,15 +61,36 @@ class InstallationEnvExecutionTests(unittest.TestCase):
                     Execution(self.cfg({"env": bad}), self.root / "data")
                 self.assertEqual(ctx.exception.code, "invalid_installation_env")
 
-    def test_spec_merges_env_and_extra_env_wins(self):
+    def test_spec_merges_env_and_profile_env_wins(self):
         cfg = self.cfg({"env": {"CODEX_HOME": "/profile/home", "CLAUDE_CONFIG_DIR": "/profile/claude"},
                         "extra_env": {"CODEX_HOME": "/materialized/home"}})
         execution = Execution(cfg, self.root / "data")
         task = {"installation_id": "codex-local", "execution_id": "exec-1", "spec_digest": "d",
                 "prompt": "x", "inputs": []}
         spec = execution.spec(task)
-        self.assertEqual(spec["extra_env"], {"CODEX_HOME": "/materialized/home",
+        self.assertEqual(spec["extra_env"], {"CODEX_HOME": "/profile/home",
                                              "CLAUDE_CONFIG_DIR": "/profile/claude"})
+
+    def test_two_profiles_keep_their_own_home_over_adapter_extra_env(self):
+        cfg = config(self.root / "workspace")
+        (self.root / "workspace").mkdir(parents=True, exist_ok=True)
+        base = cfg["installations"][0]
+        cfg["installations"] = [
+            dict(base, id="codex-alice-local", env={"CODEX_HOME": "/profiles/alice"},
+                 extra_env={"CODEX_HOME": "/default/codex"}),
+            dict(base, id="codex-bob-local", env={"CODEX_HOME": "/profiles/bob"},
+                 extra_env={"CODEX_HOME": "/default/codex"}),
+            dict(base, extra_env={"CODEX_HOME": "/default/codex"}),
+        ]
+        execution = Execution(cfg, self.root / "data")
+        homes = {}
+        for installation in ("codex-alice-local", "codex-bob-local", "codex-local"):
+            task = {"installation_id": installation, "execution_id": "exec-1",
+                    "spec_digest": "d", "prompt": "x", "inputs": []}
+            homes[installation] = execution.spec(task)["extra_env"]["CODEX_HOME"]
+        self.assertEqual(homes, {"codex-alice-local": "/profiles/alice",
+                                 "codex-bob-local": "/profiles/bob",
+                                 "codex-local": "/default/codex"})
 
 
 class DeviceProfileTests(unittest.TestCase):
