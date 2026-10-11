@@ -694,6 +694,10 @@ class ConnectorExecutionLevelTests(unittest.TestCase):
         code, hint = app._supervision_unverified_action(route['rejected'])
         self.assertEqual(code, 'set_host_execution_level')
         self.assertIn('execution_level=L0', hint)
+        self.assertIn('python -m pangpang.consent accept --data <data>', hint)
+        self.assertIn('先停止', hint)
+        self.assertIn('重启服务', hint)
+        self.assertIn('重新探测', hint)
         # setting that device L0 then actually admits it on the same L1 coordinator.
         app.set_host_execution_level('local', {'level': 'L0'})
         selected, _ = self._route_reason(app, 'linux-cgroup-cooperative')
@@ -1227,6 +1231,78 @@ class SshRetireGateTests(unittest.TestCase):
         self.assertEqual(got["status"], "running")
         self.assertNotIn("receipt", got)
 
+    def test_unknown_ssh_past_backoff_is_observed_once(self):
+        sent = self._send("backoff")
+        submitted = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "held"})
+        task = self.app.store.get("task", submitted["task_id"])
+        task.update(status="unknown", host_id="ssh-h", installation_id="codex-ssh-h",
+                    error="execution_state_unknown", unknown_reason="ssh_transport_retired",
+                    observation_retry_not_before=time.time() - 1,
+                    started=time.time(), attempt_uuid="att")
+        self.app.store.put("task", task)
+        polls = {"n": 0}
+        real_poll = self.app.execution.poll
+
+        def counting(row, **kwargs):
+            polls["n"] += 1
+            return real_poll(row, **kwargs)
+
+        with patch.object(self.app.execution, "poll", side_effect=counting), \
+                patch.object(self.app.execution, "start") as start:
+            progressed = True
+            steps = 0
+            while progressed and steps < 8:
+                progressed = self.app.task_step()
+                steps += 1
+            self.assertLess(steps, 8)
+            self.assertEqual(polls["n"], 1)
+            self.assertFalse(self.app.task_step())
+            self.assertEqual(polls["n"], 1)
+            start.assert_not_called()
+        got = self.app.store.get("task", task["id"])
+        self.assertEqual(got["status"], "unknown")
+        self.assertEqual(got["error"], "execution_state_unknown")
+        self.assertGreater(got["observation_retry_not_before"], time.time())
+        self.assertEqual(self.app.store.get("dependency", got["dependency_id"])["status"], "pending")
+        got["observation_retry_not_before"] = time.time() - 1
+        self.app.store.put("task", got)
+        with patch.object(self.app.execution, "poll", side_effect=counting), \
+                patch.object(self.app.execution, "start") as start:
+            self.assertTrue(self.app.task_step())
+            self.assertFalse(self.app.task_step())
+            self.assertEqual(polls["n"], 2)
+            start.assert_not_called()
+        again = self.app.store.get("task", task["id"])
+        self.assertEqual(again["status"], "unknown")
+        self.assertEqual(len(self.app.store.find("task")), 1)
+
+    def test_ssh_cancel_intent_survives_unknown(self):
+        sent = self._send("cancel-ssh")
+        submitted = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "stop"})
+        task = self.app.store.get("task", submitted["task_id"])
+        task.update(status="running", host_id="ssh-h", installation_id="codex-ssh-h",
+                    started=time.time(), attempt_uuid="att")
+        self.app.store.put("task", task)
+        self.app._cancel_task_local(task["id"])
+        marked = self.app.store.get("task", task["id"])
+        self.assertEqual(marked["status"], "cancel_requested")
+        self.assertTrue(marked["cancel_requested"])
+        with patch.object(self.app.execution, "start") as start, \
+                patch("pangpang.execution.subprocess.run") as run:
+            self.assertTrue(self.app.task_step())
+            self.assertFalse(self.app.task_step())
+            start.assert_not_called()
+            run.assert_not_called()
+        got = self.app.store.get("task", task["id"])
+        self.assertEqual(got["status"], "unknown")
+        self.assertTrue(got["cancel_requested"])
+        self.assertEqual(got["unknown_reason"], "ssh_transport_retired")
+        self.assertEqual(got["error"], "execution_state_unknown")
+        self.assertNotIn("receipt", got)
+        self.assertFalse(got.get("device_cancel_sent"))
+        self.assertEqual(self.app.store.get("dependency", got["dependency_id"])["status"], "pending")
+        self.assertEqual(len(self.app.store.find("task")), 1)
+
     def test_unknown_ssh_attempt_is_not_auto_resolved(self):
         sent = self._send("unk")
         submitted = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "held"})
@@ -1327,15 +1403,22 @@ class SshRetireGateTests(unittest.TestCase):
             weak.store.close()
         task = self.app.store.get("task", self.app.submit_task(
             "bot-main", self._send("proved")["work_id"], {"prompt": "ran"})["task_id"])
-        task.update(status="succeeded", receipt={
-            "status": "succeeded", "execution_id": task["execution_id"],
-            "spec_digest": task["spec_digest"], "process_tree_confirmed": True})
+        task["attempt_uuid"] = "att"
+        bare = {"status": "succeeded", "execution_id": task["execution_id"],
+                "spec_digest": task["spec_digest"], "process_tree_confirmed": True}
+        task.update(status="succeeded", receipt=bare)
+        self.app.store.put("task", task)
+        self.assertFalse(self.app.installation_execution_facts("codex-local")["execution_verified"])
+        foreign = dict(bare, attempt_uuid="other", supervision="windows-job-object")
+        task["receipt"] = foreign
+        self.app.store.put("task", task)
+        self.assertFalse(self.app.installation_execution_facts("codex-local")["execution_verified"])
+        proved_receipt = dict(bare, attempt_uuid="att", supervision="windows-job-object")
+        task["receipt"] = proved_receipt
         self.app.store.put("task", task)
         proved = self.app.installation_execution_facts("codex-local")
         self.assertTrue(proved["execution_verified"])
-        task["receipt"] = {"status": "succeeded", "execution_id": task["execution_id"],
-                           "spec_digest": task["spec_digest"], "process_tree_confirmed": True,
-                           "not_launched": "runner_prelaunch"}
+        task["receipt"] = dict(proved_receipt, not_launched="runner_prelaunch")
         self.app.store.put("task", task)
         self.assertFalse(self.app.installation_execution_facts("codex-local")["execution_verified"])
         caps = self.app.effective_capabilities()

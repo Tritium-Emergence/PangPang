@@ -1397,6 +1397,7 @@ class Service:
                 "execution_id": task["execution_id"], "spec_digest": task["spec_digest"]})
             return
         task["status"] = "cancel_requested"
+        task["cancel_requested"] = True
         self.store.put("task", task)
 
     def _withdraw_exchange_target(self, exchange_id):
@@ -3259,8 +3260,10 @@ class Service:
                     "在云端用已认证的操作员身份为该设备设 execution_level=L0"
                     "（POST /api/v1/hosts/{host_id}/execution-level，{\"level\":\"L0\"}），"
                     "只放行这一台设备，不必改动整个云端的部署等级。若该设备用进程组档"
-                    "（posix-pgroup-cooperative，macOS/无 cgroup 的 Linux），还需在设备本机"
-                    "运行 python -m pangpang.consent accept 记录风险同意（双重确认）。见 SECURITY.md。")
+                    "（posix-pgroup-cooperative，macOS/无 cgroup 的 Linux），先停止该设备上的服务，"
+                    "再在设备本机交互执行 python -m pangpang.consent accept --data <data>，"
+                    "输入当前风险版本确认；然后重启服务，并对该主机的执行器重新探测。"
+                    "进程组同意不是操作系统隔离。见 SECURITY.md。")
         if self.deployment_level in ("L1", "L2"):
             return ("connect_executor",
                     "当前部署等级只接受强监管（Windows Job Object）。协作档在这一档不会放行。见 SECURITY.md。")
@@ -5368,7 +5371,9 @@ class Service:
         """True when a recent succeeded task carries this attempt's own receipt.
 
         Bounded to the newest _EVIDENCE_SCAN_LIMIT successes. A miss is not
-        verified. not_launched and operator resolutions are not execution.
+        verified. The receipt must pass the same attempt fence and proof used
+        to commit a terminal state. not_launched and operator resolutions are
+        not execution.
         """
         seen = 0
         cursor = None
@@ -5380,15 +5385,13 @@ class Service:
             for task in page:
                 seen += 1
                 receipt = task.get("receipt") or {}
+                if task.get("status") != "succeeded" or receipt.get("status") != "succeeded":
+                    continue
                 if receipt.get("not_launched") or receipt.get("operator_resolution"):
                     continue
-                if receipt.get("status") != "succeeded":
+                if not self._receipt_matches_attempt(task, receipt):
                     continue
-                if receipt.get("execution_id") != task.get("execution_id"):
-                    continue
-                if receipt.get("spec_digest") != task.get("spec_digest"):
-                    continue
-                if not receipt.get("process_tree_confirmed"):
+                if not self._receipt_confirmed(task, receipt):
                     continue
                 return True
             if cursor is None:
@@ -5432,14 +5435,13 @@ class Service:
     def _ssh_channel_gone(self, task, error):
         """Quarantine an attempt whose SSH runner channel no longer exists.
 
-        A transport blip stays on the observation backoff. This code means the
-        channel itself was removed, so another poll cannot succeed. Unknown
-        keeps the join and the workspace; it is not success and not a rerun.
+        Returns True only when the task newly becomes unknown. A task that is
+        already unknown stays on the observation backoff; another poll of a
+        removed channel is not a state change.
         """
         if getattr(error, "code", None) != "ssh_transport_retired":
             return False
-        self._mark_task_unknown(task, "ssh_transport_retired")
-        return True
+        return self._mark_task_unknown(task, "ssh_transport_retired")
 
     def _mark_task_unknown(self, task, reason):
         """Quarantine a task as unknown (observation uncertainty, not a business
@@ -5447,16 +5449,21 @@ class Service:
         code `execution_state_unknown`; the specific internal reason (process_gone /
         attempt_pid_foreign / execution_overran_deadline /...) is kept in
         `unknown_reason` for operator telemetry only, so inspect_task cannot leak an
-        implementation term to the model (SIS)."""
+        implementation term to the model. Returns True only when status
+        changes. A cancel already recorded on the task is kept."""
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL or current["status"] == "unknown":
-                return
-            current.update(status="unknown", error="execution_state_unknown",
-                           unknown_reason=reason, observation_retry_not_before=time.time() + 5)
+                return False
+            fields = {"status": "unknown", "error": "execution_state_unknown",
+                      "unknown_reason": reason, "observation_retry_not_before": time.time() + 5}
+            if current["status"] == "cancel_requested" or current.get("cancel_requested"):
+                fields["cancel_requested"] = True
+            current.update(fields)
             self.store.put("task", current)
             # Observation uncertainty is not a business outcome. Keep the join
             # pending and the workspace quarantined until proof or operator action.
+        return True
 
     def _active_tasks(self, *, include_starting=True):
         """All execution-active tasks, via index-DIRECT single-status scans.
