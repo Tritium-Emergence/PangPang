@@ -37,7 +37,9 @@ class ExplicitContinueTests(unittest.TestCase):
     def tearDown(self):
         self.app.store.close()
         self.tmp.cleanup()
-        if self._prev_key is not None:
+        if self._prev_key is None:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+        else:
             os.environ["TYPESAFE_API_KEY"] = self._prev_key
 
     def _continue(self, work_id, key, **extra):
@@ -231,7 +233,9 @@ class ExplicitContinueHttpTests(unittest.TestCase):
     def tearDown(self):
         self.server.shutdown(); self.server.server_close(); self.thread.join()
         self.app.store.close(); self.tmp.cleanup()
-        if self._prev_key is not None:
+        if self._prev_key is None:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+        else:
             os.environ["TYPESAFE_API_KEY"] = self._prev_key
 
     def post(self, path, body, key):

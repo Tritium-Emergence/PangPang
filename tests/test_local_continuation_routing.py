@@ -26,7 +26,9 @@ class LocalRoutingTests(unittest.TestCase):
     def tearDown(self):
         self.app.store.close()
         self.tmp.cleanup()
-        if self._prev is not None:
+        if self._prev is None:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+        else:
             os.environ["TYPESAFE_API_KEY"] = self._prev
 
     def _seed(self, text, key):

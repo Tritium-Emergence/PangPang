@@ -1885,6 +1885,8 @@ class Service:
                     box["busy"] = True
                     return
                 held = sched is not None
+                if held:
+                    box["acquired"] = True
                 if state["cancelled"]:
                     return
                 message, _usage = PiModel(self).complete(
@@ -1899,13 +1901,22 @@ class Service:
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
         worker.join(timeout=self.LOCAL_ROUTING_TIMEOUT_S)
-        if worker.is_alive():
-            state["cancelled"] = True # exchange() kills the worker at its next checkpoint
-            return self._local_routing_failed("timeout")
-        if "busy" in box:
+        if worker.is_alive() and "busy" not in box and "acquired" not in box:
+            # The slot wait uses this same bound, but its clock starts inside
+            # the worker. A caller that wakes first has not seen a model call.
+            # Let the acquire finish and record busy; that is not a failure.
+            state["cancelled"] = True
+            grace = time.monotonic() + 0.25
+            while (worker.is_alive() and "busy" not in box
+                   and "acquired" not in box and time.monotonic() < grace):
+                worker.join(timeout=0.02)
+        if box.get("busy") and "acquired" not in box and "text" not in box and "error" not in box:
             # Backpressure, not a broken model. Do not open the breaker.
             log.info("local continuation routing skipped (model_busy)")
             return None
+        if worker.is_alive():
+            state["cancelled"] = True # exchange() kills the worker at its next checkpoint
+            return self._local_routing_failed("timeout")
         if "error" in box:
             return self._local_routing_failed("model_error")
         match = re.search(r"\{.*\}", box.get("text", ""), re.S)
