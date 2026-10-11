@@ -15,6 +15,7 @@
 | 文档 | 用途 |
 |---|---|
 | [RUNBOOK.md](RUNBOOK.md) | 部署、运行、恢复、升级 |
+| [HTTPS.md](HTTPS.md) | 操作者自备的可信 HTTPS 入口 |
 | [../SECURITY.md](../SECURITY.md) | 安全边界与漏洞报告规则 |
 
 ## 3. 阅读纪律

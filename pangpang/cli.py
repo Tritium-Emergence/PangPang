@@ -22,7 +22,70 @@ def source_root():
     return Path(__file__).resolve().parents[1]
 
 
-def ensure_model_runtime(root, venv, parser):
+class DataLocationError(Exception):
+    """Default data directory cannot be chosen without hiding an existing tree."""
+
+
+# Historical source-checkout defaults. An installed package does not use these,
+# because they follow the process working directory.
+_LEGACY_DATA = {"cloud": "data-v2", "connector": "connector-data"}
+_DATA_EVIDENCE = ("bots.db", "connector.db", "vault", "coordinator.lock", "connector.lock")
+
+
+def stable_data_dir(role):
+    """Official-install data directory. Independent of the process working directory."""
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA")
+        base = Path(root) if root else Path.home() / "AppData" / "Local"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        root = os.environ.get("XDG_DATA_HOME")
+        base = Path(root) if root else Path.home() / ".local" / "share"
+    name = "pangpang" if role == "cloud" else "pangpang-connector"
+    return (base / name).expanduser().absolute()
+
+
+def _has_data_evidence(path):
+    return path.is_dir() and any((path / name).exists() for name in _DATA_EVIDENCE)
+
+
+def resolve_data_dir(role, explicit, *, source_checkout):
+    """Absolute data path for this start.
+
+    An explicit ``--data`` is used as given (relative paths follow the current
+    directory). A source checkout's default stays next to the repository, not
+    the caller's directory. An installed package uses :func:`stable_data_dir`.
+    A legacy relative directory that already holds a database, vault, or lock
+    is not migrated and is not replaced by a new empty tree: startup stops and
+    names both paths.
+    """
+    if explicit:
+        return Path(explicit).expanduser().absolute()
+    if source_checkout:
+        return (source_root() / _LEGACY_DATA[role]).absolute()
+    legacy = Path(_LEGACY_DATA[role]).expanduser().absolute()
+    stable = stable_data_dir(role)
+    if _has_data_evidence(legacy) and legacy != stable:
+        raise DataLocationError(
+            "当前目录已有旧的相对数据目录 %s（含数据库、Vault 或进程锁）。"
+            "正式安装的默认目录是 %s，与启动时的工作目录无关。"
+            "不会自动搬迁，也不会另建一个空用户。请显式传入 --data 指向要使用的目录。"
+            % (legacy, stable))
+    return stable
+
+
+def _node_stamp(root, venv):
+    """Stamp lives in the repo venv when that directory exists, else under node_modules.
+
+    An editable install often has no ``<repo>/.venv``. Writing the stamp there
+    raised FileNotFoundError before the coordinator started.
+    """
+    parent = venv if venv.is_dir() else root / "node_modules"
+    return parent / "pangpang-node-version"
+
+
+def ensure_model_runtime(root, venv, parser, *, omit_dev=True):
     from pangpang.pi_worker_command import packaged_worker_command, release_bundle_dir
     try:
         if packaged_worker_command() is not None:
@@ -46,10 +109,17 @@ def ensure_model_runtime(root, venv, parser):
                      "Windows: winget install -e --id OpenJS.NodeJS.22")
     npm = "npm.cmd" if os.name == "nt" else "npm"
     wanted = hashlib.sha256((root / "package-lock.json").read_bytes()).hexdigest()
-    stamp = venv / "pangpang-node-version"
-    if not stamp.exists() or stamp.read_text() != wanted or not (root / "node_modules").exists():
-        subprocess.run([npm, "ci", "--omit=dev", "--ignore-scripts"], check=True)
-        stamp.write_text(wanted)
+    stamp = _node_stamp(root, venv)
+    if not stamp.exists() or stamp.read_text(encoding="utf-8") != wanted or not (root / "node_modules").exists():
+        # ``npm ci --omit=dev`` deletes devDependencies. The launch.py bootstrap
+        # of a Release zip wants that. An editable checkout must not.
+        command = [npm, "ci", "--ignore-scripts"]
+        if omit_dev:
+            command.append("--omit=dev")
+        subprocess.run(command, check=True, cwd=root)
+        stamp = _node_stamp(root, venv)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(wanted, encoding="utf-8")
 
 
 def resolve_access_token(data, show_access_key, parser):
@@ -87,7 +157,7 @@ def _parser():
         description="PangPang. Documented entry: python -m pangpang.cli cloud|connector. "
                     "The pip script pangpang (pangpang.exe on Windows) is optional; use -m if that exe is blocked.")
     parser.add_argument("--version", action="version", version=version_string())
-    parser.add_argument("role", choices=["cloud", "connector"])
+    parser.add_argument("role", choices=["cloud", "connector", "backup", "restore"])
     parser.add_argument("--data")
     parser.add_argument("--show-access-key", action="store_true")
     return parser
@@ -95,12 +165,15 @@ def _parser():
 
 def dispatch(args, rest, parser):
     """In-process cloud/connector start. ``sys.argv`` matches the historical launch contract."""
+    from pangpang.layout import is_source_checkout
+    try:
+        data = resolve_data_dir(args.role, args.data, source_checkout=is_source_checkout())
+    except DataLocationError as error:
+        parser.error(str(error))
     if args.role == "cloud":
-        data = Path(args.data or "data-v2").expanduser().absolute()
         os.environ["PANGPANG_TOKEN"] = resolve_access_token(data, args.show_access_key, parser)
         from pangpang.__main__ import main as role_main
     else:
-        data = Path(args.data or "connector-data").expanduser().absolute()
         from pangpang.connector import main as role_main
     sys.argv = ["pangpang", "--data", str(data), *rest]
     return role_main()
@@ -134,22 +207,58 @@ def _python_too_old(parser):
                  "Windows: winget install -e --id Python.Python.3.13")
 
 
+def _run_backup_command(role, rest, data=None):
+    """Stop-consistent backup or restore. Does not start the coordinator or migrate.
+
+    The top-level parser already accepts ``--data``, so the value may arrive
+    here instead of remaining in ``rest``.
+    """
+    from pangpang.backup import BackupRefusal, create_consistent_backup, restore_consistent_backup
+    sub = argparse.ArgumentParser(prog="pangpang " + role)
+    sub.add_argument("--data", default=data)
+    if role == "backup":
+        sub.add_argument("--dest", required=True)
+    else:
+        sub.add_argument("--backup", required=True)
+    sub.add_argument("--confirm", action="store_true")
+    opts = sub.parse_args(rest)
+    if not opts.data:
+        sub.error("--data is required")
+    try:
+        if role == "backup":
+            result = create_consistent_backup(opts.data, opts.dest, confirm=opts.confirm)
+        else:
+            result = restore_consistent_backup(opts.backup, opts.data, confirm=opts.confirm)
+    except BackupRefusal as error:
+        sys.stderr.write("%s: %s\n" % (error.code, error))
+        return 2
+    print(result["path"], flush=True)
+    if role == "backup" and not result["upgrade_allowed"]:
+        sys.stderr.write("backup written; upgrade blocked: %s\n" % ",".join(result["upgrade_blocked"]))
+        return 3
+    return 0
+
+
 def main(argv=None):
     """``python -m pangpang.cli cloud|connector``. Installed by pip; no venv and no runtime download."""
     from pangpang.layout import is_source_checkout
     from pangpang.product_runtime import prepare_product
     parser = _parser()
     args, rest = parser.parse_known_args(argv)
+    if args.role in {"backup", "restore"}:
+        return _run_backup_command(args.role, rest, args.data)
     if sys.version_info < (3, 11):
         _python_too_old(parser)
     prepare_product(args.role, parser)
     # Editable checkout: Python deps came from pip. Cloud still needs the Node
     # bootstrap when no Bun worker is shipped. A wheel never reaches this branch
-    # (prepare_product already required the bundled worker).
+    # (prepare_product already required the bundled worker). omit_dev stays false
+    # so ``npm ci`` does not delete devDependencies, and a missing repo ``.venv``
+    # is not required.
     if is_source_checkout() and args.role == "cloud":
         root = source_root()
         os.chdir(root)
-        ensure_model_runtime(root, root / ".venv", parser)
+        ensure_model_runtime(root, root / ".venv", parser, omit_dev=False)
     return dispatch(args, rest, parser)
 
 
@@ -158,6 +267,8 @@ def source_main(argv=None):
     from pangpang.product_runtime import prepare_product
     parser = _parser()
     args, rest = parser.parse_known_args(argv)
+    if args.role in {"backup", "restore"}:
+        return _run_backup_command(args.role, rest, args.data)
     if getattr(sys, "frozen", False):
         return run_frozen(args, rest, parser)
     root = source_root()
@@ -177,13 +288,15 @@ def source_main(argv=None):
                         "-r", "requirements.txt"], check=True)
         stamp.write_text(wanted)
     prepare_product(args.role, parser)
+    try:
+        data = resolve_data_dir(args.role, args.data, source_checkout=True)
+    except DataLocationError as error:
+        parser.error(str(error))
     if args.role == "cloud":
         ensure_model_runtime(root, venv, parser)
-        data = Path(args.data or "data-v2").expanduser().absolute()
         os.environ["PANGPANG_TOKEN"] = resolve_access_token(data, args.show_access_key, parser)
         module = "pangpang"
     else:
-        data = Path(args.data or "connector-data").expanduser().absolute()
         module = "pangpang.connector"
     os.execv(sys.executable, [sys.executable, "-m", module, "--data", str(data), *rest])
 

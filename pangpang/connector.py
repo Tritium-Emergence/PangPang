@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import random
+import ssl
 import threading
 import time
 import urllib.error
@@ -26,6 +27,29 @@ from .vault import secure_directory
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+
+
+def cloud_connection_fault(exc):
+    """Classify a failed coordinator connection without disabling TLS verification.
+
+    Certificate failures stay distinct from a refused connection so the operator
+    can fix trust. The advice never suggests skipping CA checks.
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) and exc.reason is not None else exc
+    text = str(reason).lower()
+    if "hostname mismatch" in text or ("hostname" in text and "certificate" in text):
+        return Fault(
+            "connector_tls_hostname_mismatch",
+            advice="证书主机名与协调器地址不一致。Connector 只接受 https:// 或本机 http://loopback。")
+    if isinstance(reason, ssl.SSLCertVerificationError) or "certificate verify failed" in text:
+        return Fault(
+            "connector_tls_untrusted",
+            advice="Python 证书校验失败。不要关闭 CA 验证，也不要改用明文。"
+                   "把私有 CA 装进这台机器上 Python 实际使用的信任库；"
+                   "macOS 上的 Python 通常不读钥匙串，需要 SSL_CERT_FILE。")
+    return Fault(
+        "cloud_connection_failed",
+        advice="无法连接协调器。确认地址是 https:// 或本机 loopback，证书受信，且服务已在运行。")
 
 
 def policy_digest(config, installation_id):
@@ -105,8 +129,8 @@ class Connector:
             if len(raw) > 12 * 1024 * 1024:
                 raise Fault("connector_response_limit")
             return json.loads(raw)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            raise Fault("cloud_connection_failed") from None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            raise cloud_connection_fault(exc) from None
 
     def reject_run(self, task, error):
         receipt = {"execution_id": task["execution_id"], "spec_digest": task["spec_digest"],
@@ -472,10 +496,13 @@ A run that has ALREADY been reported/acknowledged is IMMUTABLE — the
                 self.tick()
                 failures = 0
                 delay = 2
-            except Exception:
+            except Exception as exc:
                 failures = min(failures + 1, 5)
                 delay = min(30, 2 ** failures) + random.random()
-                print("Cloud sync unavailable; local execution and receipts retained.", flush=True)
+                if isinstance(exc, Fault) and exc.advice:
+                    print("%s: %s" % (exc.code, exc.advice), flush=True)
+                else:
+                    print("Cloud sync unavailable; local execution and receipts retained.", flush=True)
             self.stop.wait(delay)
 
 
@@ -519,6 +546,11 @@ def paired_config(args):
         try:
             with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
                 result = json.loads(response.read(16384))
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            fault = cloud_connection_fault(exc)
+            if fault.code == "cloud_connection_failed":
+                raise Fault("pairing_failed_check_code_and_cloud", advice=fault.advice) from None
+            raise fault from None
         except Exception:
             raise Fault("pairing_failed_check_code_and_cloud") from None
         vault.set("device-token", result["token"])
@@ -538,13 +570,19 @@ def main():
     parser.add_argument("--cloud")
     parser.add_argument("--workspace")
     parser.add_argument("--name")
-    parser.add_argument("--data", default="connector-data")
+    parser.add_argument("--data", default=None)
     args = parser.parse_args()
-    config = json.loads(Path(args.config).read_text(encoding="utf-8")) if args.config else paired_config(args)
+    from .cli import DataLocationError, resolve_data_dir
+    from .layout import is_source_checkout
     try:
+        args.data = str(resolve_data_dir("connector", args.data, source_checkout=is_source_checkout()))
+    except DataLocationError as error:
+        parser.error(str(error))
+    try:
+        config = json.loads(Path(args.config).read_text(encoding="utf-8")) if args.config else paired_config(args)
         merge_custom_adapters(Path(args.data) / "adapters.json")
     except Fault as error:
-        print("%s: %s" % (error.code, error.advice))
+        print("%s: %s" % (error.code, error.advice or error.code), flush=True)
         return 1
     connector = Connector(config, args.data)
     try:

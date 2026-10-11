@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Pair this machine interactively once before enabling the service.
-# Pairing persists cloud URL, device token and workspace policy in --data.
-WorkingDirectory=/REPLACE_WITH_REPO
-ExecStart=/usr/bin/python3 -m pangpang.connector --data /REPLACE_WITH_PRIVATE_DATA
+# pip install pangpang first. Pair once in a terminal before enabling this unit.
+# StateDirectory creates /var/lib/pangpang-connector.
+StateDirectory=pangpang-connector
+WorkingDirectory=/var/lib/pangpang-connector
+ExecStart=/usr/bin/env python3 -m pangpang.cli connector --data /var/lib/pangpang-connector
 Restart=on-failure
 RestartSec=5
 # Detached task supervisors survive connector restarts and keep their receipts.

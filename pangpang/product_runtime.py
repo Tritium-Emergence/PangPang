@@ -11,6 +11,7 @@ import os
 import platform
 
 from . import __version__
+from .build_info import build_identity
 from .execution import (PI_LICENSE_SHA256, PI_RELEASES, PI_VERSION, _sha256_file)
 from . import layout
 from .runtime_pins import BUN_LICENSE_SHA256, BUN_VERSION, OFFICIAL_BUN_SHA256
@@ -44,6 +45,14 @@ def _check_manifest_identity(manifest, system, machine):
         raise ValueError("runtime_platform_mismatch")
     if manifest.get("pi_version") != PI_VERSION or manifest.get("bun_version") != BUN_VERSION:
         raise ValueError("runtime_pin_version_mismatch")
+    # Older manifests have no source commit. Those still start: version equality
+    # is not treated as proof they are this tree. A manifest that does name a
+    # commit must match the baked build, or startup refuses.
+    source_commit = manifest.get("source_commit")
+    if source_commit:
+        commit, _ref, _built_at = build_identity()
+        if commit in ("", "unknown") or commit != source_commit:
+            raise ValueError("runtime_source_commit_mismatch")
 
 
 def verify_pi(anchor=None):

@@ -177,10 +177,10 @@ The supervisor runs on one machine; every other machine joins with a connector:
 | Machine | Role | Command |
 | --- | --- | --- |
 | Windows workstation | supervisor + browser UI | `python -m pangpang.cli cloud` |
-| Linux GPU server | executor device | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace /data/projects --data /private/pangpang-device` |
-| MacBook | executor device | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace ~/work --data ~/.pangpang-device` |
+| Linux GPU server | executor device | `python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace /data/projects --data /var/lib/pangpang-connector` |
+| MacBook | executor device | `python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace ~/work --data "$HOME/Library/Application Support/pangpang-connector"` |
 
-Pair each device in the Web UI before its first connect. Connectors only make outbound HTTPS connections — no SSH, no inbound ports on any machine. Plain HTTP is acceptable on a trusted LAN only; anything crossing networks needs the trusted HTTPS entry described in the runbook.
+Pair each device in the Web UI before its first connect. Connectors only make outbound connections to `https://` or to loopback `http://127.0.0.1`. A bare LAN IP is not a supported HTTPS origin. The trusted entry is the operator's own proxy, described in [docs/HTTPS.md](docs/HTTPS.md).
 
 First-time local execution requires explicit confirmation. Devices need no inbound SSH or public ports; a remote coordinator must sit behind a trusted HTTPS entry as described in the [deployment & recovery guide](docs/RUNBOOK.md) — never expose the default plaintext service to the public internet.
 
@@ -197,11 +197,14 @@ Once models, devices and executors are configured, start with requests like:
 PangPang operates real files on real machines. So we care less about demonstrating "full autonomy" than about whether the boundaries are clear:
 
 - Neither model nor executor output can grant itself permissions.
+- A new conversation Work is created with `grant_write=true`. That lets an executor write inside its workspace. It is not an operating-system grant. Read-only work has to be set explicitly.
 - Secrets are managed by the control plane; custom API endpoints require explicit confirmation.
 - An approved Routine that changes in a way affecting its authority must be re-approved.
 - An unverified device report never becomes a final execution fact directly.
-- File-path restrictions are **not an OS sandbox**. Untrusted executors under the same system account remain a risk; high-security environments need separate identities, sandboxes or VMs.
-- Cross-device or remote deployments must use trusted HTTPS and restrict execution per the runbook.
+- File-path restrictions are **not an OS sandbox**. At L0 the executor runs as the same OS account as the control plane and can read the Vault directly. That residual risk is not an isolation acceptance.
+- `web_search` sends the query off the machine by default (Bing and DuckDuckGo when no key is set; Tavily when `TAVILY_API_KEY` is set). `PANGPANG_SEARCH_PROVIDER=off` is what turns that off.
+- A sentence in chat, including a person's statement that something "finished" or that an unknown process "has stopped", is not kernel evidence and does not close an unknown attempt. Unknown closes only on a confirmed terminal receipt or a recorded operator resolution. There is no automatic business-acceptance engine.
+- Cross-device or remote deployments must use trusted HTTPS and restrict execution per the runbook. Two packages that print the same version are not the same rollback artifact; compare the baked commit and the release asset SHA256.
 
 **Release and acceptance status (0.9.0 RC):**
 

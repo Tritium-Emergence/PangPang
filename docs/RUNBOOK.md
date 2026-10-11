@@ -105,7 +105,7 @@ GA 重命名去掉了 `XIAN_` 前缀。仅以下**有升级现场证据**的变�
 
 ## 3. HTTPS 反向代理
 
-Coordinator 默认只监听 loopback。正式远程访问：
+供应商中立的一页步骤在 [HTTPS.md](HTTPS.md)。Coordinator 默认只监听 loopback。正式远程访问：
 
 ```bash
 python launch.py cloud \
@@ -627,16 +627,22 @@ curl -s \
 
 任何会改变 durable state semantics 的升级：
 
-1. 停止新流量；
-2. 核查 running / unknown / cancel_requested；
-3. WAL checkpoint；
-4. 备份完整 data directory + vault；
-5. 记录当前 commit/tag；
-6. 升级代码；
-7. 启动后先跑 reconcile/diagnostics；
-8. 再开放新工作。
+1. 固定将要换上的包的发布资产 SHA256，以及包内 `build:` 行的 commit / ref。版本号相同的两份代码不是同一可回滚产物。
+2. 记下当前 `--data` 的绝对路径和运行身份。
+3. 停止协调器和连接器。进程锁仍被占用时，下面的备份命令会拒绝。
+4. 做停机一致备份。非交互必须带 `--confirm`：
 
-**不要在新版本已经写入数据库后，直接启动旧二进制消费同一数据库。**
+```bash
+python -m pangpang.cli backup --data /absolute/data --dest /absolute/backup --confirm
+```
+
+清单同时包含 SQLite、`vault/master.key`、`vault/secrets.db`。只复制数据库文件不会生成清单，也不能拿来恢复。启动程序不会自动复制这些文件。
+
+5. 若退出码为 3，清单写明了未终结任务、unknown、SSH 主机或非 `off` 的 semantic gate。备份可以留下，升级停在这里。本命令不改这些记录，也不做语义迁移。
+6. 用 `restore` 向一个空目录做一次恢复演练，核对访问密钥和设备身份，再换代码。
+7. 启动后先跑 reconcile/diagnostics，再开放新工作。
+
+**不要在新版本已经写入数据库后，直接启动旧二进制消费同一数据库。**回滚是升级前的这份备份加上当时的旧程序，不是只看 `--version`。
 
 **启动契约升到 v3：** `supervision_floor` 进入签名契约。云端只把新任务派给已报告支持 v3 的连接器；未升级的设备收不到新任务（任务停在 starting，过期后 unknown）。先升级设备，或对这类 unknown 任务执行人工 resolve——云端能证明启动命令从未送出时直接收口为 `cancelled`，不再等设备回应。
 

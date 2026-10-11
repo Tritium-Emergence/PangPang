@@ -62,23 +62,25 @@ python -m pangpang.cli cloud
 
 ```bash
 python -m pangpang.cli connector \
-  --cloud https://192.168.1.10:8790 \
+  --cloud https://YOUR.DOMAIN \
   --workspace /data/projects \
-  --data /private/pangpang-device
+  --data /var/lib/pangpang-connector
 ```
 
 **③ MacBook（执行机 B）**
 
 ```bash
 python -m pangpang.cli connector \
-  --cloud https://192.168.1.10:8790 \
+  --cloud https://YOUR.DOMAIN \
   --workspace ~/work \
-  --data ~/.pangpang-device
+  --data ~/Library/Application\ Support/pangpang-connector
 ```
+
+`YOUR.DOMAIN` 必须是浏览器和 Connector 的 Python 都信任的 HTTPS 名称。局域网 IP 上的 `https://` 不是可复现的安装步骤：没有一张被 Python 信任的证书时，Connector 会报 `connector_tls_untrusted` 并拒绝连接。明文 `http://` 只允许本机 loopback。步骤见 [HTTPS.md](HTTPS.md)。
 
 要点：
 
-- 执行机的 `--cloud` 都指向同一台协调器。协调器默认只绑 loopback，跨机器访问必须先按 RUNBOOK 配好可信 HTTPS 反向代理；明文服务不得暴露公网。
+- 执行机的 `--cloud` 都指向同一台协调器。协调器默认只绑 loopback，跨机器访问必须先按 [HTTPS.md](HTTPS.md) 配好可信 HTTPS 反向代理；明文服务不得暴露公网。
 - 连接器只主动出站连接协调器，任何一台机器都不需要开 SSH 或入站端口。
 - 每台执行机首次允许本机执行需要显式确认（交互终端输入 `y`，或 `--allow-local-exec`）。
 - 配对完成后，任务由 PangPang 按设备能力与授权派发；撤销设备见下文「行为边界」。
@@ -109,6 +111,33 @@ python -m pangpang.cli connector \
 - 出站网络端点逐项列于 SECURITY.md「出站网络清单」；自有代码无遥测。
 - 设备配对与撤销：`POST /api/v1/devices/<id>/revoke`，revoked 设备必须重新配对（SECURITY.md「Connector 解绑」）。
 
+## 数据目录
+
+源码检出（目录旁有 `launch.py`）的默认数据目录是仓库里的 `data-v2`（连接器是 `connector-data`），与启动时的当前目录无关。
+
+正式安装（平台 wheel 或冻结包）的默认目录与当前目录无关：
+
+| 系统 | 协调器 | 连接器 |
+|---|---|---|
+| Linux | `$XDG_DATA_HOME/pangpang`，未设置时为 `~/.local/share/pangpang` | 同级的 `pangpang-connector` |
+| macOS | `~/Library/Application Support/pangpang` | 同级的 `pangpang-connector` |
+| Windows | `%LOCALAPPDATA%\pangpang` | 同级的 `pangpang-connector` |
+
+显式 `--data` 始终优先。如果当前目录里已经有带数据库、Vault 或进程锁的旧相对 `data-v2` / `connector-data`，正式安装的启动会停下来并打印两条路径：不会把旧目录搬进新位置，也不会另建一个看起来是空白新用户的目录。
+
+`python -m pangpang.cli` 是已安装环境的入口，不创建 `.venv`，也不用 `npm ci --omit=dev` 删掉开发依赖。`python launch.py` 仍是源码 / Release zip 的引导入口，会准备仓库内 `.venv`，并在没有自带 Bun worker 时用 `npm ci --omit=dev` 安装生产用 Node 依赖。
+
 ## 升级与回退
 
-升级 = 检出新的 main / 解压新 ZIP 后用同一 `--data` 目录启动；Store 迁移在启动时执行。回退 = 换回旧代码 + 旧 `--data` 备份。数据库与 Vault 的备份、保留属于 operator（SECURITY.md「数据清单」）。
+升级前先停止协调器和连接器，再做一次停机一致备份。只复制 `bots.db` 或 `connector.db` 不是回滚点：Vault 的 `master.key` 与 `secrets.db` 必须在同一份清单里。版本号相同也不表示两份代码是同一可回滚产物，回滚按构建时的 commit / tag 与发布资产的 SHA256 核对。
+
+```bash
+python -m pangpang.cli backup --data /absolute/data --dest /absolute/backup --confirm
+python -m pangpang.cli restore --backup /absolute/backup --data /absolute/restore-drill --confirm
+```
+
+非交互环境不带 `--confirm` 会直接退出，不写文件。进程锁被占用、磁盘空间不足、缺少 Vault 时也会退出，不留下一份声称成功的备份。清单里若仍有未终结任务、unknown、SSH 主机，或 semantic gate 不是 `off`，备份可以留下，但退出码为 3，升级不得继续。本命令不迁移这些记录。
+
+恢复演练应指向一份空目录或已停止的同一数据目录，并核对访问密钥与设备身份仍在。旧二进制会拒绝已升到 v2 的库；回滚是旧程序加上这份升级前的备份，不是只看 `--version`。
+
+服务示例在 `deploy/`：按 pip 安装后的 `python -m pangpang.cli` 启动，数据目录是绝对路径。示例里没有密钥。非交互首次启动另需环境变量 `PANGPANG_TOKEN`（至少 24 位）；本机执行器的非交互确认用已有的 `--allow-local-exec`。

@@ -1,11 +1,9 @@
 param(
-    [Parameter(Mandatory=$true)][string]$Repo,
     [Parameter(Mandatory=$true)][string]$Python,
     [Parameter(Mandatory=$true)][string]$Data
 )
 $ErrorActionPreference = "Stop"
-# Pair this machine interactively once before scheduling this script.
+# pip install pangpang first. Pair this machine interactively once before scheduling.
 # The connector reads its cloud URL, device token and workspace policy from $Data.
-Set-Location -LiteralPath $Repo
-& $Python -m pangpang.connector --data $Data
+& $Python -m pangpang.cli connector --data $Data
 exit $LASTEXITCODE

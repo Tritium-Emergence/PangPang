@@ -1,0 +1,20 @@
+[Unit]
+Description=PangPang coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# pip install pangpang first. StateDirectory creates /var/lib/pangpang.
+# Put PANGPANG_TOKEN in /etc/pangpang/cloud.env (mode 0600). Do not write the token here.
+StateDirectory=pangpang
+WorkingDirectory=/var/lib/pangpang
+ExecStart=/usr/bin/env python3 -m pangpang.cli cloud --data /var/lib/pangpang
+EnvironmentFile=-/etc/pangpang/cloud.env
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

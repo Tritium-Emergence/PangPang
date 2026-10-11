@@ -8,9 +8,9 @@ the pinned source root, never at the caller's working directory, and strict
 builds additionally require that root to be the repository root itself. The
 runtime never shells out to git — provenance is baked in at build time only.
 """
+import datetime
 import os
 import subprocess
-import time
 
 SOURCE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,7 +32,7 @@ def _git_required(root, *args):
                          % " ".join(args))
 
 
-def collect_provenance(require=None, root=None):
+def collect_provenance(require=None, root=None, now=None):
     if require is None:
         require = os.environ.get("PANGPANG_REQUIRE_BUILD_PROVENANCE") == "1"
     root = root or SOURCE_ROOT
@@ -51,9 +51,13 @@ def collect_provenance(require=None, root=None):
         if _git_required(root, "status", "--porcelain", "--untracked-files=all"):
             raise SystemExit("release builds require a clean tracked tree without untracked "
                              "sources; git status --porcelain -uall is not empty")
+    # UTC fields from an injectable clock. time.strftime is locale-sensitive and
+    # a live wall clock makes equality checks flake across a second boundary.
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
     return {"BUILD_COMMIT": commit,
             "BUILD_REF": ref or "unknown",
-            "BUILT_AT": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            "BUILT_AT": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
 def render(info):
