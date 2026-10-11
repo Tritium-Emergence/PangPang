@@ -119,14 +119,23 @@ class SnapshotByteTests(unittest.TestCase):
         self.assertIn(b"providers", full)
         self.assertLessEqual(len(small) * 1000, len(full), "small=%s full=%s" % (len(small), len(full)))
         print("catalog_query=%d catalog_full=%d ratio=%.2f" % (len(small), len(full), len(full) / len(small)))
-        req = urllib.request.Request(self.origin + "/api/v1/setup/model-catalog?context_window_tokens=3")
+        self._reject_context_window("/api/v1/setup/model-catalog?context_window_tokens=3")
+        self._reject_context_window("/api/v1/setup/model-catalog?context_window_tokens=")
+        self._reject_context_window("/api/v1/setup/model-catalog?context_window_tokens")
+
+    def _reject_context_window(self, path):
+        req = urllib.request.Request(self.origin + path)
         try:
             self.client.open(req)
-            self.fail("a context window below the minimum must be rejected")
         except urllib.error.HTTPError as error:
+            raw = error.read()
             self.assertEqual(error.code, 400)
-            payload = json.loads(error.read().decode())
+            self.assertLess(len(raw), 1000, "bytes=%s" % len(raw))
+            self.assertNotIn(b"providers", raw)
+            payload = json.loads(raw.decode())
             self.assertEqual(payload["code"], "invalid_context_window")
+            return
+        self.fail("a missing or unusable context window must be rejected")
 
     def test_generic_settings_post_stays_closed(self):
         req = urllib.request.Request(

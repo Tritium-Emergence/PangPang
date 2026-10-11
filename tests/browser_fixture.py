@@ -2,7 +2,7 @@
 deterministic LLM/CLI discovery. Never used by the product entrypoint.
 
 Usage: python tests/browser_fixture.py [scenario] [port]
-  scenario = onboarding (default) | studio | correction
+  scenario = onboarding (default) | studio | correction | catalog-window
   port = listen port (default 8799)
 
 `onboarding` is unchanged from the original single-fixture file so
@@ -325,9 +325,23 @@ def run_correction():
     serve(app, TOKEN, port=PORT).serve_forever()
 
 
+def run_catalog_window():
+    """One configured profile whose stored window is 32K. No seeded turns."""
+    root = Path(tempfile.mkdtemp(prefix="pangpang-catalog-window-"))
+    workspace = root / "workspace"
+    workspace.mkdir()
+    cfg = config(workspace)
+    cfg["models"][0]["context_budget"] = 32000
+    cfg["models"][0]["output_tokens"] = 8192
+    app = Service(cfg, root / "data")
+    serve(app, TOKEN, port=PORT).serve_forever()
+
+
 if SCENARIO == "studio":
     run_studio()
 elif SCENARIO == "correction":
     run_correction()
+elif SCENARIO == "catalog-window":
+    run_catalog_window()
 else:
     run_onboarding()

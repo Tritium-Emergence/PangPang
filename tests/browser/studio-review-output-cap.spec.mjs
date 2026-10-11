@@ -1,3 +1,4 @@
+import {spawn} from 'node:child_process';
 import {test, expect} from '@playwright/test';
 import {login, gotoWork} from './_studio.mjs';
 import {project} from './_parity.mjs';
@@ -150,6 +151,64 @@ test('a catalog model whose window cannot hold its max tokens offers the server 
   await expect(page.locator('#model-error')).toContainText('fixture_stop');
   expect(submitted.output_tokens).toBe(gpt.output_ceiling);
   expect(submitted.output_tokens).toBeLessThan(gpt.maxTokens);
+});
+
+test.describe('a stored 32K window', () => {
+  test.use({baseURL: 'http://127.0.0.1:8796'});
+  let child;
+  let bootLog = '';
+  test.beforeAll(async () => {
+    child = spawn('python3', ['tests/browser_fixture.py', 'catalog-window', '8796'], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const collect = (chunk) => { bootLog = (bootLog + chunk.toString()).slice(-4000); };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch('http://127.0.0.1:8796/');
+        if (res.status < 500) return;
+      } catch { /* not listening yet */ }
+      if (child.exitCode != null) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error('catalog-window fixture did not listen\n' + bootLog);
+  });
+  test.afterAll(() => { child?.kill('SIGTERM'); });
+
+  test('a 32K profile switched to a catalog model can submit the ceiling and not 32768', async ({page}) => {
+    await login(page);
+    await page.locator('[data-view="hosts"]').click();
+    const pending = page.waitForResponse((r) => r.url().includes('/api/v1/setup/model-catalog') && r.ok());
+    await page.locator('#settings').click();
+    const response = await pending;
+    expect(new URL(response.url()).searchParams.has('context_window_tokens')).toBe(false);
+    const catalog = await response.json();
+    const model = catalog.providers.anthropic['claude-haiku-4-5'];
+    expect(model.output_ceiling).toBeLessThan(32768);
+    expect(model.output_floor).toBe(model.output_ceiling);
+    const cap = page.locator('#model-output-tokens');
+    await expect(page.locator('#model-provider option[value="anthropic"]')).toHaveCount(1);
+    await page.locator('#model-provider').selectOption('anthropic');
+    await page.locator('#model-name').fill('claude-haiku-4-5');
+    await expect(cap).toHaveValue(String(model.output_floor));
+    await expect(cap).toHaveAttribute('min', String(model.output_floor));
+    await expect(cap).toHaveAttribute('max', String(model.output_ceiling));
+    let submitted;
+    await page.route('**/api/v1/setup/model', async (route) => {
+      submitted = route.request().postDataJSON();
+      await route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({code: 'fixture_stop', message: 'fixture_stop', retryable: false})});
+    });
+    await cap.fill('32768');
+    await page.locator('#model-save').click();
+    expect(submitted).toBeUndefined();
+    await cap.fill(String(model.output_ceiling));
+    await page.locator('#model-save').click();
+    await expect(page.locator('#model-error')).toContainText('fixture_stop');
+    expect(submitted.output_tokens).toBe(model.output_ceiling);
+  });
 });
 
 test('typing a context window loads only custom bounds and rejects a cap that window cannot hold', async ({page}) => {

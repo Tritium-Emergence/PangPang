@@ -281,8 +281,11 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     from .model_config import operator_catalog, parse_context_window, custom_output_bounds
                     # A context-window query only needs the custom bounds. The full
                     # catalog is the picker payload and stays on the unfiltered GET.
-                    if "context_window_tokens" in query:
-                        asked = parse_context_window((query.get("context_window_tokens") or [None])[0])
+                    # The default parser drops a blank value, so "context_window_tokens="
+                    # has to be read with blanks kept or it falls through to that catalog.
+                    window_query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                    if "context_window_tokens" in window_query:
+                        asked = parse_context_window((window_query.get("context_window_tokens") or [None])[0])
                         if asked is None:
                             raise Fault("invalid_context_window", 400)
                         self.respond({"custom": custom_output_bounds(asked)})
