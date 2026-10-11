@@ -1,4 +1,4 @@
-import {useRef, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {useTranslation} from 'react-i18next';
 import type {Store} from '../store';
 import {api} from '../api';
@@ -36,7 +36,9 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
   const {t} = useTranslation();
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [movePrevious, setMovePrevious] = useState(false);
   const {attached, setAttached, continueTarget, setContinueTarget} = store;
+  useEffect(() => { if (!continueTarget) setMovePrevious(false); }, [continueTarget]);
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileDialog, setFileDialog] = useState(false);
   const [dropping, setDropping] = useState(false);
@@ -57,7 +59,11 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
       const lastSeen = sessionStorage.getItem(lastSeenKey(botId));
       if (lastSeen) body.last_seen_event_id = lastSeen;
       if (ct) body.continue_work_id = ct.id;
-      const requestKey = await sendKeyFor(botId, {text, refs: attached.map((a) => a.id), continueWorkId: ct?.id || null}, sessionStorage, crypto.subtle, () => crypto.randomUUID());
+      if (ct && movePrevious) body.correct_to_work_id = ct.id;
+      const requestKey = await sendKeyFor(botId, {
+        text, refs: attached.map((a) => a.id), continueWorkId: ct?.id || null,
+        correctToWorkId: ct && movePrevious ? ct.id : null,
+      }, sessionStorage, crypto.subtle, () => crypto.randomUUID());
       const res = await api<any>(`bots/${botId}/messages`, body, requestKey);
       const resolved = res?.resolved_work_id || res?.work_id;
       // Server-confirmed bookkeeping (per-bot sessionStorage) may complete regardless of
@@ -72,6 +78,7 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
         const sentIds = new Set(attached.map((a) => a.id));
         setAttached((prev) => prev.filter((a) => !sentIds.has(a.id)));
         if (ct && store.continueTarget === ct) setContinueTarget(null);
+        if (ct) setMovePrevious(false);
         await store.refresh();
       }
     } catch (e: any) {
@@ -163,7 +170,11 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
       {continueTarget ? (
         <div id="continue-target" data-testid="continue-target" className="mt-2 flex items-center gap-2 rounded-lg bg-surface px-3 py-1.5 text-sm">
           <span className="continue-label">{t('composer.continueTarget', {goal: String(continueTarget.goal || '').slice(0, 80)})}</span>
-          <button type="button" className="notice-x ml-auto text-muted" onClick={() => setContinueTarget(null)}>×</button>
+          <label className="ml-auto flex items-center gap-1 text-xs">
+            <input type="checkbox" data-testid="move-previous-message" checked={movePrevious} onChange={(e) => setMovePrevious(e.target.checked)} />
+            {t('composer.movePrevious')}
+          </label>
+          <button type="button" className="notice-x text-muted" onClick={() => { setContinueTarget(null); setMovePrevious(false); }}>×</button>
         </div>
 ): null}
 

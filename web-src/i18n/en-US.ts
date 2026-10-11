@@ -169,6 +169,7 @@ export default {
     fileTooLarge: '{{name}}: each file is at most 8MB', pastedImage: 'Pasted image',
     hint: 'Just say what you need; PangPang will link existing work and projects.', uploadFile: 'Upload file', referenceDeviceFile: 'Reference device file',
     uploadingSuffix: ' (uploading…)', removeFile: 'Remove {{name}}', continueTarget: 'Your next message will continue this Work: {{goal}}',
+    movePrevious: 'Also move the previous message into this Work',
     placeholder: 'Tell PangPang what you need—a new request, an update, or a change of direction… (Enter to send; Shift+Enter for a new line)', send: 'Send',
   },
   msg: {

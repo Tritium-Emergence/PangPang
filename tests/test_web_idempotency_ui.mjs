@@ -33,6 +33,17 @@ test('same stable intent reuses the persisted per-bot key (retry of an unconfirm
   assert.equal(k2, k1, 'retry must reuse the key');
 });
 
+test('a move target is part of the stable intent (retry keeps it; dropping it mints a new key)', async () => {
+  const store = kv();
+  const moved = {text: '这条属于那件', refs: [], continueWorkId: 'work-b', correctToWorkId: 'work-b'};
+  const k1 = await sendKeyFor('bot-main', moved, store, webcrypto.subtle, uuid);
+  const k2 = await sendKeyFor('bot-main', moved, store, webcrypto.subtle, uuid);
+  assert.equal(k2, k1, 'retry of the same move must reuse the key');
+  const dropped = {text: '这条属于那件', refs: [], continueWorkId: 'work-b', correctToWorkId: null};
+  const k3 = await sendKeyFor('bot-main', dropped, store, webcrypto.subtle, uuid);
+  assert.notEqual(k3, k1, 'dropping the move is a different send');
+});
+
 test('a different intent mints a NEW key', async () => {
   const store = kv();
   const a = await sendKeyFor('bot-main', {text: 'A', refs: [], continueWorkId: null}, store, webcrypto.subtle, uuid);

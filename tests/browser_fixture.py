@@ -294,12 +294,9 @@ def run_studio():
 
 
 def run_correction():
-    """Correction-lineage browser contract. A configured
-    continuation router (semantic_gate) with a DETERMINISTIC stub: ordinary sends are
-    NEW_TOPIC, but a correction phrase ("不是"/"刚才") returns a CONTINUE_OTHER +
-    correction verdict targeting the 阿里 Work. The browser drives the whole A/B/
-    correction flow in one tab so stream adjacency is natural; NO new correction UI is
-    introduced — only the existing send path + fixture routing."""
+    """Correction-lineage browser contract. Ordinary sends are NEW_TOPIC.
+    Moving a previous message is a user action on the continue control, not a
+    classifier result."""
     root = Path(tempfile.mkdtemp(prefix="pangpang-correction-"))
     workspace = root / "workspace"; workspace.mkdir()
     endpoint = StreamingEndpoint(["好的，", "这是", "回复。"])
@@ -313,11 +310,6 @@ def run_correction():
     app = Service(cfg, root / "data")
 
     def classify(content, *args, **kwargs):
-        if "不是" in content or "刚才" in content:
-            hits = [w for w in app.store.find("work", newest=True, limit=50) if "阿里" in (w.get("goal") or "")]
-            return {"choice": "CONTINUE_OTHER", "candidate_work_id": hits[0]["id"] if hits else None,
-                    "confidence": 0.96, "probabilities": {},
-                    "correction": True, "correction_confidence": 0.96, "correction_probabilities": {}}
         return {"choice": "NEW_TOPIC", "confidence": 0.96, "probabilities": {}}
     app.semantic_gate.classify_continuation = classify
 

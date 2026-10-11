@@ -7,7 +7,7 @@
 // HTTP/browser layer (not just the Python classifier unit test). Driven entirely
 // through the normal browser send path against deterministic fixture routing.
 import {test, expect} from '@playwright/test';
-import {login, selectBot, snapshot, waitQuiet, BOT} from './_studio.mjs';
+import {login, selectBot, snapshot, waitQuiet, gotoWork, BOT} from './_studio.mjs';
 
 async function send(page, text) {
   await page.getByRole('textbox').fill(text);
@@ -39,14 +39,22 @@ test('a correction re-attributes to the target Work (append-only; raw message un
   expect(workA && workB).toBeTruthy();
   expect(workA.id).not.toBe(workB.id);
 
-  // 2) Send the correction and capture the real /messages POST response (server truth).
+  // 2) The user continues Work A and moves the previous message with it.
+  await gotoWork(page);
+  const goal = page.locator('#work-grid p.line-clamp-2', {hasText: '阿里估值怎么样'});
+  await goal.locator('xpath=..').getByRole('button', {name: '继续此 Work'}).click();
+  await expect(page.getByTestId('continue-target')).toContainText('阿里估值');
+  await page.getByTestId('move-previous-message').check();
   const [resp] = await Promise.all([
     page.waitForResponse(r => r.url().includes('/messages') && r.request().method() === 'POST'),
     send(page, '不是，我说的是刚才阿里那个'),
   ]);
   const body = await resp.json();
-  expect(body.resolved_work_id || body.work_id).toBe(workA.id); // committed to the TARGET Work
-  expect(body.routing_correction_id).toBeTruthy(); // a routing_correction fact exists
+  const landed = body.resolved_work_id || body.work_id;
+  expect(body.routing_correction_id).toBeTruthy();
+  // A delivered Work is continued by a fork. An open one is reused.
+  const row = (await snapshot(page)).work.find(w => w.id === landed);
+  expect(landed === workA.id || row?.continued_from === workA.id).toBeTruthy();
 
   // 3) Append-only: the raw mis-attributed message still belongs to Work B (not rewritten).
   const msgs = await page.evaluate(async () => (await fetch('/api/v1/bots/bot-main/messages', {credentials: 'same-origin'})).json());

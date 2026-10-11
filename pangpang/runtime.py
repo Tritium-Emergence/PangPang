@@ -930,20 +930,30 @@ class Runtime:
         # Model profiles carry no resource_keys (normalize_profile forbids them), so
         # a model call never acquires an executor lock — a busy executor can no
         # longer freeze conversations.
-        selected_tools = self.tools_for(turn) if tools is None else tools
-        # register any Node proc (incl. compaction) so a hard-timeout
-        # sweep can kill the whole turn's process tree, not just the outer worker.
-        sched = getattr(self, "scheduler", None)
-        tid, attempt = turn.get("id"), turn.get("run_attempt_id", 0)
-        on_proc = None
-        if sched and tid:
-            on_proc = lambda proc: (sched.register_proc(tid, attempt, proc)
-                                    or (lambda: sched.deregister_proc(tid, attempt, proc)))
+        # PiModel.exchange takes the shared model slot. A non-Pi model has no
+        # worker of its own, so this call takes the same slot.
         from .pi_runtime import PiModel
-        history = self.model_history(turn) if finalizing else turn["history"]
-        if isinstance(self.model, PiModel):
-            return self.model.complete(profile, history, selected_tools, on_proc=on_proc)
-        return self.model.complete(profile, history, selected_tools)
+        sched = getattr(self, "scheduler", None)
+        held = False
+        if sched is not None and not isinstance(self.model, PiModel):
+            sched.acquire_model_call()
+            held = True
+        try:
+            selected_tools = self.tools_for(turn) if tools is None else tools
+            # register any Node proc (incl. compaction) so a hard-timeout
+            # sweep can kill the whole turn's process tree, not just the outer worker.
+            tid, attempt = turn.get("id"), turn.get("run_attempt_id", 0)
+            on_proc = None
+            if sched and tid:
+                on_proc = lambda proc: (sched.register_proc(tid, attempt, proc)
+                                        or (lambda: sched.deregister_proc(tid, attempt, proc)))
+            history = self.model_history(turn) if finalizing else turn["history"]
+            if isinstance(self.model, PiModel):
+                return self.model.complete(profile, history, selected_tools, on_proc=on_proc)
+            return self.model.complete(profile, history, selected_tools)
+        finally:
+            if held:
+                sched.release_model_call()
 
     def compact(self, turn, profile):
         if turn.get("compactions", 0) >= 2:
