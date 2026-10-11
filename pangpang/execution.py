@@ -423,8 +423,6 @@ def secret_env_name(adapter):
 # (lower = preferred). SIS boundary: argv is ALWAYS system-generated from this
 # table — the model can never define what command runs.
 ADAPTER_CATALOG = {
-    "qwen-claude": {"binary": "qwen-claude", "argv": ["-p"], "concurrency": 2, "priority": 10,
-                    "use_when": "通用重活默认首选：取数据/联网检索/画图/写文档/研究报告。能联网、知识新，不确定派谁时用它。"},
     # interjection_tier 1 + stdin_protocol: online inject on a protocol this
     # runner implements. Other adapters omit both and stay on tier 3
     # (cancel + redispatch). A tier number without a registered protocol
@@ -435,7 +433,7 @@ ADAPTER_CATALOG = {
     # Same declaration shape as claude-code. argv stays the stored `exec -`
     # invocation; the runner switches that to app-server when this protocol is set.
     "codex": {"binary": "codex", "argv": ["exec", "-"], "concurrency": 1, "priority": 30,
-              "use_when": "跑代码/命令，以及用内置 image_gen 出图（画插画/海报）。取数据/研究报告仍首选 qwen-claude。",
+              "use_when": "跑代码/命令，以及用内置 image_gen 出图（画插画/海报）。",
               "interjection_tier": 1, "stdin_protocol": "codex-app-server"},
     # Tier 2, not tier 1. Gemini CLI 0.62.0 has no input-format and no
     # mid-turn stdin inject. Headless is a non-TTY stdin prompt.

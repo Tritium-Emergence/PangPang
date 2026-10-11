@@ -142,6 +142,9 @@ ROUTE_ERROR = {
     # SSH is retired as an execution transport. The business code tells the
     # planner the task did not move to local or Connector.
     "ssh_transport_retired": "ssh_executor_retired",
+    # Eligible elsewhere, but a prior execution's host or directory is not
+    # being guessed. The business code is the existing routing constraint.
+    "work_directory_held": "work_routing_constraint",
 }
 
 # An ssh host with an unknown/blank OS is rejected at route/start/config: windows()
@@ -3837,6 +3840,129 @@ class Service:
                             iid, len(by_adapter), sorted(by_adapter))
         return b
 
+    def _task_executed(self, task):
+        """True when this task actually reached a host, not merely a queue row."""
+        if not isinstance(task, dict) or task.get("error") == "queue_timeout":
+            return False
+        receipt = task.get("receipt") if isinstance(task.get("receipt"), dict) else {}
+        if receipt.get("not_launched"):
+            return False
+        status = task.get("status")
+        if status in {"starting", "running", "succeeded", "unknown", "cancel_requested"}:
+            return True
+        if status == "failed" and receipt:
+            return True
+        return status == "cancelled" and bool(task.get("supervisor") or task.get("started"))
+
+    def _route_scope(self, installation):
+        """Directory, credential and permission facts that priority must not widen."""
+        env = installation.get("env") if isinstance(installation.get("env"), dict) else {}
+        return (
+            installation.get("host_id"),
+            str(installation.get("cwd") or ""),
+            installation.get("risk") or "write",
+            installation.get("permission_verified") is True,
+            tuple(sorted((str(k), str(v)) for k, v in env.items())),
+            tuple(sorted(installation.get("resource_keys") or [])),
+            tuple(sorted(installation.get("allowed_bots") or [])),
+            str(installation.get("endpoint") or ""),
+            bool(installation.get("secret_refs")),
+        )
+
+    def _route_affinity(self, work):
+        """Host, installation and directory already used by this Work.
+
+        Facts come from Task and Artifact rows. No new table. Disagreeing hosts
+        or directories are a conflict, not a guess."""
+        work_id = work.get("id")
+        if not work_id:
+            return None
+        tasks = [t for t in self._all("task", work_id=work_id) if self._task_executed(t)]
+        artifacts = [a for a in self._all("artifact", work_id=work_id)
+                     if isinstance(a, dict) and a.get("host_id")]
+        if not tasks and not artifacts:
+            return None
+        hosts = {t.get("host_id") for t in tasks if t.get("host_id")}
+        art_hosts = {a.get("host_id") for a in artifacts}
+        if len(hosts | art_hosts) != 1:
+            return {"conflict": True}
+        host_id = next(iter(hosts | art_hosts))
+        facts = {"host_id": host_id}
+        if art_hosts:
+            facts["artifact_host"] = host_id
+        insts = {t.get("installation_id") for t in tasks if t.get("installation_id")}
+        cwds = {t.get("cwd") for t in tasks if isinstance(t.get("cwd"), str) and t.get("cwd")}
+        if len(insts) == 1 and len(cwds) == 1:
+            facts["installation_id"] = next(iter(insts))
+            facts["cwd"] = next(iter(cwds))
+        else:
+            facts["directory_unknown"] = True
+        return facts
+
+    def _same_host_scope_conflict(self, candidates):
+        grouped = {}
+        for candidate in candidates:
+            installation = self.execution.installations[candidate["installation_id"]]
+            grouped.setdefault(installation.get("host_id"), set()).add(self._route_scope(installation))
+        return any(len(scopes) > 1 for scopes in grouped.values())
+
+    def _material_auto_conflict(self, candidates):
+        """True when auto-picking would choose a different directory, credential or right."""
+        if self._same_host_scope_conflict(candidates):
+            return True
+        envs, secrets, risks = set(), set(), set()
+        for candidate in candidates:
+            installation = self.execution.installations[candidate["installation_id"]]
+            env = installation.get("env") if isinstance(installation.get("env"), dict) else {}
+            envs.add(tuple(sorted((str(k), str(v)) for k, v in env.items())))
+            secrets.add(bool(installation.get("secret_refs")))
+            risks.add(installation.get("risk") or "write")
+        if len(risks) > 1 or len(secrets) > 1:
+            return True
+        return len(envs) > 1 and any(envs)
+
+    def _affinity_decision(self, candidates, rejected, facts):
+        if facts.get("conflict"):
+            return None, {"code": "ambiguous_executor", "advice": (
+                "这项工作的历史设备或目录不一致，不能改派。请指定 installation_id。")}
+        host_id = facts.get("host_id")
+        inst_id = facts.get("installation_id")
+        cwd = facts.get("cwd")
+        by_id = {c["installation_id"]: c for c in candidates}
+        if inst_id and inst_id in by_id and cwd:
+            current = self.execution.installations[inst_id]
+            if str(current.get("cwd") or "") == cwd:
+                return by_id[inst_id], None
+        same_host = [c for c in candidates if c["host_id"] == host_id]
+        if cwd:
+            matched = [c for c in same_host
+                       if str(self.execution.installations[c["installation_id"]].get("cwd") or "") == cwd]
+            scopes = {self._route_scope(self.execution.installations[c["installation_id"]]) for c in matched}
+            if len(scopes) == 1 and matched:
+                matched.sort(key=lambda c: (
+                    self._route_priority(self.execution.installations[c["installation_id"]]),
+                    c["installation_id"]))
+                if inst_id in by_id and inst_id in {c["installation_id"] for c in matched}:
+                    return by_id[inst_id], None
+                return matched[0], None
+            if len(scopes) > 1:
+                ids = "、".join(sorted(c["installation_id"] for c in matched))
+                return None, {"code": "ambiguous_executor", "advice": (
+                    "原目录上有多个权限不同的执行器，不能按优先级挑选：%s。请指定 installation_id。" % ids)}
+        elif len(same_host) == 1:
+            return same_host[0], None
+        elif len(same_host) > 1:
+            return None, {"code": "ambiguous_executor", "advice": (
+                "原目录不明，同设备上有多个执行器，不能按优先级猜测。请指定 installation_id。")}
+        offline = any(r.get("host_id") == host_id and r.get("reason") == "connector_offline" for r in rejected)
+        if offline:
+            return None, {"code": "executor_host_offline", "advice": (
+                "这项工作此前在设备 %s 上执行，该设备当前离线。不会改派到其他机器。" % host_id)}
+        shown = (cwd or "未知")[:200]
+        return None, {"code": "work_routing_constraint", "advice": (
+            "这项工作此前在设备 %s 的目录 %s 执行。该位置现在不可用，不会改派到其他机器或目录。"
+            % (host_id, shown))}
+
     def route(self, bot_id, work, body, *, quiet=False):
         body = self._resolve_executor_intent(body)
         candidates, rejected = [], []
@@ -3902,8 +4028,35 @@ class Service:
             if reason:
                 log.debug("route reject id=%s host=%s reason=%s", e["id"], e["host_id"], reason)
             (rejected if reason else candidates).append({"installation_id": e["id"], "host_id": e["host_id"], "reason": reason})
+        explicit = bool(body.get("host_id") or body.get("installation_id")
+                        or work.get("required_host_id") or work.get("required_installation_id"))
+        facts = None if explicit or body.get("intent_ambiguity") else self._route_affinity(work)
+        if facts and facts.get("artifact_host") and not facts.get("conflict"):
+            pinned = facts["artifact_host"]
+            kept = []
+            for candidate in candidates:
+                if candidate["host_id"] == pinned:
+                    kept.append(candidate)
+                else:
+                    rejected.append(dict(candidate, reason="files_on_other_host"))
+            candidates = kept
         candidates.sort(key=lambda c: (self._route_priority(self.execution.installations[c["installation_id"]]), c["installation_id"]))
+        block = None
+        if facts:
+            choice, block = self._affinity_decision(candidates, rejected, facts)
+            if choice and not block:
+                candidates = [choice] + [c for c in candidates if c["installation_id"] != choice["installation_id"]]
+        elif not explicit and not body.get("intent_ambiguity") and len(candidates) > 1 and self._material_auto_conflict(candidates):
+            ids = "、".join(sorted(c["installation_id"] for c in candidates))
+            block = {"code": "ambiguous_executor", "advice": (
+                "这些执行器的目录、凭据或权限不同，不能按优先级挑选：%s。请指定 installation_id。" % ids)}
+        if block:
+            for candidate in candidates:
+                rejected.append(dict(candidate, reason="work_directory_held"))
+            candidates = []
         result = {"selected": candidates[0] if candidates else None, "candidates": candidates, "rejected": rejected}
+        if block:
+            result["routing_block"] = block
         if not result["selected"] and body.get("intent_ambiguity"):
             result["intent_ambiguity"] = body["intent_ambiguity"]
         if not result["selected"] and not quiet:
@@ -3921,6 +4074,9 @@ class Service:
             raise Fault("work_cancelled") # admission recheck 
         route = self.route(bot_id, work, body)
         if not route["selected"]:
+            block = route.get("routing_block")
+            if block:
+                raise Fault(block["code"], advice=block.get("advice"))
             if route.get("intent_ambiguity"):
                 amb = route["intent_ambiguity"]
                 raise Fault("ambiguous_executor", advice=(
@@ -3995,6 +4151,8 @@ class Service:
                               "(e.g. $CODEX_HOME/generated_images/...), that is a deliverable: after generating, use a shell to copy the final image "
                               "to $XPP_OUTPUT_DIR, verify the target file exists and is non-empty, then finish; do not leave the image only in the default directory, "
                               "or the user cannot see it.")
+        execution_prompt += ("\nDo not modify instruction or pitfall files (AGENTS.md, CLAUDE.md, PITFALLS.md, and files they cite) "
+                             "unless this task explicitly asks to record them.")
         # Declared outputs are file paths the executor must see. Same append as
         # the hard contract below: the list is system text, not a new grant.
         # The delivery hint above requires the bytes under $XPP_OUTPUT_DIR;
@@ -4176,20 +4334,23 @@ class Service:
 
     def prepare_installation_config(self, installation_id, body):
         """Edit an installation's scheduling-side config.
-        Only LOCAL-host installations are editable here: connector installations are
-        device-owned and their max_concurrency/cwd are overwritten by the next device
-        report (onboarding.report), so a cloud edit would silently revert. Only the
-        whitelisted safe fields are accepted; argv and adapter are immutable."""
+
+        Local installations accept the scheduling whitelist. Any other transport
+        accepts only priority and use_when; argv, env, cwd, secrets, concurrency
+        and policy stay device-owned. A device report does not clear a routing
+        value stored here. Unknown fields are rejected for every transport."""
         with self.store.lock:
             inst = copy.deepcopy(self.execution.installations.get(installation_id))
             host = copy.deepcopy(self.execution.hosts.get(inst["host_id"], {})) if inst else {}
         if not inst:
             raise Fault("installation_not_found", 404)
-        if host.get("transport") != "local":
-            raise Fault("only_local_installations_editable", 400)
         unknown = set(body) - set(self.INSTALLATION_CONFIG_FIELDS)
         if unknown:
             raise Fault("unsupported_installation_field", 400)
+        # Remote installations accept only routing metadata. Execution fields
+        # stay on the device; a mixed body is refused whole, not partially applied.
+        if host.get("transport") != "local" and not set(body) <= {"priority", "use_when"}:
+            raise Fault("only_local_installations_editable", 400)
         # Reconfiguring cwd while a run may be live is unsafe: a launching/starting run
         # is UNKNOWN, not idle — its process may already be executing against the old
         # cwd. Refuse cwd edits while any task on this

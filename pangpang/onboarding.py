@@ -448,6 +448,11 @@ class Onboarding:
                     item["enabled"] = False
                 if cmd["action"] == "credential_delete":
                     item["enabled"] = False
+                # Routing metadata is operator-owned on the cloud copy. A device
+                # report replaces execution fields and must not clear or replace it.
+                for key in ("priority", "use_when"):
+                    if key in previous:
+                        item[key] = previous[key]
                 # Prepare once. DB writes are staged; publication is deferred until the
                 # OUTERMOST transaction commits (a later report can still roll back).
                 candidate["installations"] = [i for i in candidate.get("installations", []) if i["id"] != item["id"]] + [item]

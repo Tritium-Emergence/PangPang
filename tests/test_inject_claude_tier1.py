@@ -39,7 +39,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["codex"]), 1)
         self.assertEqual(ADAPTER_CATALOG["codex"]["stdin_protocol"], "codex-app-server")
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["qwen-claude"]), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("qwen-claude")), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["claude-code"]), 1)
         self.assertEqual(ADAPTER_CATALOG["claude-code"]["stdin_protocol"], "claude-stream-json")
@@ -251,7 +251,7 @@ class InjectOwnershipTests(unittest.TestCase):
     def test_undeclared_executor_advises_tier_3(self):
         sent, _, dep, _, directory = self._running_task("codex")
         self.app.execution.installations["codex-local"]["adapter"] = "qwen-claude"
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["qwen-claude"]), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("qwen-claude")), 3)
         with self.assertRaises(Fault) as caught:
             self.app.send_bot_message("bot-main", sent["work_id"], {
                 "dep_id": dep["id"], "text": "加一句"})

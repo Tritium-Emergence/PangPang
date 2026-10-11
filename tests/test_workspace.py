@@ -138,19 +138,25 @@ class WorkspaceIdentityTests(unittest.TestCase):
         cand = self._mk_task('t-cand', segs=('b',), status='queued') # disjoint ws
         self.assertFalse(self.app._task_admissible(cand)) # capacity 1 already used
 
-    def test_qwen_needs_no_hardcoded_resource(self):
-        # a qwen-claude installation with NO resource_keys is valid
-        # (capacity via max_concurrency); the old qwen_resource_required / auto
-        # qwen-shared provisioning is gone. Actually construct Execution + assert.
+    def test_executor_needs_no_hardcoded_resource(self):
+        # Capacity is max_concurrency. No adapter requires a product resource key.
         from pangpang.execution import Execution
         import copy
         cfg = copy.deepcopy(self.app.config)
         cfg.setdefault('hosts', []).append({'id': 'h2', 'transport': 'local', 'os': 'Linux', 'allowed_roots': ['/tmp']})
-        cfg.setdefault('installations', []).append({'id': 'q', 'host_id': 'h2', 'adapter': 'qwen-claude',
-                                                    'argv': ['qwen', '-p'], 'cwd': '/tmp', 'max_concurrency': 2})
-        ex = Execution(cfg, self.root / 'exec-q') # must NOT raise (no resource required)
+        cfg.setdefault('installations', []).append({'id': 'q', 'host_id': 'h2', 'adapter': 'codex',
+                                                    'argv': ['codex', 'exec', '-'], 'cwd': '/tmp', 'max_concurrency': 2})
+        ex = Execution(cfg, self.root / 'exec-q')
         self.assertEqual(ex.installations['q']['max_concurrency'], 2)
         self.assertEqual(ex.installations['q'].get('resource_keys', []), [])
+
+    def test_task_prompt_does_not_authorize_pitfall_rewrites(self):
+        self.app.probe('codex-local')
+        m = self.app.send('bot-main', {'text': '注意以前的坑', 'allow_write': True}, 'pitfall')
+        res = self.app.submit_task('bot-main', m['work_id'], {'prompt': '注意以前的坑'})
+        prompt = self.app.store.get('task', res['task_id'])['prompt']
+        self.assertIn('PITFALLS.md', prompt)
+        self.assertIn('unless this task explicitly asks to record them', prompt)
 
     def test_unknown_task_quarantines_workspace(self):
         # Acceptance P: an unknown writer keeps its workspace quarantined — an

@@ -102,7 +102,7 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(caught.exception.code,"operator_owned_setup_field")
             with self.assertRaises(Fault) as caught:
                 self.app.onboarding.request("bot-main",work["work_id"],{"host_id":c.host_id,"action":"configure",
-                    "adapter":"qwen-claude","uses_qwen":True,"slot_acquire_args":["--exec","bad"],"slot_release_args":["release"]})
+                    "adapter":"codex","uses_qwen":True,"slot_acquire_args":["--exec","bad"],"slot_release_args":["release"]})
             self.assertEqual(caught.exception.code,"operator_owned_setup_field")
             req=self.app.onboarding.request("bot-main",work["work_id"],{"host_id":c.host_id,"action":"configure",
                 "adapter":"codex","auth":"api_key"})
@@ -110,20 +110,25 @@ class SetupTests(unittest.TestCase):
             command=self.app.store.find("command",action="configure",newest=True,limit=1)[0]
             self.assertEqual(command["payload"]["endpoint"],"https://trusted.example/v1")
             self.assertEqual(command["payload"]["endpoint_source"],"operator")
-            with patch.object(LocalSetup,"discover",return_value={"inventory":[{"adapter":"qwen-claude","binary":sys.executable}]}), \
-                 patch("pangpang.local_setup.shutil.which",return_value="/trusted/qwen-slot"):
-                with self.assertRaises(Fault) as rejected:
-                    LocalSetup(c).configure({"adapter":"qwen-claude","uses_qwen":True,"slot_acquire_args":["anything"]})
-                self.assertEqual(rejected.exception.code,"operator_owned_setup_field")
-                LocalSetup(c).configure({"adapter":"qwen-claude","uses_qwen":True})
-            # (SIS): qwen no longer auto-provisions a product-level qwen-shared
-            # lock. Capacity is the generic max_concurrency; a real external lock must
-            # come from operator/device policy as explicit resource_keys, not from the
-            # adapter name. So no qwen-shared resource is created and none is required.
-            self.assertFalse([r for r in c.config.get("resources",[]) if r["key"]=="qwen-shared"])
-            inst=c.execution.installations["qwen-claude-"+c.host_id]
-            self.assertEqual(inst.get("resource_keys",[]),[])
-            self.assertEqual(inst["max_concurrency"],2)
+            from pangpang.execution import ADAPTER_CATALOG
+            migrated = {"binary": "qwen-claude", "argv": ["-p"], "concurrency": 2, "priority": 10,
+                        "use_when": "迁移后的私人执行器。"}
+            ADAPTER_CATALOG["qwen-claude"] = dict(migrated)
+            try:
+                with patch.object(LocalSetup,"discover",return_value={"inventory":[{"adapter":"qwen-claude","binary":sys.executable}]}), \
+                     patch("pangpang.local_setup.shutil.which",return_value="/trusted/qwen-slot"):
+                    with self.assertRaises(Fault) as rejected:
+                        LocalSetup(c).configure({"adapter":"qwen-claude","uses_qwen":True,"slot_acquire_args":["anything"]})
+                    self.assertEqual(rejected.exception.code,"operator_owned_setup_field")
+                    LocalSetup(c).configure({"adapter":"qwen-claude","uses_qwen":True})
+                # Capacity is the generic max_concurrency from the adapter row. A private
+                # adapter name does not create a product resource.
+                self.assertFalse([r for r in c.config.get("resources",[]) if r["key"]=="qwen-shared"])
+                inst=c.execution.installations["qwen-claude-"+c.host_id]
+                self.assertEqual(inst.get("resource_keys",[]),[])
+                self.assertEqual(inst["max_concurrency"],2)
+            finally:
+                ADAPTER_CATALOG.pop("qwen-claude", None)
         finally:c.close()
 
     def test_model_setup_uses_real_pi_probe_and_persists_only_reference(self):
