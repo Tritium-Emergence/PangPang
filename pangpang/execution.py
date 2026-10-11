@@ -528,12 +528,15 @@ _EXTRA_ARGV_DENY = ("yolo", "dangerously", "bypass", "full-auto", "no-sandbox",
 def validate_extra_argv(adapter, extra_argv):
     """Operator-owned extra argv appended after the catalog argv. Shape is
     necessary but not sufficient: permission/sandbox-disabling tokens are
-    rejected outright (the narrow tool grant a catalog row advertises must not
-    be widened through this field), and for the codex app-server protocol every
-    exec-only flag is rejected because the protocol rewrite DROPS it — storing
-    a flag the launched process never receives would be a silent lie. For the
-    same reason bare tokens are rejected there: the rewrite repositions them
-    before the app-server subcommand, and the tokens the rewrite drops outright
+    rejected as an operator-misstep guardrail, not as an enforcement boundary —
+    a substring denylist cannot catch every permission-widening alias, and an
+    operator can already widen the grant through a custom adapter row's argv;
+    the boundary is that this field is operator-owned and the model can never
+    propose it. For the codex app-server protocol every exec-only flag is
+    rejected because the protocol rewrite DROPS it — storing a flag the
+    launched process never receives would be a silent lie. For the same reason
+    bare tokens are rejected there: the rewrite repositions them before the
+    app-server subcommand, and the tokens the rewrite drops outright
     ('-', '{prompt}' templates) are rejected too."""
     if not isinstance(extra_argv, list) or len(extra_argv) > MAX_EXTRA_ARGV_ITEMS:
         raise Fault("invalid_extra_argv", 400,
