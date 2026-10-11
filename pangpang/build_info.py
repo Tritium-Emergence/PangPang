@@ -28,3 +28,25 @@ def build_line():
     if ref != "unknown":
         return "build: %s ref=%s (built %s)\n" % (commit, ref, built_at)
     return "build: %s (built %s)\n" % (commit, built_at)
+
+
+def release_identity():
+    """Source identity baked at build time. ``unknown`` is explicit, never guessed."""
+    commit, ref, built_at = build_identity()
+    return {"version": __version__, "commit": commit, "ref": ref, "built_at": built_at}
+
+
+def same_rollback_artifact(left, right):
+    """True only when both sides name the same source commit and version.
+
+    Equal version strings are not enough: two trees can both say 0.9.0 and
+    still be different commits. A missing commit cannot prove a match.
+    """
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    left_commit, right_commit = left.get("commit"), right.get("commit")
+    if left_commit in (None, "", "unknown") or right_commit in (None, "", "unknown"):
+        return False
+    if left_commit != right_commit:
+        return False
+    return left.get("version") == right.get("version")

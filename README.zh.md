@@ -179,10 +179,10 @@ python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace C:\Work
 | 机器 | 角色 | 命令 |
 | --- | --- | --- |
 | Windows 工作站 | 主管 + 浏览器界面 | `python -m pangpang.cli cloud` |
-| Linux GPU 服务器 | 执行设备 | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace /data/projects --data /private/pangpang-device` |
-| MacBook | 执行设备 | `python -m pangpang.cli connector --cloud https://192.168.1.10:8790 --workspace ~/work --data ~/.pangpang-device` |
+| Linux GPU 服务器 | 执行设备 | `python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace /data/projects --data /var/lib/pangpang-connector` |
+| MacBook | 执行设备 | `python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace ~/work --data "$HOME/Library/Application Support/pangpang-connector"` |
 
-每台设备首次连接前，先在 Web 里完成配对。连接器只主动出站连接协调器——任何机器都不需要开 SSH 或入站端口。明文 HTTP 只可用于可信局域网；跨网段访问必须按运行手册配置可信 HTTPS 入口。
+每台设备首次连接前，先在 Web 里完成配对。连接器只主动连接 `https://` 或本机 loopback 的 `http://127.0.0.1`。局域网 IP 不是受支持的 HTTPS 入口。可信入口由操作者自己的代理提供，见 [docs/HTTPS.md](docs/HTTPS.md)。
 
 首次允许本机执行需要显式确认。设备不需要开放入站 SSH 或公网端口；远程协调器必须按[部署与恢复指南](docs/RUNBOOK.md)配置可信的 HTTPS 入口，不应把默认明文服务直接暴露在公网。
 
@@ -199,11 +199,14 @@ python -m pangpang.cli connector --cloud https://YOUR.DOMAIN --workspace C:\Work
 PangPang 能操作真实文件和真实机器。因此，比起展示“完全自主”，我们更在意边界是否清楚：
 
 - 模型和执行器的输出均不能自行授予权限。
+- 新的对话 Work 默认 `grant_write=true`。这允许执行器在自己的 workspace 里写文件，不是操作系统授权。只读必须显式关闭。
 - 密钥由控制面管理；自定义 API 端点需要明确确认。
 - 已批准的 Routine 一旦发生影响授权的修改，需要重新批准。
 - 未经核实的设备报告不能直接变成最终执行事实。
-- 文件路径限制**不是操作系统沙箱**。同一系统账户下的不可信执行器仍存在安全风险；高安全环境需要额外的隔离身份、沙箱或虚拟机。
-- 跨设备或远程部署应采用可信 HTTPS，并按运行手册限制执行权限。
+- 文件路径限制**不是操作系统沙箱**。L0 下执行器与控制面是同一个 OS 账号，应用层路径限制挡不住这个账号直接读取 Vault。这项残余风险不是隔离验收。
+- `web_search` 默认会把查询词发到机器之外（无 key 时是 Bing 与 DuckDuckGo，设置了 `TAVILY_API_KEY` 时优先 Tavily）。`PANGPANG_SEARCH_PROVIDER=off` 才会关闭。
+- 聊天里的一句话，包括人说“已经完成”或“unknown 的进程已经停了”，不是内核证据，也不能把 unknown 收成成功。unknown 只在有确认的终态回执或已记录的 operator resolve 之后收口。没有自动业务验收引擎。
+- 跨设备或远程部署应采用可信 HTTPS，并按运行手册限制执行权限。两份打印同一版本号的包不是同一可回滚产物；对照构建时写入的 commit 和发布资产的 SHA256。
 
 **发行与验收状态（0.9.0 RC）：**
 

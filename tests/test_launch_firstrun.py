@@ -84,7 +84,8 @@ class FrozenEntryTests(unittest.TestCase):
         tok.assert_called_once()
         role_main.assert_called_once()
         self.assertEqual(os.environ["PANGPANG_TOKEN"], "t" * 30)
-        self.assertEqual(sys.argv, ["pangpang", "--data", str(Path("data-v2").expanduser().absolute()), "--port", "8790"])
+        from pangpang.cli import source_root
+        self.assertEqual(sys.argv, ["pangpang", "--data", str((source_root() / "data-v2").absolute()), "--port", "8790"])
 
     def test_frozen_cloud_fails_closed_on_corrupt_release_bundle_never_node(self):
         # A missing/corrupt release bun must fail startup, not defer to first exchange and

@@ -1,0 +1,24 @@
+[Unit]
+Description=PangPang coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# System unit. Create a dedicated user and group named pangpang before enabling.
+# User= and Group= must stay. Without them the process runs as root.
+# pip install pangpang first. StateDirectory creates /var/lib/pangpang for that user.
+# Put PANGPANG_TOKEN in /etc/pangpang/cloud.env (mode 0600). Do not write the token here.
+User=pangpang
+Group=pangpang
+StateDirectory=pangpang
+WorkingDirectory=/var/lib/pangpang
+ExecStart=/usr/bin/env python3 -m pangpang.cli cloud --data /var/lib/pangpang
+EnvironmentFile=-/etc/pangpang/cloud.env
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
