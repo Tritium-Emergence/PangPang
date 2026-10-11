@@ -106,6 +106,28 @@ class SnapshotByteTests(unittest.TestCase):
         body = json.loads(plain)
         self.assertGreaterEqual(len(body["work"]), 1000)
 
+    def test_context_window_query_returns_only_custom_bounds(self):
+        status, _, full = self._get("/api/v1/setup/model-catalog")
+        self.assertEqual(status, 200)
+        status, _, small = self._get("/api/v1/setup/model-catalog?context_window_tokens=32000")
+        self.assertEqual(status, 200)
+        body = json.loads(small)
+        self.assertEqual(set(body), {"custom"})
+        self.assertEqual(body["custom"]["output_ceiling"], 30976)
+        self.assertEqual(body["custom"]["output_floor"], 4096)
+        self.assertEqual(body["custom"]["fitted_output"], 8192)
+        self.assertIn(b"providers", full)
+        self.assertLessEqual(len(small) * 1000, len(full), "small=%s full=%s" % (len(small), len(full)))
+        print("catalog_query=%d catalog_full=%d ratio=%.2f" % (len(small), len(full), len(full) / len(small)))
+        req = urllib.request.Request(self.origin + "/api/v1/setup/model-catalog?context_window_tokens=3")
+        try:
+            self.client.open(req)
+            self.fail("a context window below the minimum must be rejected")
+        except urllib.error.HTTPError as error:
+            self.assertEqual(error.code, 400)
+            payload = json.loads(error.read().decode())
+            self.assertEqual(payload["code"], "invalid_context_window")
+
     def test_generic_settings_post_stays_closed(self):
         req = urllib.request.Request(
             self.origin + "/api/v1/settings", data=json.dumps({"model_max_concurrency": 1}).encode(),

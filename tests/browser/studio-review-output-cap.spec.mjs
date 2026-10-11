@@ -1,4 +1,3 @@
-// / review findings, against the committed shell with snapshot fixtures.
 import {test, expect} from '@playwright/test';
 import {login, gotoWork} from './_studio.mjs';
 import {project} from './_parity.mjs';
@@ -9,7 +8,7 @@ let errors;
 test.beforeEach(async ({page}) => { errors = []; page.on('pageerror', (e) => errors.push(e.message)); });
 test.afterEach(async ({page}) => { await page.unrouteAll({behavior: 'wait'}); expect(errors).toEqual([]); });
 
-test('-1 capability rows and a new Work phase render in Chinese; codes stay inspectable', async ({page}) => {
+test('capability rows and a new Work phase render in Chinese; codes stay inspectable', async ({page}) => {
   await project(page, (s) => {
     s.setup.capabilities = [
       {capability: 'model', state: 'ready', reason: null, operator_action_code: null, operator_action: null},
@@ -42,7 +41,7 @@ test('-1 capability rows and a new Work phase render in Chinese; codes stay insp
   await expect(facts).not.toContainText('new');
 });
 
-test('-2 a Work-scoped progress bubble names its Work; the Bot-wide thinking bubble does not', async ({page}) => {
+test('a Work-scoped progress bubble names its Work; the Bot-wide thinking bubble does not', async ({page}) => {
   let thinking = false;
   await project(page, (s) => {
     s.work = [work('herbs', {goal: '香草三步指南'}), work('lan', {goal: '局域网备份', status: 'delivered', attention: 'settled'})];
@@ -62,7 +61,7 @@ test('-2 a Work-scoped progress bubble names its Work; the Bot-wide thinking bub
   await expect(bubble.locator('.source')).toHaveText('胖胖');
 });
 
-test(' a blocked current Work shows the recorded reason, and only a recorded one', async ({page}) => {
+test('a blocked current Work shows the recorded reason, and only a recorded one', async ({page}) => {
   let inSnapshot = true;
   await project(page, (s) => {
     s.work = [work('herbs', {goal: '香草三步指南', attention: 'blocked'})];
@@ -80,7 +79,7 @@ test(' a blocked current Work shows the recorded reason, and only a recorded one
   await expect(inspector.getByTestId('blocked-reason')).toHaveCount(0);
 });
 
-test(' the settings dialog shows and sets the output cap, never below the floor', async ({page}) => {
+test('the settings dialog shows and sets the output cap, never below the floor', async ({page}) => {
   await login(page);
   await page.locator('[data-view="hosts"]').click();
   await page.locator('#settings').click();
@@ -153,24 +152,20 @@ test('a catalog model whose window cannot hold its max tokens offers the server 
   expect(submitted.output_tokens).toBeLessThan(gpt.maxTokens);
 });
 
-test('a 32K profile switched to a catalog model can submit the ceiling and not 32768', async ({page}) => {
-  await project(page, (s) => { s.setup.model.context_window_tokens = 32000; });
+test('typing a context window loads only custom bounds and rejects a cap that window cannot hold', async ({page}) => {
   await login(page);
   await page.locator('[data-view="hosts"]').click();
   await page.locator('#settings').click();
   const cap = page.locator('#model-output-tokens');
-  const picked = await page.evaluate(async () => {
-    const c = await (await fetch('/api/v1/setup/model-catalog?context_window_tokens=32000', {credentials: 'same-origin'})).json();
-    const [id, m] = Object.entries(c.providers.anthropic)[0];
-    return {id, floor: m.output_floor, ceiling: m.output_ceiling};
-  });
-  expect(picked.ceiling).toBeLessThan(32768);
-  expect(picked.floor).toBe(picked.ceiling);
-  await page.locator('#model-provider').selectOption('anthropic');
-  await page.locator('#model-name').fill(picked.id);
-  await expect(cap).toHaveValue(String(picked.floor));
-  await expect(cap).toHaveAttribute('min', String(picked.floor));
-  await expect(cap).toHaveAttribute('max', String(picked.ceiling));
+  const field = page.locator('#model-context-window');
+  await expect(field).toBeVisible();
+  const pending = page.waitForResponse((r) => r.url().includes('context_window_tokens=32000') && r.ok());
+  await field.fill('32000');
+  const body = await (await pending).json();
+  expect(body.providers).toBeUndefined();
+  expect(Object.keys(body)).toEqual(['custom']);
+  expect(body.custom.output_ceiling).toBeLessThan(32768);
+  await expect(cap).toHaveAttribute('max', String(body.custom.output_ceiling));
   let submitted;
   await page.route('**/api/v1/setup/model', async (route) => {
     submitted = route.request().postDataJSON();
@@ -179,8 +174,9 @@ test('a 32K profile switched to a catalog model can submit the ceiling and not 3
   await cap.fill('32768');
   await page.locator('#model-save').click();
   expect(submitted).toBeUndefined();
-  await cap.fill(String(picked.ceiling));
+  await cap.fill(String(body.custom.output_ceiling));
   await page.locator('#model-save').click();
   await expect(page.locator('#model-error')).toContainText('fixture_stop');
-  expect(submitted.output_tokens).toBe(picked.ceiling);
+  expect(submitted.output_tokens).toBe(body.custom.output_ceiling);
+  expect(submitted.context_window_tokens).toBe(32000);
 });

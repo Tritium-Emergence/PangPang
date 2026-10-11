@@ -278,12 +278,18 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                                   "probes": service.store.find("probe")})
                     return
                 if path == "/api/v1/setup/model-catalog":
-                    from .model_config import operator_catalog, parse_context_window
-                    asked = parse_context_window((query.get("context_window_tokens") or [None])[0])
-                    if asked is None:
-                        live = next(iter(service.profiles.values()), {}).get("context_window_tokens")
-                        asked = live if type(live) is int else None
-                    self.respond(operator_catalog(asked)); return
+                    from .model_config import operator_catalog, parse_context_window, custom_output_bounds
+                    # A context-window query only needs the custom bounds. The full
+                    # catalog is the picker payload and stays on the unfiltered GET.
+                    if "context_window_tokens" in query:
+                        asked = parse_context_window((query.get("context_window_tokens") or [None])[0])
+                        if asked is None:
+                            raise Fault("invalid_context_window", 400)
+                        self.respond({"custom": custom_output_bounds(asked)})
+                        return
+                    live = next(iter(service.profiles.values()), {}).get("context_window_tokens")
+                    self.respond(operator_catalog(live if type(live) is int else None))
+                    return
                 if path == "/api/v1/settings":
                     self.respond(public_config(service.config)); return
                 if parts == ["hosts"]:

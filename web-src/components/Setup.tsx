@@ -33,15 +33,13 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
   const [customBounds, setCustomBounds] = useState<CustomBounds | null>(null);
   useEffect(() => {
     let active = true;
-    const stored = model.context_window_tokens;
-    const q = stored ? `?context_window_tokens=${stored}` : '';
-    api<{providers: typeof catalog; custom: CustomBounds}>('setup/model-catalog' + q).then(v => {
+    api<{providers: typeof catalog; custom: CustomBounds}>('setup/model-catalog').then(v => {
       if (!active) return;
       setCatalog(v.providers);
       setCustomBounds(v.custom);
     }).catch(() => {if (active) setError(t('setup.modelCatalogLoadFailed'));});
     return () => {active = false;};
-  }, [model.context_window_tokens]);
+  }, []);
   useEffect(() => {
     if (provider !== 'custom' || !contextWindow) return;
     const typed = Number(contextWindow);

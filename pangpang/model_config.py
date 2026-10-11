@@ -69,6 +69,16 @@ def parse_context_window(raw):
     return None
 
 
+def custom_output_bounds(stored_window=None):
+    """Output bounds for an unknown model at one context window."""
+    window = stored_window if type(stored_window) is int and stored_window > 0 else None
+    custom = {"provider": "custom", "model": "custom"}
+    if window is not None:
+        custom["context_window_tokens"] = window
+    return {"output_floor": output_floor(custom), "output_ceiling": output_ceiling(custom),
+            "fitted_output": fitted_output(custom)}
+
+
 def operator_catalog(stored_window=None):
     """Catalog plus the output bounds a save will enforce.
 
@@ -89,12 +99,8 @@ def operator_catalog(stored_window=None):
             entry["output_ceiling"] = output_ceiling(prof)
             copied[name] = entry
         providers[provider] = copied
-    custom = {"provider": "custom", "model": "custom"}
-    if window is not None:
-        custom["context_window_tokens"] = window
     return {"pi_version": raw.get("pi_version"), "providers": providers,
-            "custom": {"output_floor": output_floor(custom), "output_ceiling": output_ceiling(custom),
-                       "fitted_output": fitted_output(custom)}}
+            "custom": custom_output_bounds(window)}
 
 
 def fitted_output(profile):
