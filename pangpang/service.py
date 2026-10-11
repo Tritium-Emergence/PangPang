@@ -716,8 +716,9 @@ class Service:
         running; attempt process gone without receipt -> unknown (the only
         legitimate case). A later trusted receipt still updates the task's
         terminal truth and appends a late-result (complete_task).
-        ssh: there is no runner channel. A poll fault is recorded and the
-        stored status is left unchanged — not completed and not rerun.
+        ssh: there is no runner channel. ssh_transport_retired quarantines the
+        attempt as unknown. It is not completed and not rerun; an operator
+        receipt is still required to settle it.
         connector: preserve execution and join until the next authenticated sync;
         a coordinator restart provides no evidence of the device's outcome."""
         task = self.store.get("task", task_id)
@@ -751,6 +752,8 @@ class Service:
         try:
             receipt = self.execution.poll(task, tail=True)
         except Fault as error:
+            if self._ssh_channel_gone(task, error):
+                return
             self._record_observation(task, "poll", error.code)
             return
         self._apply_observation(task, receipt)
@@ -5426,6 +5429,18 @@ class Service:
         self._mark_task_unknown(task, "start_denied_indeterminate")
         return True
 
+    def _ssh_channel_gone(self, task, error):
+        """Quarantine an attempt whose SSH runner channel no longer exists.
+
+        A transport blip stays on the observation backoff. This code means the
+        channel itself was removed, so another poll cannot succeed. Unknown
+        keeps the join and the workspace; it is not success and not a rerun.
+        """
+        if getattr(error, "code", None) != "ssh_transport_retired":
+            return False
+        self._mark_task_unknown(task, "ssh_transport_retired")
+        return True
+
     def _mark_task_unknown(self, task, reason):
         """Quarantine a task as unknown (observation uncertainty, not a business
         outcome). The model-visible `error` is ALWAYS the stable business
@@ -5560,12 +5575,18 @@ class Service:
                         self.store.put("task", current)
                 return True
             except Fault as error:
+                if self._ssh_channel_gone(task, error):
+                    return True
                 return self._record_observation(task, "cancel", error.code)
         try:
             receipt = self.execution.poll(task)
         except Fault as error:
             # red line: an observation failure never becomes a business
             # state change. (This is the path that used to be connection_lost.)
+            # ssh_transport_retired is not a blip: the channel is gone, so the
+            # attempt is quarantined instead of retried forever.
+            if self._ssh_channel_gone(task, error):
+                return True
             return self._record_observation(task, "poll", error.code)
         changed = self._apply_observation(task, receipt)
         if host.get("transport") == "local":

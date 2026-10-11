@@ -1267,9 +1267,21 @@ class SshRetireGateTests(unittest.TestCase):
         self.assertEqual(probed.exception.code, "ssh_transport_retired")
         self.assertEqual(cancelled.exception.code, "ssh_transport_retired")
         got = self.app.store.get("task", task["id"])
-        self.assertEqual(got["status"], "running")
-        self.assertEqual(got.get("last_observation_error"), "ssh_transport_retired")
+        self.assertEqual(got["status"], "unknown")
+        self.assertEqual(got["error"], "execution_state_unknown")
+        self.assertEqual(got["unknown_reason"], "ssh_transport_retired")
+        self.assertEqual(got["host_id"], "ssh-h")
         self.assertNotIn("receipt", got)
+        self.assertEqual(self.app.store.get("dependency", got["dependency_id"])["status"], "pending")
+        with self.assertRaises(Fault):
+            self.app.resolve_task(got["id"], {"resolution": "confirmed_stopped", "evidence": "too-short"})
+        self.app.resolve_task(got["id"], {
+            "resolution": "confirmed_stopped",
+            "evidence": "operator saw the remote process stop"})
+        closed = self.app.store.get("task", task["id"])
+        self.assertEqual(closed["status"], "cancelled")
+        self.assertEqual(closed["receipt"]["operator_resolution"], "confirmed_stopped")
+        self.assertEqual(closed["host_id"], "ssh-h")
         self.assertEqual(self.app.execution.hosts["ssh-h"]["transport"], "ssh")
         self.assertEqual(len(self.app.store.find("task")), 1)
         self.assertEqual(task_interjection_tier(
