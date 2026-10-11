@@ -27,7 +27,7 @@
       "model": "REPLACE_WITH_YOUR_MODEL_ID",
       "credential_env": "PANGPANG_LLM_KEY",
       "context_budget": 32000,
-      "output_tokens": 32768,
+      "output_tokens": 8192,
       "timeout_s": 120,
       "generation_settings": {},
       "resource_keys": []

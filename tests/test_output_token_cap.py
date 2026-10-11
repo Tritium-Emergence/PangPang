@@ -1,8 +1,8 @@
 """: a Work stalled because the planner ran with output_tokens=1200.
 
-The 1200 came from config/runtime.example.json and survived setup/model. The output
-cap now defaults to and may not go below 32768 (or a catalog model's lower maximum):
-a stored smaller cap is raised on load, and the settings form shows and sets it.
+The 1200 came from config/runtime.example.json and survived setup/model. Caps below
+MIN_OUTPUT_TOKENS are still rejected or raised. 32768 stays the default only when
+the context window can hold it. A 32K window keeps a cap that leaves prompt room.
 """
 import json
 import tempfile
@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pangpang.model_config import DEFAULT_OUTPUT_TOKENS, catalog, output_floor, setup_profile
+from pangpang.model_config import (
+    DEFAULT_OUTPUT_TOKENS, MIN_OUTPUT_TOKENS, WINDOW_FIT_OUTPUT_TOKENS, catalog, output_floor, setup_profile)
 from pangpang.onboarding import empty_config
 from pangpang.service import Service, normalize_profile
 from pangpang.store import Fault
@@ -22,8 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 class OutputCapTests(unittest.TestCase):
     def test_example_config_uses_the_first_run_output_cap(self):
         example = json.loads((ROOT / "config" / "runtime.example.json").read_text(encoding="utf-8"))
-        self.assertEqual(example["models"][0]["output_tokens"], DEFAULT_OUTPUT_TOKENS)
+        model = example["models"][0]
+        self.assertEqual(model["context_budget"], 32000)
+        self.assertEqual(model["output_tokens"], WINDOW_FIT_OUTPUT_TOKENS)
+        self.assertLess(model["output_tokens"] + 1024, model["context_budget"])
         self.assertEqual(empty_config()["models"][0]["output_tokens"], DEFAULT_OUTPUT_TOKENS)
+        self.assertGreater(empty_config()["models"][0]["context_window_tokens"], DEFAULT_OUTPUT_TOKENS)
 
     def test_setup_model_onto_a_new_model_drops_the_old_cap(self):
         # The tester's path: an example-derived profile (placeholders, cap 1200), then
@@ -62,7 +67,8 @@ class OutputCapTests(unittest.TestCase):
         old = {"endpoint": "https://local.example/v1", "model": "qwen", "output_tokens": DEFAULT_OUTPUT_TOKENS}
         body = {"endpoint": old["endpoint"], "model": "qwen"}
         self.assertEqual(setup_profile(old, dict(body, output_tokens=65536))["output_tokens"], 65536)
-        for bad in (1200, DEFAULT_OUTPUT_TOKENS - 1, 2 ** 21, "65536", True, 65536.0):
+        self.assertEqual(setup_profile(old, dict(body, output_tokens=8192))["output_tokens"], 8192)
+        for bad in (1200, MIN_OUTPUT_TOKENS - 1, 2 ** 21, "65536", True, 65536.0):
             with self.assertRaises(Fault) as caught:
                 setup_profile(old, dict(body, output_tokens=bad))
             self.assertEqual(caught.exception.code, "invalid_output_tokens")
@@ -78,11 +84,20 @@ class OutputCapTests(unittest.TestCase):
         self.assertEqual(p["output_tokens"], known["maxTokens"])
 
     def test_loading_raises_a_stored_cap_below_the_floor(self):
+        wide = {"context_window_tokens": 128000}
         for stored, expected in ((1200, DEFAULT_OUTPUT_TOKENS), ("absent", DEFAULT_OUTPUT_TOKENS), (None, DEFAULT_OUTPUT_TOKENS), (65536, 65536)):
+            profile = {"id": "default", "model": "qwen", "endpoint": "https://local.example/v1", **wide}
+            if stored != "absent":
+                profile["output_tokens"] = stored
+            self.assertEqual(normalize_profile(profile)["output_tokens"], expected)
+        # No explicit window falls back to the legacy 32K budget. 32768 does not fit.
+        for stored, expected in ((1200, WINDOW_FIT_OUTPUT_TOKENS), ("absent", WINDOW_FIT_OUTPUT_TOKENS),
+                                 (32768, WINDOW_FIT_OUTPUT_TOKENS), (8192, 8192)):
             profile = {"id": "default", "model": "qwen", "endpoint": "https://local.example/v1"}
             if stored != "absent":
                 profile["output_tokens"] = stored
             self.assertEqual(normalize_profile(profile)["output_tokens"], expected)
+            self.assertEqual(normalize_profile(dict(profile))["context_window_tokens"], 32000)
         provider, key, known = self.low_max_model()
         profile = {"id": "default", "provider": provider, "model": key, "api": known["api"], "output_tokens": 1200}
         self.assertEqual(normalize_profile(profile)["output_tokens"], known["maxTokens"])

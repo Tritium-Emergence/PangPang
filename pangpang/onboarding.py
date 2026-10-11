@@ -14,6 +14,25 @@ from .store import Fault, digest, uid, encode
 from .execution import ADAPTER_CATALOG, installation_id, validate_extra_argv, validate_profile_env
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
 
+
+def apply_model_concurrency(candidate, value):
+    """Persist the operator's model slot count on the existing scheduler dict.
+
+    Concurrency 1 is the local-model setting; reserved_user_slots must then be 0
+    or the next start rejects the config. A value above 1 keeps a reserved slot
+    that is already legal and otherwise uses 1. No other scheduler key is written.
+    """
+    if type(value) is not int or not 1 <= value <= 16:
+        raise Fault("invalid_max_concurrency", 400)
+    sched = dict(candidate.get("scheduler") or {})
+    sched["model_max_concurrency"] = value
+    reserved = sched.get("reserved_user_slots", 0 if value == 1 else 1)
+    if type(reserved) is not int or (value == 1) or not 0 <= reserved < value:
+        reserved = 0 if value == 1 else 1
+    sched["reserved_user_slots"] = reserved
+    candidate["scheduler"] = sched
+    return candidate
+
 # A 16x16 red PNG: proves a "supports images" model endpoint accepts image input.
 PROBE_PNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGO4o6FBEmIY1TCqYfhqAAAyBCwQhvh37QAAAABJRU5ErkJggg=="
 
@@ -49,11 +68,17 @@ class Onboarding:
 
     def status(self, bot_id=None):
         p = next(iter(self.s.profiles.values()))
+        stored_c = int((self.s.config.get("scheduler") or {}).get(
+            "model_max_concurrency", self.s.scheduler_config["model_max_concurrency"]))
+        live_c = int(self.s.scheduler_config["model_max_concurrency"])
         return {"model": {"endpoint": p.get("endpoint", ""), "model": p.get("model", ""), "vision": p.get("vision") is True,
                 "output_tokens": p.get("output_tokens"),
+                "context_window_tokens": p.get("context_window_tokens"),
                 **{k: p[k] for k in FIELDS if k in p},
                 "has_legacy_generation_settings": bool(p.get("generation_settings")),
                 "configured": bool(p.get("endpoint")), "has_secret": bool(p.get("credential_ref") and self.vault.has(p["credential_ref"]))},
+                "model_max_concurrency": stored_c,
+                "model_concurrency_restart_required": stored_c != live_c,
                 "capabilities": self.s.effective_capabilities(bot_id),
                 "requests": self.store.find("setup_request", newest=True, limit=30),
                 "inventory": self.store.find("inventory", limit=100)}
@@ -64,6 +89,8 @@ class Onboarding:
         # token. Any managed-config change during the probes below is a conflict
         # for the operator to retry, never silently overwritten (O5).
         candidate, base = self.s.managed_snapshot()
+        if body.get("model_max_concurrency") is not None:
+            apply_model_concurrency(candidate, body.get("model_max_concurrency"))
         old = candidate["models"][0]
         old_ref = old.get("credential_ref")
         if body.get("secret") and body.get("no_auth"):
