@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from pangpang import build_info
+from pangpang import __version__, build_info
 from pangpang.build_info import build_identity, build_line, version_string
 
 _spec = importlib.util.spec_from_file_location(
@@ -28,7 +28,7 @@ def test_build_identity_reads_generated_module(monkeypatch):
     assert ref == "v0.9.0-8-g" + "a" * 7
     assert built_at == "2026-10-10T00:00:00Z"
     assert version_string().startswith(
-        "0.9.0 (build aaaaaaa @ v0.9.0-8-g" + "a" * 7 + ", built 2026-10-10T00:00:00Z)")
+        __version__ + " (build aaaaaaa @ v0.9.0-8-g" + "a" * 7 + ", built 2026-10-10T00:00:00Z)")
     assert build_line() == "build: %s ref=v0.9.0-8-g%s (built 2026-10-10T00:00:00Z)\n" % (
         "a" * 40, "a" * 7)
 
@@ -40,13 +40,13 @@ def test_build_identity_tolerates_pre_ref_artifact(monkeypatch):
     module.__spec__ = None
     monkeypatch.setitem(sys.modules, "pangpang._build", module)
     assert build_identity() == ("d" * 40, "unknown", "T")
-    assert version_string().startswith("0.9.0 (build ddddddd, built T)")
+    assert version_string().startswith(__version__ + " (build ddddddd, built T)")
 
 
 def test_build_identity_unknown_without_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "pangpang._build", None)
     assert build_identity() == ("unknown", "unknown", "unknown")
-    assert version_string() == "0.9.0 (build unknown)"
+    assert version_string() == __version__ + " (build unknown)"
     assert build_line() == "build: unknown (built unknown)\n"
 
 
@@ -56,9 +56,8 @@ def test_version_string_keeps_release_version_pure(monkeypatch):
     module.BUILD_REF = "v0.9.0"
     module.BUILT_AT = "T"
     monkeypatch.setitem(sys.modules, "pangpang._build", module)
-    from pangpang import __version__
     assert version_string().startswith(__version__ + " (")
-    assert __version__ == "0.9.0"
+    assert __version__ == "0.9.1.dev0"
 
 
 def test_collect_provenance_fail_closed_when_required(monkeypatch):
@@ -177,18 +176,18 @@ def test_cli_version_flag_exits_zero(capsys):
         cli._parser().parse_args(["--version"])
     assert raised.value.code == 0
     out = capsys.readouterr().out
-    assert "0.9.0" in out and "build" in out
+    assert __version__ in out and "build" in out
 
 
 def test_cli_console_script_version_subprocess():
     result = subprocess.run([sys.executable, "-m", "pangpang.cli", "--version"],
                             capture_output=True, text=True)
     assert result.returncode == 0
-    assert "0.9.0" in result.stdout
+    assert __version__ in result.stdout
 
 
 def test_module_entry_version_subprocess():
     result = subprocess.run([sys.executable, "-m", "pangpang", "--version"],
                             capture_output=True, text=True)
     assert result.returncode == 0
-    assert "0.9.0" in result.stdout
+    assert __version__ in result.stdout
