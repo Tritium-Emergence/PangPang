@@ -25,14 +25,39 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
   const [keepLegacy, setKeepLegacy] = useState(true);
   const [tokenField, setTokenField] = useState(model.max_tokens_field || 'auto');
   const [outputTokens, setOutputTokens] = useState(String(model.output_tokens || DEFAULT_OUTPUT_TOKENS));
-  type CatalogModel = {api: string; baseUrl: string; name: string; reasoning: boolean; maxTokens: number; thinkingLevelMap?: Record<string, string | null>};
+  const [contextWindow, setContextWindow] = useState(model.context_window_tokens ? String(model.context_window_tokens) : '');
+  const [concurrency, setConcurrency] = useState(String(store.snapshot!.setup.model_max_concurrency || 4));
+  type CatalogModel = {api: string; baseUrl: string; name: string; reasoning: boolean; maxTokens: number; contextWindow: number; output_floor: number; output_ceiling: number; thinkingLevelMap?: Record<string, string | null>};
+  type CustomBounds = {output_floor: number; output_ceiling: number; fitted_output: number};
   const [catalog, setCatalog] = useState<Record<string, Record<string, CatalogModel>>>({});
+  const [customBounds, setCustomBounds] = useState<CustomBounds | null>(null);
   useEffect(() => {
     let active = true;
-    api<{providers: typeof catalog}>('setup/model-catalog').then(v => {if (active) setCatalog(v.providers);})
-.catch(() => {if (active) setError(t('setup.modelCatalogLoadFailed'));});
+    api<{providers: typeof catalog; custom: CustomBounds}>('setup/model-catalog').then(v => {
+      if (!active) return;
+      setCatalog(v.providers);
+      setCustomBounds(v.custom);
+    }).catch(() => {if (active) setError(t('setup.modelCatalogLoadFailed'));});
     return () => {active = false;};
   }, []);
+  useEffect(() => {
+    if (provider !== 'custom' || !contextWindow) return;
+    const typed = Number(contextWindow);
+    if (!Number.isInteger(typed) || typed === model.context_window_tokens) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      api<{custom: CustomBounds}>(`setup/model-catalog?context_window_tokens=${typed}`).then(v => {
+        if (!active) return;
+        setCustomBounds(v.custom);
+        setOutputTokens(prev => {
+          const current = Number(prev);
+          if (!Number.isInteger(current) || current < v.custom.output_floor || current > v.custom.output_ceiling) return String(v.custom.fitted_output);
+          return prev;
+        });
+      }).catch(() => {});
+    }, 200);
+    return () => {active = false; window.clearTimeout(timer);};
+  }, [provider, contextWindow, model.context_window_tokens]);
   const [name, setName] = useState(model.model);
   const [secret, setSecret] = useState('');
   const [noAuth, setNoAuth] = useState(false);
@@ -42,9 +67,13 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
   const [status, setStatus] = useState('');
 
   const known = catalog[provider]?.[name];
-  const resetThinking = (maxTokens?: number) => {setReasoning('default'); setFormat('auto'); setBudgetField(''); setBudget(''); setTokenField('auto'); setOutputTokens(String(Math.min(DEFAULT_OUTPUT_TOKENS, maxTokens ?? DEFAULT_OUTPUT_TOKENS)));};
-  // Same floor as the server (model_config.output_floor): 32768, or a catalog model's lower maximum.
-  const outputMin = known ? Math.min(DEFAULT_OUTPUT_TOKENS, known.maxTokens): DEFAULT_OUTPUT_TOKENS;
+  const applyCap = (cap?: number) => { if (typeof cap === 'number') setOutputTokens(String(cap)); };
+  const resetThinking = (selected?: {output_floor: number}) => {
+    setReasoning('default'); setFormat('auto'); setBudgetField(''); setBudget(''); setTokenField('auto');
+    applyCap(selected ? selected.output_floor : customBounds?.fitted_output);
+  };
+  const outputMin = known ? known.output_floor : customBounds?.output_floor;
+  const outputMax = known ? known.output_ceiling : customBounds?.output_ceiling;
   const levels = ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter(level =>
     level === 'default' || (!known || (known.reasoning || level === 'off') && known.thinkingLevelMap?.[level] !== null));
   return (
@@ -52,7 +81,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
       <form id="settings-form" onSubmit={async (e) => {
         e.preventDefault(); setSaving(true); setError(t('setup.validatingToolCalls'));
         const s = secret; setSecret('');
-        try { await api('setup/model', {endpoint, model: name, secret: s, no_auth: noAuth, vision, provider, api: protocol, reasoning_level: reasoning, thinking_format: format, thinking_budget_field: budgetField, thinking_budget: budget ? Number(budget): null, max_tokens_field: tokenField, output_tokens: outputTokens ? Number(outputTokens): null, keep_generation_settings: keepLegacy}); onClose(); await store.refresh(); }
+        try { await api('setup/model', {endpoint, model: name, secret: s, no_auth: noAuth, vision, provider, api: protocol, reasoning_level: reasoning, thinking_format: format, thinking_budget_field: budgetField, thinking_budget: budget ? Number(budget): null, max_tokens_field: tokenField, output_tokens: outputTokens ? Number(outputTokens): null, context_window_tokens: provider === 'custom' && contextWindow ? Number(contextWindow): null, model_max_concurrency: concurrency ? Number(concurrency): null, keep_generation_settings: keepLegacy}); onClose(); await store.refresh(); }
         catch (err: any) { setError(friendlyError(err) || t('setup.saveFailed')); } finally { setSaving(false); }
       }}>
         <h2 className="text-lg font-semibold">{t('setup.modelDialogTitle')}</h2>
@@ -65,7 +94,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
           {provider !== 'custom' && !catalog[provider] ? <option value={provider}>{provider}</option>: null}
         </select></label>
         <label className="mt-2 block text-sm">{t('setup.modelName')}<input id="model-name" list="pi-models" required value={name} onChange={e => {
-          const selected = catalog[provider]?.[e.target.value]; setName(e.target.value); resetThinking(selected?.maxTokens);
+          const selected = catalog[provider]?.[e.target.value]; setName(e.target.value); resetThinking(selected);
           if (selected) {setProtocol(selected.api); setEndpoint(selected.baseUrl);}
         }} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         <datalist id="pi-models">{Object.entries(catalog[provider] || {}).map(([id, m]) => <option key={id} value={id}>{m.name}</option>)}</datalist>
@@ -75,8 +104,11 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
           <option value="google-generative-ai">Google Gemini</option>
         </select></label>: null}
         <label className="mt-2 block text-sm">{t('setup.apiBaseUrl')}<input id="model-endpoint" type="url" required value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
-        <label className="mt-2 block text-sm">{t('setup.outputCap')}<input id="model-output-tokens" type="number" required min={outputMin} max={known ? known.maxTokens: 1048576} step="1" value={outputTokens} onChange={e => setOutputTokens(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
+        {provider === 'custom' ? <label className="mt-2 block text-sm">{t('setup.contextWindow')}<input id="model-context-window" type="number" min={5120} max={2000000} step="1" value={contextWindow} onChange={e => setContextWindow(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>: null}
+        <label className="mt-2 block text-sm">{t('setup.outputCap')}<input id="model-output-tokens" type="number" required min={outputMin} max={outputMax} step="1" value={outputTokens} onChange={e => setOutputTokens(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         <p className="mt-1 text-xs text-muted">{t('setup.outputCapHint', {min: outputMin})}</p>
+        <label className="mt-2 block text-sm">{t('setup.concurrency')}<input id="model-concurrency" type="number" required min={1} max={16} step="1" value={concurrency} onChange={e => setConcurrency(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
+        {store.snapshot?.setup.model_concurrency_restart_required ? <p className="mt-1 text-xs text-warn">{t('setup.concurrencyRestart')}</p>: null}
         <label className="mt-2 block text-sm">{t('setup.reasoningLevel')}<select id="model-reasoning" value={reasoning} onChange={e => setReasoning(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5">
           {levels.map(level => <option key={level} value={level}>{level === 'default' ? t('setup.reasoningDefault'): level === 'off' ? t('setup.reasoningOff'): level}</option>)}
         </select></label>
@@ -136,7 +168,9 @@ function CapabilityList({rows}: {rows: Capability[]}) {
   };
   return (
     <section id="capability-list" className="border-b border-line bg-raised px-5 py-2.5">
-      <ul className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+      <details open>
+      <summary className="cursor-pointer text-xs text-muted">{t('setup.statusBar')}</summary>
+      <ul className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
         {rows.map((row) => {
           const action = actionText(row);
           const label = capabilityLabel[row.capability] ? t(capabilityLabel[row.capability]): row.capability;
@@ -145,7 +179,10 @@ function CapabilityList({rows}: {rows: Capability[]}) {
           // presentation). ready -> good; blocked/unconfigured -> warn; else muted.
           // A problem state (has an action) shows the action inline so touch/keyboard
           // users can discover the fix; a healthy pill stays compact (title only).
-          const showAction = !!action && (row.state === 'blocked' || row.state === 'unconfigured');
+          // Jev/semantic check is optional. unconfigured must not look like a fault.
+          // enforce without a key stays blocked and keeps the operator action.
+          const optionalGate = row.capability === 'semantic_gate' && row.state === 'unconfigured';
+          const showAction = !!action && (row.state === 'blocked' || row.state === 'unconfigured') && !optionalGate;
           return (
             <li
               key={row.capability} data-capability={row.capability} data-state={row.state}
@@ -156,10 +193,12 @@ function CapabilityList({rows}: {rows: Capability[]}) {
               <span className="font-medium text-ink">{label}</span>
               <span className="text-muted">{state}</span>
               {showAction ? <span className="cap-action text-warn">· {action}</span>: null}
+              {optionalGate ? <span className="text-muted">· {t('setup.optionalGate')}</span>: null}
             </li>
 );
         })}
       </ul>
+      </details>
     </section>
 );
 }

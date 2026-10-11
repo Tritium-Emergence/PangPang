@@ -288,10 +288,17 @@ def normalize_profile(profile):
     legacy = int(profile.get("context_window_tokens", profile.get("context_budget", 32000)))
     profile.setdefault("context_window_tokens", legacy)
     profile.setdefault("serialized_bytes_safety_limit", max(256 * 1024, min(8 * 1024 * 1024, legacy * 6)))
-    from .model_config import DEFAULT_OUTPUT_TOKENS, output_floor, validate_profile
-    #: no profile runs below the floor. A stored smaller cap (the old example's
-    # 1200) is raised on load; the next config commit persists the raised value.
-    profile["output_tokens"] = max(int(profile.get("output_tokens") or DEFAULT_OUTPUT_TOKENS), output_floor(profile))
+    from .model_config import MIN_OUTPUT_TOKENS, fitted_output, output_ceiling, output_floor, validate_profile
+    # A stored cap below the floor (the old 1200 stall) is raised on load. A cap
+    # that does not fit the context window is replaced with one that does, so a
+    # 32K window is not left reserving 32768 output tokens. The next config
+    # commit persists the adjusted value.
+    ceiling = output_ceiling(profile)
+    if ceiling < MIN_OUTPUT_TOKENS:
+        raise Fault("output_exceeds_context_window", 400)
+    raw = profile.get("output_tokens")
+    if type(raw) is not int or raw < output_floor(profile) or raw > ceiling:
+        profile["output_tokens"] = fitted_output(profile)
     # Provider quirks belong to Pi. Never infer thinking settings from a model name.
     validate_profile(profile)
     return profile

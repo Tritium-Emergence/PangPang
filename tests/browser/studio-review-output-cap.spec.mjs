@@ -1,4 +1,4 @@
-// / review findings, against the committed shell with snapshot fixtures.
+import {spawn} from 'node:child_process';
 import {test, expect} from '@playwright/test';
 import {login, gotoWork} from './_studio.mjs';
 import {project} from './_parity.mjs';
@@ -9,7 +9,7 @@ let errors;
 test.beforeEach(async ({page}) => { errors = []; page.on('pageerror', (e) => errors.push(e.message)); });
 test.afterEach(async ({page}) => { await page.unrouteAll({behavior: 'wait'}); expect(errors).toEqual([]); });
 
-test('-1 capability rows and a new Work phase render in Chinese; codes stay inspectable', async ({page}) => {
+test('capability rows and a new Work phase render in Chinese; codes stay inspectable', async ({page}) => {
   await project(page, (s) => {
     s.setup.capabilities = [
       {capability: 'model', state: 'ready', reason: null, operator_action_code: null, operator_action: null},
@@ -42,7 +42,7 @@ test('-1 capability rows and a new Work phase render in Chinese; codes stay insp
   await expect(facts).not.toContainText('new');
 });
 
-test('-2 a Work-scoped progress bubble names its Work; the Bot-wide thinking bubble does not', async ({page}) => {
+test('a Work-scoped progress bubble names its Work; the Bot-wide thinking bubble does not', async ({page}) => {
   let thinking = false;
   await project(page, (s) => {
     s.work = [work('herbs', {goal: '香草三步指南'}), work('lan', {goal: '局域网备份', status: 'delivered', attention: 'settled'})];
@@ -62,7 +62,7 @@ test('-2 a Work-scoped progress bubble names its Work; the Bot-wide thinking bub
   await expect(bubble.locator('.source')).toHaveText('胖胖');
 });
 
-test(' a blocked current Work shows the recorded reason, and only a recorded one', async ({page}) => {
+test('a blocked current Work shows the recorded reason, and only a recorded one', async ({page}) => {
   let inSnapshot = true;
   await project(page, (s) => {
     s.work = [work('herbs', {goal: '香草三步指南', attention: 'blocked'})];
@@ -80,23 +80,28 @@ test(' a blocked current Work shows the recorded reason, and only a recorded one
   await expect(inspector.getByTestId('blocked-reason')).toHaveCount(0);
 });
 
-test(' the settings dialog shows and sets the output cap, never below the floor', async ({page}) => {
+test('the settings dialog shows and sets the output cap, never below the floor', async ({page}) => {
   await login(page);
   await page.locator('[data-view="hosts"]').click();
   await page.locator('#settings').click();
   const cap = page.locator('#model-output-tokens');
+  const catalog = await page.evaluate(async () => (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json());
   await expect(cap).toHaveValue('32768');
-  await expect(cap).toHaveAttribute('min', '32768');
-  // A catalog model whose own maximum is lower: that maximum is both the value and the floor.
-  const low = await page.evaluate(async () => {
-    const c = await (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json();
-    for (const [provider, models] of Object.entries(c.providers))
-      for (const [id, m] of Object.entries(models)) if (m.maxTokens < 32768) return {provider, id, max: String(m.maxTokens)};
-  });
+  await expect(cap).toHaveAttribute('min', String(catalog.custom.output_floor));
+  await expect(cap).toHaveAttribute('max', String(catalog.custom.output_ceiling));
+  // A catalog model whose own maximum is lower: the form uses the bounds the catalog response carries.
+  let low;
+  for (const [provider, models] of Object.entries(catalog.providers)) {
+    for (const [id, m] of Object.entries(models)) {
+      if (m.maxTokens < 32768 && m.output_floor <= m.output_ceiling) { low = {provider, id, floor: String(m.output_floor), ceiling: String(m.output_ceiling)}; break; }
+    }
+    if (low) break;
+  }
   await page.locator('#model-provider').selectOption(low.provider);
   await page.locator('#model-name').fill(low.id);
-  await expect(cap).toHaveValue(low.max);
-  await expect(cap).toHaveAttribute('min', low.max);
+  await expect(cap).toHaveValue(low.floor);
+  await expect(cap).toHaveAttribute('min', low.floor);
+  await expect(cap).toHaveAttribute('max', low.ceiling);
   await page.locator('#model-provider').selectOption('custom');
   await page.locator('#model-name').fill('qwen-local');
   await page.locator('#model-endpoint').fill('http://127.0.0.1:9999/v1');
@@ -110,8 +115,127 @@ test(' the settings dialog shows and sets the output cap, never below the floor'
   await cap.fill('1200');
   await page.locator('#model-save').click(); // below the floor: the form does not submit
   expect(submitted).toBeUndefined();
-  await cap.fill('65536');
+  await cap.fill(String(catalog.custom.output_ceiling + 1));
+  await page.locator('#model-save').click();
+  expect(submitted).toBeUndefined();
+  await cap.fill(String(catalog.custom.output_ceiling));
   await page.locator('#model-save').click();
   await expect(page.locator('#model-error')).toContainText('fixture_stop');
-  expect(submitted).toMatchObject({provider: 'custom', model: 'qwen-local', output_tokens: 65536});
+  expect(submitted).toMatchObject({provider: 'custom', model: 'qwen-local', output_tokens: catalog.custom.output_ceiling});
+});
+
+test('a catalog model whose window cannot hold its max tokens offers the server ceiling', async ({page}) => {
+  await login(page);
+  await page.locator('[data-view="hosts"]').click();
+  await page.locator('#settings').click();
+  const cap = page.locator('#model-output-tokens');
+  const gpt = await page.evaluate(async () => {
+    const c = await (await fetch('/api/v1/setup/model-catalog', {credentials: 'same-origin'})).json();
+    return c.providers.openai['gpt-4'];
+  });
+  await page.locator('#model-provider').selectOption('openai');
+  await page.locator('#model-name').fill('gpt-4');
+  await expect(cap).toHaveValue(String(gpt.output_floor));
+  await expect(cap).toHaveAttribute('min', String(gpt.output_floor));
+  await expect(cap).toHaveAttribute('max', String(gpt.output_ceiling));
+  let submitted;
+  await page.route('**/api/v1/setup/model', async (route) => {
+    submitted = route.request().postDataJSON();
+    await route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({code: 'fixture_stop', message: 'fixture_stop', retryable: false})});
+  });
+  await cap.fill(String(gpt.maxTokens));
+  await page.locator('#model-save').click();
+  expect(submitted).toBeUndefined();
+  await cap.fill(String(gpt.output_ceiling));
+  await page.locator('#model-save').click();
+  await expect(page.locator('#model-error')).toContainText('fixture_stop');
+  expect(submitted.output_tokens).toBe(gpt.output_ceiling);
+  expect(submitted.output_tokens).toBeLessThan(gpt.maxTokens);
+});
+
+test.describe('a stored 32K window', () => {
+  test.use({baseURL: 'http://127.0.0.1:8796'});
+  let child;
+  let bootLog = '';
+  test.beforeAll(async () => {
+    child = spawn('python3', ['tests/browser_fixture.py', 'catalog-window', '8796'], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const collect = (chunk) => { bootLog = (bootLog + chunk.toString()).slice(-4000); };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch('http://127.0.0.1:8796/');
+        if (res.status < 500) return;
+      } catch { /* not listening yet */ }
+      if (child.exitCode != null) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error('catalog-window fixture did not listen\n' + bootLog);
+  });
+  test.afterAll(() => { child?.kill('SIGTERM'); });
+
+  test('a 32K profile switched to a catalog model can submit the ceiling and not 32768', async ({page}) => {
+    await login(page);
+    await page.locator('[data-view="hosts"]').click();
+    const pending = page.waitForResponse((r) => r.url().includes('/api/v1/setup/model-catalog') && r.ok());
+    await page.locator('#settings').click();
+    const response = await pending;
+    expect(new URL(response.url()).searchParams.has('context_window_tokens')).toBe(false);
+    const catalog = await response.json();
+    const model = catalog.providers.anthropic['claude-haiku-4-5'];
+    expect(model.output_ceiling).toBeLessThan(32768);
+    expect(model.output_floor).toBe(model.output_ceiling);
+    const cap = page.locator('#model-output-tokens');
+    await expect(page.locator('#model-provider option[value="anthropic"]')).toHaveCount(1);
+    await page.locator('#model-provider').selectOption('anthropic');
+    await page.locator('#model-name').fill('claude-haiku-4-5');
+    await expect(cap).toHaveValue(String(model.output_floor));
+    await expect(cap).toHaveAttribute('min', String(model.output_floor));
+    await expect(cap).toHaveAttribute('max', String(model.output_ceiling));
+    let submitted;
+    await page.route('**/api/v1/setup/model', async (route) => {
+      submitted = route.request().postDataJSON();
+      await route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({code: 'fixture_stop', message: 'fixture_stop', retryable: false})});
+    });
+    await cap.fill('32768');
+    await page.locator('#model-save').click();
+    expect(submitted).toBeUndefined();
+    await cap.fill(String(model.output_ceiling));
+    await page.locator('#model-save').click();
+    await expect(page.locator('#model-error')).toContainText('fixture_stop');
+    expect(submitted.output_tokens).toBe(model.output_ceiling);
+  });
+});
+
+test('typing a context window loads only custom bounds and rejects a cap that window cannot hold', async ({page}) => {
+  await login(page);
+  await page.locator('[data-view="hosts"]').click();
+  await page.locator('#settings').click();
+  const cap = page.locator('#model-output-tokens');
+  const field = page.locator('#model-context-window');
+  await expect(field).toBeVisible();
+  const pending = page.waitForResponse((r) => r.url().includes('context_window_tokens=32000') && r.ok());
+  await field.fill('32000');
+  const body = await (await pending).json();
+  expect(body.providers).toBeUndefined();
+  expect(Object.keys(body)).toEqual(['custom']);
+  expect(body.custom.output_ceiling).toBeLessThan(32768);
+  await expect(cap).toHaveAttribute('max', String(body.custom.output_ceiling));
+  let submitted;
+  await page.route('**/api/v1/setup/model', async (route) => {
+    submitted = route.request().postDataJSON();
+    await route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({code: 'fixture_stop', message: 'fixture_stop', retryable: false})});
+  });
+  await cap.fill('32768');
+  await page.locator('#model-save').click();
+  expect(submitted).toBeUndefined();
+  await cap.fill(String(body.custom.output_ceiling));
+  await page.locator('#model-save').click();
+  await expect(page.locator('#model-error')).toContainText('fixture_stop');
+  expect(submitted.output_tokens).toBe(body.custom.output_ceiling);
+  expect(submitted.context_window_tokens).toBe(32000);
 });

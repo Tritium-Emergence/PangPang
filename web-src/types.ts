@@ -118,7 +118,9 @@ export interface Capability {
 }
 
 export interface Setup {
-  model: {endpoint: string; model: string; vision: boolean; configured: boolean; has_secret: boolean; provider?: string; api?: string; reasoning_level?: string; thinking_format?: string; thinking_budget_field?: string; thinking_budget?: number; max_tokens_field?: string; output_tokens?: number; has_legacy_generation_settings?: boolean};
+  model: {endpoint: string; model: string; vision: boolean; configured: boolean; has_secret: boolean; provider?: string; api?: string; reasoning_level?: string; thinking_format?: string; thinking_budget_field?: string; thinking_budget?: number; max_tokens_field?: string; output_tokens?: number; context_window_tokens?: number; has_legacy_generation_settings?: boolean};
+  model_max_concurrency?: number;
+  model_concurrency_restart_required?: boolean;
   capabilities: Capability[]; // effective capability truth — read, never guess readiness
   requests: SetupRequest[];
   inventory: unknown[];

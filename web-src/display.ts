@@ -8,7 +8,9 @@ import type {Routine} from './types';
 export const attentionLabel: Record<string, string> = {needs_attention: 'attention.needs_attention', blocked: 'attention.blocked', working: 'attention.working', done_unread: 'attention.done_unread', settled: 'attention.settled', unknown: 'attention.unknown'};
 export const taskLabel: Record<string, string> = {queued: 'task.queued', pending: 'task.pending', running: 'task.running', starting: 'task.starting', awaiting_approval: 'task.awaiting_approval', unknown: 'task.unknown', cancel_requested: 'task.cancel_requested', succeeded: 'task.succeeded', failed: 'task.failed', cancelled: 'task.cancelled', blocked: 'task.blocked'};
 export const exchangeLabel: Record<string, string> = {pending: 'exchange.pending', responded: 'exchange.responded', failed: 'exchange.failed', cancelled: 'exchange.cancelled'};
-export const DEFAULT_OUTPUT_TOKENS = 32768; // pangpang/model_config.py: default and minimum output cap
+export const DEFAULT_OUTPUT_TOKENS = 32768; // pangpang/model_config.py: default when the window can hold it
+export const MIN_OUTPUT_TOKENS = 4096; // unknown-model floor; 1200 truncates tool batches
+export const INPUT_RESERVE_TOKENS = 1024; // output cap must leave this much of the window for the prompt
 export const capabilityLabel: Record<string, string> = {model: 'capability.model', executor: 'capability.executor', device: 'capability.device', web_search: 'capability.web_search', semantic_gate: 'capability.semantic_gate'};
 export const capabilityStateLabel: Record<string, string> = {ready: 'capabilityState.ready', unconfigured: 'capabilityState.unconfigured', blocked: 'capabilityState.blocked', unknown: 'capabilityState.unknown'};
 // The server seeds a new Work's checkpoint with phase "new"; later phases are

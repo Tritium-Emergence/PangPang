@@ -11,10 +11,16 @@ FORMATS = {"auto", "openai", "qwen", "qwen-chat-template", "deepseek", "zai", "o
 BUDGET_FIELDS = {"", "thinking_token_budget", "thinking_budget", "thinking_budget_tokens"}
 FIELDS = ("provider", "api", "reasoning_level", "thinking_format", "thinking_budget_field",
           "thinking_budget", "max_tokens_field")
-# Default and minimum output cap. A planner turn that writes a tool batch
-# needs room; a too-small cap truncates it and blocks the Work.
+# Default output cap when the context window can hold it. A planner turn that
+# writes a tool batch needs room; caps below MIN_OUTPUT_TOKENS truncate it and
+# block the Work (the old 1200 stall). 32768 is not a minimum: an unknown model
+# whose window is 32K cannot reserve 32768 output tokens and still take a prompt.
 DEFAULT_OUTPUT_TOKENS = 32768
+MIN_OUTPUT_TOKENS = 4096
+INPUT_RESERVE_TOKENS = 1024
+WINDOW_FIT_OUTPUT_TOKENS = 8192
 MAX_OUTPUT_TOKENS = 1048576
+MIN_CONTEXT_WINDOW_TOKENS = MIN_OUTPUT_TOKENS + INPUT_RESERVE_TOKENS
 
 
 @lru_cache(maxsize=1)
@@ -22,11 +28,91 @@ def catalog():
     return json.loads(Path(__file__).with_name("model_catalog.json").read_text(encoding="utf-8"))
 
 
+def _known_model(profile):
+    provider = profile.get("provider", "custom")
+    if provider == "custom":
+        return None
+    return catalog()["providers"].get(provider, {}).get(profile.get("model", ""))
+
+
+def output_ceiling(profile):
+    """Largest output cap this profile can reserve and still leave prompt room."""
+    caps = [MAX_OUTPUT_TOKENS]
+    known = _known_model(profile)
+    if known:
+        caps.append(int(known["maxTokens"]))
+    window = profile.get("context_window_tokens")
+    if type(window) is int and window > 0:
+        caps.append(window - INPUT_RESERVE_TOKENS)
+    return min(caps)
+
+
 def output_floor(profile):
-    """Smallest output cap a profile may hold: DEFAULT_OUTPUT_TOKENS, or the model's
-    own maximum when the Pi catalog lists a lower one (the provider rejects more)."""
-    known = catalog()["providers"].get(profile.get("provider", "custom"), {}).get(profile.get("model", ""))
-    return min(DEFAULT_OUTPUT_TOKENS, known["maxTokens"]) if known else DEFAULT_OUTPUT_TOKENS
+    """Smallest output cap the operator may set. Catalog models stay at
+    min(DEFAULT, maxTokens). Unknown models may go down to MIN_OUTPUT_TOKENS so a
+    32K window can use a cap the model actually accepts."""
+    known = _known_model(profile)
+    floor = min(DEFAULT_OUTPUT_TOKENS, int(known["maxTokens"])) if known else MIN_OUTPUT_TOKENS
+    return min(floor, output_ceiling(profile))
+
+
+def parse_context_window(raw):
+    """A context window an operator named. Anything else is absent."""
+    if type(raw) is int:
+        value = raw
+    elif isinstance(raw, str) and raw.isdigit():
+        value = int(raw)
+    else:
+        return None
+    if MIN_CONTEXT_WINDOW_TOKENS <= value <= 2_000_000:
+        return value
+    return None
+
+
+def custom_output_bounds(stored_window=None):
+    """Output bounds for an unknown model at one context window."""
+    window = stored_window if type(stored_window) is int and stored_window > 0 else None
+    custom = {"provider": "custom", "model": "custom"}
+    if window is not None:
+        custom["context_window_tokens"] = window
+    return {"output_floor": output_floor(custom), "output_ceiling": output_ceiling(custom),
+            "fitted_output": fitted_output(custom)}
+
+
+def operator_catalog(stored_window=None):
+    """Catalog plus the output bounds a save will enforce.
+
+    A catalog choice keeps min(stored window, that model's window). The numbers
+    are computed here so the settings form does not keep a second copy of the rule.
+    """
+    raw = catalog()
+    window = stored_window if type(stored_window) is int and stored_window > 0 else None
+    providers = {}
+    for provider, models in raw["providers"].items():
+        copied = {}
+        for name, model in models.items():
+            entry = dict(model)
+            model_window = int(model["contextWindow"])
+            chosen = min(window, model_window) if window is not None else model_window
+            prof = {"provider": provider, "model": name, "context_window_tokens": chosen}
+            entry["output_floor"] = output_floor(prof)
+            entry["output_ceiling"] = output_ceiling(prof)
+            copied[name] = entry
+        providers[provider] = copied
+    return {"pi_version": raw.get("pi_version"), "providers": providers,
+            "custom": custom_output_bounds(window)}
+
+
+def fitted_output(profile):
+    """Replacement cap when the stored value is missing, below the floor, or
+    larger than the window. A tight window gets WINDOW_FIT_OUTPUT_TOKENS, not
+    the historical 32768 default."""
+    ceiling = output_ceiling(profile)
+    if _known_model(profile):
+        return min(output_floor(profile), ceiling)
+    if ceiling >= DEFAULT_OUTPUT_TOKENS:
+        return DEFAULT_OUTPUT_TOKENS
+    return min(WINDOW_FIT_OUTPUT_TOKENS, ceiling)
 
 
 def validate_profile(profile):
@@ -91,17 +177,34 @@ def setup_profile(old, body):
         p.pop("generation_settings", None)
     p.update(provider=provider, api=api, model=name, endpoint=address,
              vision=body.get("vision") is True)
-    # The form sends the cap it shows; without one, a different model starts from the default.
+    # Context before the output cap: the cap has to fit the window the operator named.
+    requested_window = body.get("context_window_tokens", None)
+    if requested_window is not None:
+        if type(requested_window) is not int or not MIN_CONTEXT_WINDOW_TOKENS <= requested_window <= 2_000_000:
+            raise Fault("invalid_context_window", 400)
+        if known and requested_window > int(known["contextWindow"]):
+            raise Fault("invalid_context_window", 400)
+        p["context_window_tokens"] = requested_window
+    elif known:
+        current = p.get("context_window_tokens", known["contextWindow"])
+        if type(current) is not int:
+            current = int(known["contextWindow"])
+        p["context_window_tokens"] = min(current, int(known["contextWindow"]))
+    # The form sends the cap it shows. A catalog maximum above the provider's
+    # hard max is clamped (the provider rejects more). A cap that consumes the
+    # context window is refused with a specific code, not stored as "unavailable".
     cap = body.get("output_tokens")
-    if cap is not None:
-        if type(cap) is not int or not output_floor(p) <= cap <= MAX_OUTPUT_TOKENS:
+    if cap is None:
+        if not same or type(p.get("output_tokens")) is not int or not output_floor(p) <= p.get("output_tokens") <= output_ceiling(p):
+            p["output_tokens"] = fitted_output(p)
+    else:
+        if type(cap) is not int or cap < output_floor(p) or cap > MAX_OUTPUT_TOKENS:
             raise Fault("invalid_output_tokens", 400)
+        if known and cap > int(known["maxTokens"]):
+            cap = int(known["maxTokens"])
+        if cap > output_ceiling(p):
+            raise Fault("output_exceeds_context_window", 400)
         p["output_tokens"] = cap
-    elif not same:
-        p["output_tokens"] = DEFAULT_OUTPUT_TOKENS
-    if known:
-        p["context_window_tokens"] = min(p.get("context_window_tokens", known["contextWindow"]), known["contextWindow"])
-        p["output_tokens"] = min(p.get("output_tokens", known["maxTokens"]), known["maxTokens"])
     for key in FIELDS[2:]:
         if key in body and body[key] is not None:
             p[key] = body[key]

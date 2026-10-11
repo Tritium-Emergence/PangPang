@@ -20,6 +20,7 @@ export function Login({onLogin}: {onLogin: (token: string) => Promise<void>}) {
         <p className="text-xs tracking-widest text-muted">PANGPANG</p>
         <h1 className="mt-2 text-xl font-semibold">{t('login.headline')}</h1>
         <p className="mt-1 text-sm text-muted">{t('login.subtitle')}</p>
+        <p id="login-key-hint" className="mt-2 text-xs text-muted">{t('login.keyHint')}</p>
         <label className="mt-6 block text-sm">
           {t('login.accessKey')}
           <input
