@@ -1,6 +1,7 @@
 """Stored installations whose adapter is no longer in the catalog still load.
 
-A startup file and every config write still reject an unknown adapter.
+A startup file, a direct Execution(), and a write that adds or edits an unknown
+adapter still reject it. A write that leaves that row identical does not.
 Pairing distinguishes an answered 4xx from a transport or TLS failure.
 Service templates can name a port and document local execution only as a comment.
 """
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pangpang.backup import create_consistent_backup
-from pangpang.connector import Connector, paired_config
+from pangpang.connector import Connector, paired_config, policy_digest
 from pangpang.execution import ADAPTER_CATALOG, Execution
 from pangpang.http import serve
 from pangpang.local_setup import LocalSetup
@@ -204,7 +205,7 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.assertEqual(route["selected"]["installation_id"], "inst-local-legacy-private-cli")
         self.assertNotIn("unknown_adapter", {row["reason"] for row in route["rejected"]})
 
-    def test_startup_file_and_candidate_writes_still_reject_unknown_adapter(self):
+    def test_startup_file_rejects_unknown_adapter_and_unchanged_rows_do_not_block_writes(self):
         config = _managed(self.workspace, _qwen_and_codex(self.workspace))
         with self.assertRaises(Fault) as raised:
             Service(config, self.data, deployment_level="L0")
@@ -216,13 +217,29 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.apps.append(app)
         candidate = json.loads(json.dumps(app.config))
         candidate["installations"][1]["enabled"] = False
-        with self.assertRaises(Fault) as rejected:
-            app.commit_managed_config(candidate)
-        self.assertEqual(rejected.exception.code, "invalid_adapter")
-        self.assertEqual(_settings_blob(self.data / "bots.db"), before)
+        app.commit_managed_config(candidate)
+        stored = json.loads(_settings_blob(self.data / "bots.db"))
+        legacy = next(row for row in stored["config"]["installations"] if row["adapter"] == "legacy-private-cli")
+        original = next(row for row in json.loads(before)["config"]["installations"] if row["adapter"] == "legacy-private-cli")
+        self.assertEqual(legacy, original)
+        self.assertFalse(app.execution.installations["inst-local-codex"]["enabled"])
+        self.assertIn("inst-local-legacy-private-cli", app.execution.unknown_adapters)
         with self.assertRaises(Fault) as direct:
             Execution(candidate, self.data)
         self.assertEqual(direct.exception.code, "invalid_adapter")
+        self.assertTrue(direct.exception.advice)
+
+        mutated = json.loads(json.dumps(app.config))
+        for row in mutated["installations"]:
+            if row["adapter"] == "legacy-private-cli":
+                row["enabled"] = False
+        before_mutation = _settings_blob(self.data / "bots.db")
+        with self.assertRaises(Fault) as rejected:
+            app.commit_managed_config(mutated)
+        self.assertEqual(rejected.exception.code, "invalid_adapter")
+        self.assertIn("inst-local-legacy-private-cli", rejected.exception.advice or "")
+        self.assertIn("adapters.json", rejected.exception.advice or "")
+        self.assertEqual(_settings_blob(self.data / "bots.db"), before_mutation)
 
         removed = json.loads(json.dumps(app.config))
         removed["installations"] = [row for row in removed["installations"] if row["adapter"] != "legacy-private-cli"]
@@ -232,7 +249,23 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.assertEqual(app.execution.installations["inst-local-codex"]["enabled"], False)
         self.assertNotIn("legacy-private-cli", app.execution.unknown_adapters)
 
-    def test_connector_load_tolerates_and_device_save_rejects(self):
+    def _open_legacy_connector(self):
+        config = _managed(self.workspace, _qwen_and_codex(self.workspace))
+        config["host_id"] = "host-local"
+        config["cloud_url"] = "http://127.0.0.1:9"
+        self.data.mkdir()
+        store = Store(self.data / "connector.db")
+        store.put("settings", {"id": "managed", "config": config})
+        store.close()
+        connector = Connector(config, self.data)
+        self.addCleanup(connector.close)
+        return connector
+
+    def _legacy_row(self, blob):
+        stored = json.loads(blob)
+        return next(row for row in stored["config"]["installations"] if row["adapter"] == "legacy-private-cli")
+
+    def test_connector_load_and_device_save_keep_identical_unknown_rows(self):
         config = _managed(self.workspace, _qwen_and_codex(self.workspace))
         config["host_id"] = "host-local"
         config["cloud_url"] = "http://127.0.0.1:9"
@@ -247,14 +280,121 @@ class StoredUnknownAdapterTests(unittest.TestCase):
                          "unknown_adapter")
         self.assertIn("inst-local-codex", connector.execution.installations)
         self.assertEqual(_settings_blob(self.data / "connector.db"), before)
+        original = self._legacy_row(before)
+        LocalSetup(connector).save(json.loads(json.dumps(connector.config)))
+        self.assertEqual(self._legacy_row(_settings_blob(self.data / "connector.db")), original)
+        self.assertEqual(connector.execution.unknown_adapters["inst-local-legacy-private-cli"]["reason"],
+                         "unknown_adapter")
+        mutated = json.loads(json.dumps(connector.config))
+        for row in mutated["installations"]:
+            if row["adapter"] == "legacy-private-cli":
+                row["cwd"] = str(self.workspace / "moved")
+        before_mutation = _settings_blob(self.data / "connector.db")
         with self.assertRaises(Fault) as raised:
-            LocalSetup(connector).save(json.loads(json.dumps(connector.config)))
+            LocalSetup(connector).save(mutated)
         self.assertEqual(raised.exception.code, "invalid_adapter")
-        self.assertEqual(_settings_blob(self.data / "connector.db"), before)
+        self.assertIn("inst-local-legacy-private-cli", raised.exception.advice or "")
+        self.assertIn("adapters.json", raised.exception.advice or "")
+        self.assertEqual(_settings_blob(self.data / "connector.db"), before_mutation)
+        self.assertEqual(connector.config["installations"], json.loads(before_mutation)["config"]["installations"])
         fresh = self.root / "fresh-connector"
         with self.assertRaises(Fault) as startup:
             Connector(config, fresh)
         self.assertEqual(startup.exception.code, "invalid_adapter")
+
+    def test_device_configure_keeps_an_unrelated_unknown_row(self):
+        connector = self._open_legacy_connector()
+        original = self._legacy_row(_settings_blob(self.data / "connector.db"))
+
+        def fake_probe(execution, installation_id):
+            return {"available": True, "version": "1", "supervision": "windows-job-object"}
+
+        with patch.object(LocalSetup, "discover",
+                          return_value={"inventory": [{"adapter": "codex", "binary": "/usr/bin/codex"}]}), \
+             patch.object(Execution, "probe", side_effect=fake_probe, autospec=True):
+            connector.execute({
+                "id": "cmd-configure-codex",
+                "action": "configure",
+                "payload": {"adapter": "codex", "cwd": str(self.workspace)},
+            })
+        result = connector.store.get("local_command", "cmd-configure-codex")["result"]
+        self.assertNotIn("error", result)
+        self.assertEqual(result["installation"]["id"], "codex-host-local")
+        self.assertTrue(result["probe"]["available"])
+        self.assertIn("codex-host-local", connector.execution.installations)
+        self.assertEqual(self._legacy_row(_settings_blob(self.data / "connector.db")), original)
+        self.assertEqual(connector.execution.unknown_adapters["inst-local-legacy-private-cli"]["reason"],
+                         "unknown_adapter")
+        self.assertNotIn("advice", result)
+
+    def test_edited_unknown_row_returns_adapter_advice(self):
+        connector = self._open_legacy_connector()
+        before = _settings_blob(self.data / "connector.db")
+        connector.execute({
+            "id": "cmd-edit-unknown",
+            "action": "credential_delete",
+            "payload": {
+                "installation_id": "inst-local-legacy-private-cli",
+                "expected_policy_digest": policy_digest(connector.config, "inst-local-legacy-private-cli"),
+            },
+        })
+        result = connector.store.get("local_command", "cmd-edit-unknown")["result"]
+        self.assertEqual(result["error"], "invalid_adapter")
+        self.assertIn("inst-local-legacy-private-cli", result["advice"])
+        self.assertIn("adapters.json", result["advice"])
+        self.assertNotIn("\n", result["advice"])
+        self.assertEqual(_settings_blob(self.data / "connector.db"), before)
+        with patch.object(LocalSetup, "discover", return_value={"inventory": []}):
+            connector.execute({
+                "id": "cmd-missing-cli",
+                "action": "configure",
+                "payload": {"adapter": "codex", "cwd": str(self.workspace)},
+            })
+        missing = connector.store.get("local_command", "cmd-missing-cli")["result"]
+        self.assertEqual(missing["error"], "cli_not_installed")
+        self.assertNotIn("advice", missing)
+
+    def test_configure_probe_exception_completes_setup(self):
+        connector = self._open_legacy_connector()
+        original = self._legacy_row(_settings_blob(self.data / "connector.db"))
+
+        def fail(execution, installation_id):
+            raise Fault("transport_unavailable")
+
+        with patch.object(LocalSetup, "discover",
+                          return_value={"inventory": [{"adapter": "codex", "binary": "/usr/bin/codex"}]}), \
+             patch.object(Execution, "probe", side_effect=fail, autospec=True):
+            connector.execute({
+                "id": "cmd-probe-fault",
+                "action": "configure",
+                "payload": {"adapter": "codex", "profile": "fault", "cwd": str(self.workspace)},
+            })
+        faulted = connector.store.get("local_command", "cmd-probe-fault")["result"]
+        self.assertNotIn("error", faulted)
+        self.assertFalse(faulted["probe"]["available"])
+        self.assertEqual(faulted["probe"]["reason"], "transport_unavailable")
+        self.assertEqual(faulted["installation"]["id"], "codex-fault-host-local")
+        self.assertIn("codex-fault-host-local", connector.execution.installations)
+        self.assertIn("policy_digest", faulted["probe"])
+
+        def boom(execution, installation_id):
+            raise RuntimeError("probe boom")
+
+        with patch.object(LocalSetup, "discover",
+                          return_value={"inventory": [{"adapter": "codex", "binary": "/usr/bin/codex"}]}), \
+             patch.object(Execution, "probe", side_effect=boom, autospec=True):
+            connector.execute({
+                "id": "cmd-probe-boom",
+                "action": "configure",
+                "payload": {"adapter": "codex", "profile": "boom", "cwd": str(self.workspace)},
+            })
+        crashed = connector.store.get("local_command", "cmd-probe-boom")["result"]
+        self.assertNotIn("error", crashed)
+        self.assertFalse(crashed["probe"]["available"])
+        self.assertEqual(crashed["probe"]["reason"], "probe_failed")
+        self.assertNotIn("probe boom", json.dumps(crashed))
+        self.assertIn("codex-boom-host-local", connector.execution.installations)
+        self.assertEqual(self._legacy_row(_settings_blob(self.data / "connector.db")), original)
 
     def test_connector_probe_does_not_run_an_unknown_adapter(self):
         config = _managed(self.workspace, _qwen_and_codex(self.workspace))

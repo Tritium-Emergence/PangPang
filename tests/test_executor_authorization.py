@@ -522,11 +522,13 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(sorted(staged["staged"]["fields"]), ["env", "extra_argv"])
         self.assertNotIn("extra_argv", self.app.execution.installations["codex-local"])
         request_id = staged["staged"]["request_id"]
+        before_grant = dict(self.app.store.get("settings", "executor_grants")["grants"]["codex-local"])
         self.app.onboarding.approve(request_id, {})
         self.assertEqual(self.app.execution.installations["codex-local"]["extra_argv"], ["--strict-config"])
         grant = self.app.store.get("settings", "executor_grants")["grants"]["codex-local"]
-        self.assertEqual(grant["origin"], "operator")
-        self.assertEqual(grant["digest"], authorization_digest(self.app.config, "codex-local"))
+        self.assertEqual(grant, before_grant)
+        self.assertEqual(grant["origin"], "migration")
+        self.assertNotEqual(grant["digest"], authorization_digest(self.app.config, "codex-local"))
         with self.assertRaises(Fault):
             self.app.onboarding.approve(request_id, {})
         lowered = self.app.propose_executor("bot-main", self.work, {
@@ -565,7 +567,7 @@ class ToolTests(unittest.TestCase):
             self.app.propose_executor("bot-main", self.work, {
                 "installation_id": "missing", "priority": 1})
 
-    def test_local_profile_waits_for_approval_then_runs_without_asking(self):
+    def test_local_profile_waits_for_setup_approval_then_asks_on_the_first_run(self):
         before = set(self.app.execution.installations)
         with self.assertRaises(Fault) as ctx:
             self.app.propose_executor("bot-main", self.work, {
@@ -609,13 +611,11 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(created["profile"], "work")
         self.assertEqual(created["extra_env"]["OPENAI_BASE_URL"], endpoint)
         self.assertEqual(created["env"]["CODEX_HOME"], str(self.root / "profile"))
-        grant = self.app.store.get("settings", "executor_grants")["grants"][iid]
-        self.assertEqual(grant["origin"], "operator")
-        self.assertEqual(grant["digest"], self.app._authorization_digest(iid))
+        self.assertNotIn(iid, self.app.store.get("settings", "executor_grants")["grants"])
         self.app.probe(iid)
         submitted = self.app.submit_task("bot-main", self.work, {
             "prompt": "go", "installation_id": iid})
-        self.assertEqual(submitted["status"], "queued")
+        self.assertEqual(submitted["status"], "awaiting_approval")
         self.app.cancel(submitted["task_id"])
         again = self.app.propose_executor("bot-main", self.work, {
             "host_id": "local", "adapter": "codex", "profile": "work"})
@@ -653,12 +653,11 @@ class ToolTests(unittest.TestCase):
         self.assertNotIn("CANARY_PROXY_VALUE", json.dumps(row))
         self.assertEqual(row["priority"], 4)
         self.assertEqual(row["use_when"], "notes only")
-        grant = self.app.store.get("settings", "executor_grants")["grants"][row["id"]]
-        self.assertEqual(grant["digest"], self.app._authorization_digest(row["id"]))
+        self.assertNotIn(row["id"], self.app.store.get("settings", "executor_grants")["grants"])
         self.app.probe(row["id"])
         submitted = self.app.submit_task("bot-main", self.work, {
             "prompt": "go", "installation_id": row["id"]})
-        self.assertEqual(submitted["status"], "queued")
+        self.assertEqual(submitted["status"], "awaiting_approval")
         self.app.cancel(submitted["task_id"])
         bad = self.app.propose_executor("bot-main", self.work, {
             "host_id": "local", "adapter": "codex", "profile": "bad", "priority": 0})
@@ -868,6 +867,107 @@ class ConnectorProposalTests(unittest.TestCase):
                   if c["payload"].get("request_id") == again["staged"]["request_id"]][0]
         self.assertEqual(follow["payload"]["installation_id"], "codex-work-pc")
         self.assertEqual(follow["payload"]["profile"], "work")
+
+    def test_setup_report_does_not_write_a_run_grant(self):
+        pending = self.app.store.get("settings", "executor_grants")
+        self.assertIn("codex-work-pc", pending["pending_device"])
+        self.assertNotIn("codex-work-pc", pending["grants"])
+        staged = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "pc", "adapter": "codex", "profile": "notes", "cwd": "/work"})
+        self.app.onboarding.approve(staged["staged"]["request_id"], {"endpoint": ""})
+        command = self.app.store.find("command", action="configure")[0]
+        self.app.onboarding.report(command, {
+            "installation": {"id": "codex-notes-pc", "host_id": "pc", "adapter": "codex",
+                             "cwd": "/work", "resource_keys": [], "max_concurrency": 1},
+            "probe": {"available": True, "supervision": "windows-job-object",
+                      "authorization_digest": "device-digest"},
+        })
+        grants = self.app.store.get("settings", "executor_grants")
+        self.assertNotIn("codex-notes-pc", grants["grants"])
+        self.assertIn("codex-work-pc", grants["pending_device"])
+        migrated = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-work-pc", "cwd": "/work/src"})
+        self.app.onboarding.approve(migrated["staged"]["request_id"], {})
+        follow = [c for c in self.app.store.find("command", action="configure")
+                  if c["payload"].get("request_id") == migrated["staged"]["request_id"]][0]
+        self.app.onboarding.report(follow, {
+            "installation": {"id": "codex-work-pc", "host_id": "pc", "adapter": "codex",
+                             "cwd": "/work/src", "resource_keys": [], "max_concurrency": 1},
+            "probe": {"available": True, "supervision": "windows-job-object",
+                      "policy_digest": "migrated-digest"},
+        })
+        stored = self.app.store.get("settings", "executor_grants")
+        self.assertNotIn("codex-work-pc", stored["grants"])
+        self.assertNotIn("codex-work-pc", stored["pending_device"])
+        self.assertNotIn("codex-notes-pc", stored["grants"])
+        self.assertEqual(self.app.store.get("setup_request", migrated["staged"]["request_id"])["status"], "done")
+        self.assertFalse(self.app._grant_matches(self.app.execution.installations["codex-work-pc"]))
+        self.app.broker._last_seen["pc"] = time.time()
+        submitted = self.app.submit_task("bot-main", self.work, {
+            "prompt": "go", "installation_id": "codex-work-pc"})
+        self.assertEqual(submitted["status"], "awaiting_approval")
+        task = self.app.store.get("task", submitted["task_id"])
+        self.assertEqual(task["installation_authorization"], "required")
+        self.assertIn("run_preview", task)
+        self.app.cancel(submitted["task_id"])
+        after = self.app.store.get("settings", "executor_grants")
+        self.assertNotIn("codex-work-pc", after["grants"])
+        self.assertNotIn("codex-work-pc", after["pending_device"])
+
+    def test_invalid_adapter_advice_is_the_setup_error(self):
+        advice = ("installation inst-x adapter retired-adapter is not in the built-in catalog "
+                  "or /data/adapters.json")
+        request_id = "setup-adapter-advice"
+        self.app.store.put("setup_request", {
+            "id": request_id, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-advice", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": request_id},
+        }, {"error": "invalid_adapter", "advice": " \n" + advice + " \n"})
+        self.assertEqual(self.app.store.get("setup_request", request_id)["status"], "failed")
+        noted = [m["content"] for m in self.app.store.find("message", work_id=self.work)
+                 if m.get("kind") == "setup_result"]
+        self.assertEqual(noted[-1]["error"], "invalid_adapter: " + advice)
+
+        blank = "setup-blank-advice"
+        self.app.store.put("setup_request", {
+            "id": blank, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-blank", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": blank},
+        }, {"error": "invalid_adapter", "advice": "   "})
+        self.assertEqual(self.app.store.get("setup_request", blank)["status"], "failed")
+
+        other = "setup-other-error"
+        self.app.store.put("setup_request", {
+            "id": other, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-other", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": other},
+        }, {"error": "cli_not_installed", "advice": "ignore this advice " + ("x" * 50)})
+        long_id = "setup-long-advice"
+        self.app.store.put("setup_request", {
+            "id": long_id, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-long", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": long_id},
+        }, {"error": "invalid_adapter", "advice": "a" * 600})
+        contents = [m["content"] for m in self.app.store.find("message", work_id=self.work)
+                    if m.get("kind") == "setup_result"]
+        by_action = {m["error"]: m for m in contents if m.get("error")}
+        self.assertEqual(by_action["invalid_adapter: " + advice]["error"], "invalid_adapter: " + advice)
+        self.assertIn("device_setup_failed", by_action)
+        self.assertEqual(by_action["invalid_adapter: " + ("a" * 500)]["error"], "invalid_adapter: " + ("a" * 500))
+        self.assertFalse(any("ignore this advice" in (m.get("error") or "") for m in contents))
+        self.assertNotIn("codex-notes-pc", self.app.execution.installations)
 
 
 class ManifestTests(unittest.TestCase):

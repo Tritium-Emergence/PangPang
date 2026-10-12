@@ -650,14 +650,38 @@ def unknown_adapter_advice(data, installation_id, adapter):
     return " ".join(str(text).split())
 
 
+def execution_for_stored_candidate(candidate, stored_config, data):
+    """Validate a config write against the document already stored.
+
+    Unknown-adapter rows identical to that document stay in the file and out of
+    routing. A new or different unknown-adapter row is rejected with advice.
+    Direct Execution() still rejects every unknown adapter.
+    """
+    installations = candidate.get("installations") if isinstance(candidate, dict) else None
+    if not isinstance(installations, list):
+        return Execution(candidate, data)
+    unknown = [row for row in installations
+               if isinstance(row, dict) and row.get("adapter") not in ADAPTER_CATALOG]
+    if not unknown:
+        return Execution(candidate, data)
+    stored_rows = stored_config.get("installations") if isinstance(stored_config, dict) else None
+    stored = {row.get("id"): row for row in (stored_rows or []) if isinstance(row, dict)}
+    for row in unknown:
+        if stored.get(row.get("id")) != row:
+            raise Fault("invalid_adapter", 400,
+                        advice=unknown_adapter_advice(data, row.get("id"), row.get("adapter")))
+    return Execution(candidate, data, tolerate_unknown_adapters=True)
+
+
 class Execution:
     def __init__(self, config, data, *, tolerate_unknown_adapters=False):
         """Validate a config.
 
         ``tolerate_unknown_adapters`` is for a stored config loaded at process
-        start. An adapter outside the built-in catalog and adapters.json stays
-        in the document, is marked unavailable, and is left out of routing.
-        Write paths leave the flag false and still raise ``invalid_adapter``.
+        start, and for a write that keeps unknown-adapter rows identical to the
+        stored document. An adapter outside the built-in catalog and adapters.json
+        stays in the document, is marked unavailable, and is left out of routing.
+        A direct Execution() leaves the flag false and still raises ``invalid_adapter``.
         """
         self.config, self.data = config, Path(data)
         self.broker = None

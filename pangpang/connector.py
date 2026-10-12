@@ -180,6 +180,9 @@ class Connector:
         self.credential_env = config.get("credential_env", "PANGPANG_DEVICE_TOKEN")
         blocked_env = with_legacy_names({self.credential_env, "PANGPANG_TOKEN"})
         for installation in self.execution.installations.values():
+            # Not launched, and a later save must not rewrite the stored row.
+            if installation.get("id") in self.execution.unknown_adapters:
+                continue
             installation["env_allowlist"] = [k for k in installation.get("env_allowlist", [])
                                             if k not in blocked_env]
 
@@ -489,6 +492,12 @@ class Connector:
                 raise Fault("device_action_rejected")
         except Exception as error:
             result = {"error": error.code if isinstance(error, Fault) else "local_operation_failed"}
+            if (action in {"discover", "configure", "credential_install", "credential_delete"}
+                    and isinstance(error, Fault) and error.code == "invalid_adapter"
+                    and isinstance(error.advice, str)):
+                folded = " ".join(error.advice.split())[:500]
+                if folded:
+                    result["advice"] = folded
         record.update(status="report", result=result)
         self.store.put("local_command", record)
 

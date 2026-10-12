@@ -1,9 +1,9 @@
 """Fixed device adapters and locally enforced workspace policy."""
 import copy
 import shutil
-from .execution import (Execution, ADAPTER_CATALOG, binary_matches_pin, endpoint_extra_env,
-                       fetch_pinned_pi, installation_id, secret_env_name,
-                       validate_extra_argv, validate_profile_env)
+from .execution import (ADAPTER_CATALOG, binary_matches_pin, endpoint_extra_env,
+                       execution_for_stored_candidate, fetch_pinned_pi, installation_id,
+                       secret_env_name, validate_extra_argv, validate_profile_env)
 from .runner import checked, probe
 from .store import Fault, digest
 
@@ -43,16 +43,18 @@ class LocalSetup:
     def save(self, candidate):
         """Durable write first, then publish (G): validate by building the
         Execution, CAS against the revision this process loaded, and only then
-        swap the live config. A failed write leaves memory untouched."""
-        execution = Execution(candidate, self.c.data)
+        swap the live config. A failed write leaves memory untouched.
+        An unknown-adapter row identical to the stored document does not block
+        the write. A new or edited one still raises invalid_adapter."""
+        execution = execution_for_stored_candidate(candidate, self.c.config, self.c.data)
         row = self.c.store.put("settings", {"id": "managed", "config": candidate},
                                expected=self.c.config_revision)
         self.c.config, self.c.execution, self.c.config_revision = candidate, execution, row["revision"]
 
-    def info(self, identity):
+    def info(self, identity, *, probe_result=None):
         from .connector import authorization_digest, execution_manifest, policy_digest
         e = self.c.execution.installations[identity]
-        p = self.c.execution.probe(identity)
+        p = self.c.execution.probe(identity) if probe_result is None else dict(probe_result)
         p["policy_digest"] = policy_digest(self.c.config, identity)
         p["authorization_digest"] = authorization_digest(self.c.config, identity)
         p["manifest"] = execution_manifest(self.c.config, identity)
@@ -115,7 +117,12 @@ class LocalSetup:
         candidate = copy.deepcopy(self.c.config)
         candidate["installations"] = [x for x in candidate["installations"] if x["id"] != identity] + [e]
         self.save(candidate)
-        return self.info(identity)
+        try:
+            probed = self.c.execution.probe(identity)
+        except Exception as error:
+            reason = error.code if isinstance(error, Fault) else "probe_failed"
+            probed = {"available": False, "reason": reason}
+        return self.info(identity, probe_result=probed)
 
     def credential(self, body, delete=False):
         self.idle()

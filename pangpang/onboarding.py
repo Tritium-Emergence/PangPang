@@ -14,7 +14,10 @@ from .store import Fault, digest, uid, encode
 from .execution import (ADAPTER_CATALOG, endpoint_extra_env, installation_id,
                        validate_extra_argv, validate_profile_env, validate_secret_refs,
                        validate_staged_executor)
+from .logs import get_logger
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
+
+log = get_logger("onboarding")
 
 
 def apply_model_concurrency(candidate, value):
@@ -421,13 +424,60 @@ class Onboarding:
             if creating and iid in self.s.execution.installations:
                 raise Fault("installation_already_exists", 409)
             self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
-            self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
             current_req["status"] = "done"
             self.store.put("setup_request", current_req)
-        return {"accepted": True, "installation_id": iid}
+            finished = {"id": current_req["id"], "bot_id": current_req.get("bot_id"),
+                        "work_id": current_req.get("work_id"), "host_id": current_req.get("host_id"),
+                        "action": (current_req.get("proposal") or {}).get("action")}
+        result = {"accepted": True, "installation_id": iid}
+        # The installation is already committed. A probe failure stays a probe result.
+        probe = self._probe_approved_executor(iid)
+        if probe is not None:
+            result["probe"] = probe
+            self._publish_setup_probe(finished, iid, probe)
+        return result
+
+    def _probe_approved_executor(self, installation_id):
+        """The operator probe, on the host that owns this installation.
+
+        Unknown-adapter rows are not probed. A failure is returned as a probe
+        result and does not undo the approval that just committed.
+        """
+        if installation_id in self.s.execution.unknown_adapters:
+            return None
+        inst = self.s.execution.installations.get(installation_id)
+        if not inst or inst.get("adapter") not in ADAPTER_CATALOG:
+            return None
+        try:
+            stored = self.s.probe(installation_id)
+        except Fault as error:
+            return {"available": False, "reason": error.code, "probed": True}
+        except Exception:
+            log.exception("executor probe failed after approval installation=%s", installation_id)
+            return {"available": False, "reason": "probe_failed", "probed": True}
+        view = {"available": stored.get("available") is True, "probed": True}
+        if stored.get("reason"):
+            view["reason"] = stored.get("reason")
+        if stored.get("supervision"):
+            view["supervision"] = stored.get("supervision")
+        return view
+
+    def _publish_setup_probe(self, req, installation_id, probe):
+        """Tell the assistant the approval finished and what the probe found."""
+        bot_id, work_id = req.get("bot_id"), req.get("work_id")
+        if not bot_id or not work_id or not probe:
+            return
+        try:
+            work = self.store.get("work", work_id)
+        except Fault:
+            return
+        safe = {"action": req.get("action") or "executor_config", "host_id": req.get("host_id"),
+                "accepted": True, "installation_id": installation_id, "probe": probe}
+        root = self.s._new_root("operator", "setup:" + str(req.get("id") or installation_id))["id"]
+        self.s.new_turn(bot_id, work, safe, "setup_result", "device", root_request_id=root)
 
     def _approve_local_executor(self, identity, body=None):
-        """Operator confirms a local execution change, then the always-grant matches it."""
+        """Operator confirms a local execution change. Run authorization is unchanged."""
         body = body or {}
         req = self.checked_request(identity, "needs_approval")
         proposal = req.get("proposal") or {}
@@ -586,7 +636,9 @@ class Onboarding:
                 req = self.store.get("setup_request", payload["request_id"])
             safe = {"action": cmd["action"], "host_id": cmd["host_id"]}
             if result.get("error"):
-                safe["error"] = "device_setup_failed"
+                advice = result.get("advice") if result.get("error") == "invalid_adapter" else None
+                folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
+                safe["error"] = "invalid_adapter: " + folded if folded else "device_setup_failed"
             elif cmd["action"] == "discover":
                 items = [{k: str(x[k])[:500] for k in ("adapter", "binary", "version") if k in x}
                          for x in result.get("inventory", [])[:20] if isinstance(x, dict)]
@@ -667,9 +719,14 @@ class Onboarding:
                 if manifest:
                     probe["manifest"] = manifest
                 self.store.put("probe", dict(probe, id=item["id"], at=time.time()))
-                reported = probe.get("authorization_digest") or probe.get("policy_digest")
-                if cmd["action"] == "configure" and isinstance(reported, str) and reported:
-                    self.s._put_executor_grant(item["id"], reported, "operator")
+                if isinstance(result.get("probe"), dict):
+                    probe_view = {"available": probe.get("available") is True, "probed": True}
+                    reason = probe_src.get("reason")
+                    if isinstance(reason, str) and reason:
+                        probe_view["reason"] = reason
+                    safe["probe"] = probe_view
+                if cmd["action"] == "configure":
+                    self.s._drop_pending_device(item["id"])
                 else:
                     self.s._persist_pending_device_grant(item["id"])
                 safe["installation"] = item
