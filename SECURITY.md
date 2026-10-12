@@ -157,7 +157,7 @@ Connector receipt 说明“受信设备如此报告”，不是独立证明设�
 以下代码形态容易被误读为后门，逐条说明：
 
 - **SSH host rows**：`transport: ssh` still loads so an old config can be listed. There is no `BOOTSTRAP` constant, no `remote()`, and no PowerShell `-EncodedCommand` channel. A new SSH launch is refused with `ssh_executor_retired` and is not rerouted to local or Connector. An in-flight SSH attempt becomes `unknown` and needs operator resolution.
-- **codex `sandbox=danger-full-access` + `approvalPolicy=never`**（`runner.py`）：CLI 自带的沙箱与人工审批被显式关闭，因为监管在外部——runner 进程树终止 + deployment level 决定准入。安全边界是 runner 与 deployment level，不是 CLI 弹窗；见上文 “Executor supervision scope”。
+- **codex 默认 argv**（catalog 为 `["exec", "-"]`，`runner.py` 把它改写成 `app-server`）：没有审批 flag 时 `thread/start` 的 `approvalPolicy` 是 `never`。默认 argv **不会**带上 `sandbox=danger-full-access`；只有存储的 argv 含 `--dangerously-bypass-approvals-and-sandbox` 且没有另行指定 `--sandbox` 时才会发送该 sandbox 值。安全边界是 runner 与 deployment level，不是 CLI 弹窗；见上文 “Executor supervision scope”。
 - **约 380KB 的 `pangpang/web/app.js`**：由 `web-src/` 构建的压缩 React bundle（构建指引见 README）；审计请读 `web-src/` 源码。
 - **本机 CLI adapter 名**：安装模板的内部别名（operator 可编辑），不对应任何隐藏端点。
 - **常驻 runner 模板**：每次执行在自己的 `exec-<32hex>` 目录写入 `runner.py`，随该目录生命周期存在；不存在跨执行共享的常驻进程模板。

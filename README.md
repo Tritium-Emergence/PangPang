@@ -203,7 +203,7 @@ PangPang operates real files on real machines. So we care less about demonstrati
 - An unverified device report never becomes a final execution fact directly.
 - File-path restrictions are **not an OS sandbox**. At L0 the executor runs as the same OS account as the control plane and can read the Vault directly. That residual risk is not an isolation acceptance.
 - `web_search` sends the query off the machine by default (Bing and DuckDuckGo when no key is set; Tavily when `TAVILY_API_KEY` is set). `PANGPANG_SEARCH_PROVIDER=off` is what turns that off.
-- A sentence in chat, including a person's statement that something "finished" or that an unknown process "has stopped", is not kernel evidence and does not close an unknown attempt. Unknown closes only on a confirmed terminal receipt or a recorded operator resolution. There is no automatic business-acceptance engine.
+- A sentence in chat, including a person's statement that something "finished" or that an unknown process "has stopped", is not kernel evidence and does not close an unknown attempt. Unknown closes only on a confirmed terminal receipt or a recorded manual resolve (`confirmed_never_started` or `confirmed_stopped`, with operator evidence). There is no automatic business-acceptance engine.
 - Cross-device or remote deployments must use trusted HTTPS and restrict execution per the runbook. Two packages that print the same version are not the same rollback artifact; compare the baked commit and the release asset SHA256.
 
 **Release and acceptance status (0.9.0 RC):**
@@ -277,7 +277,7 @@ A VPS is somebody else's computer. You rent it month after month, your data sits
 
 Your own hardware tells a different story. The Mac mini under your desk, the retired gaming PC, the old laptop with the cracked screen — modern consumer machines (Apple Silicon's unified memory especially) are genuinely good at running local models and real executors. They idle most of the day, they are already paid for, and they are physically yours.
 
-PangPang turns that idle hardware into a workforce: one machine supervises, the others execute, and nothing leaves your house unless you say so. No per-agent monthly rent, no third party holding your files, nobody throttling your ambition.
+PangPang turns that idle hardware into a workforce: one machine supervises, the others execute, and your files stay on machines you control. Web search sends the query off the machine by default; `PANGPANG_SEARCH_PROVIDER=off` turns that off. No per-agent monthly rent, no third party holding your files, nobody throttling your ambition.
 
 **Make your Mac mini great again.**
 

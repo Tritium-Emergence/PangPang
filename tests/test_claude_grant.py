@@ -24,7 +24,7 @@ from test_bot_runtime import config
 CLAUDE_CODE_ARGV = [
     "-p", "--permission-mode", "acceptEdits", "--allowed-tools", "Read", "Write",
 ]
-CLAUDE_CODE_USE_WHEN = "改代码、编辑本地文件。不擅长取金融数据或画图。"
+CLAUDE_CODE_USE_WHEN = "Edit code and local files. Not for financial data or image generation."
 
 STUB = r"""
 import json, pathlib, re, sys

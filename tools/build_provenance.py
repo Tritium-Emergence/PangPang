@@ -5,11 +5,14 @@ git provenance is unavailable, the clean-tree check itself fails to run, or
 the source tree carries modified tracked or untracked files; developer
 builds fall back to the explicit string "unknown". Git is always queried at
 the pinned source root, never at the caller's working directory, and strict
-builds additionally require that root to be the repository root itself. The
-runtime never shells out to git — provenance is baked in at build time only.
+builds additionally require that root to be the repository root itself.
+A version tag pointing at HEAD (optional leading ``v``) must match
+``pangpang.__version__``. The runtime never shells out to git — provenance
+is baked in at build time only.
 """
 import datetime
 import os
+import re
 import subprocess
 
 SOURCE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +35,45 @@ def _git_required(root, *args):
                          % " ".join(args))
 
 
+def _package_version(root):
+    """``pangpang.__version__`` from source, or None when that file is absent."""
+    path = os.path.join(root, "pangpang", "__init__.py")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = re.search(r"(?m)^__version__\s*=\s*['\"]([^'\"]+)['\"]\s*$", text)
+    return match.group(1) if match else None
+
+
+# Optional leading v, then a public version: N.N[.N]*[{a|b|rc}N][.postN][.devN].
+_VERSION_TAG = re.compile(
+    r"^v?(?P<version>\d+\.\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?)$")
+
+
+def _version_tag_name(tag):
+    match = _VERSION_TAG.fullmatch(tag.strip())
+    return match.group("version") if match else None
+
+
+def _refuse_mismatched_version_tags(root):
+    """Strict builds: every version tag at HEAD matches the package version."""
+    declared = _package_version(root)
+    mismatches = []
+    for tag in _git_required(root, "tag", "--points-at", "HEAD").splitlines():
+        parsed = _version_tag_name(tag)
+        if parsed is None:
+            continue
+        if parsed != declared:
+            mismatches.append("%s (%s)" % (tag.strip(), parsed))
+    if mismatches:
+        raise SystemExit(
+            "release builds require every version tag at HEAD to match the package "
+            "version %s; mismatched: %s"
+            % (declared if declared is not None else "unreadable", ", ".join(mismatches)))
+
+
 def collect_provenance(require=None, root=None, now=None):
     if require is None:
         require = os.environ.get("PANGPANG_REQUIRE_BUILD_PROVENANCE") == "1"
@@ -51,6 +93,7 @@ def collect_provenance(require=None, root=None, now=None):
         if _git_required(root, "status", "--porcelain", "--untracked-files=all"):
             raise SystemExit("release builds require a clean tracked tree without untracked "
                              "sources; git status --porcelain -uall is not empty")
+        _refuse_mismatched_version_tags(root)
     # UTC fields from an injectable clock. time.strftime is locale-sensitive and
     # a live wall clock makes equality checks flake across a second boundary.
     if now is None:

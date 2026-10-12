@@ -631,6 +631,12 @@ class CapabilityTests(ServiceCase):
                              (True, False, False))
             text = "\n".join(self.app.capability_warnings())
             self.assertIn("mode=enforce without TYPESAFE_API_KEY", text)
+            self.assertIn("configured local model", text)
+            self.assertNotIn("every message starts a fresh Work", text)
+            self.app.semantic_gate.continuation_routing = False
+            quiet = "\n".join(self.app.capability_warnings())
+            self.assertNotIn("configured local model", quiet)
+            self.assertIn("mode=enforce without TYPESAFE_API_KEY", quiet)
             env["TYPESAFE_API_KEY"] = "k"
             self.assertNotIn("mode=enforce without TYPESAFE_API_KEY",
                              "\n".join(self.app.capability_warnings()))

@@ -428,12 +428,12 @@ ADAPTER_CATALOG = {
     # (cancel + redispatch). A tier number without a registered protocol
     # does not count.
     "claude-code": {"binary": "claude", "argv": ["-p", "--permission-mode", "acceptEdits", "--allowed-tools", "Read", "Write"], "concurrency": 1, "priority": 20,
-                    "use_when": "改代码、编辑本地文件。不擅长取金融数据或画图。",
+                    "use_when": "Edit code and local files. Not for financial data or image generation.",
                     "interjection_tier": 1, "stdin_protocol": "claude-stream-json"},
     # Same declaration shape as claude-code. argv stays the stored `exec -`
     # invocation; the runner switches that to app-server when this protocol is set.
     "codex": {"binary": "codex", "argv": ["exec", "-"], "concurrency": 1, "priority": 30,
-              "use_when": "跑代码/命令，以及用内置 image_gen 出图（画插画/海报）。",
+              "use_when": "Run code and commands, and generate images with the built-in image_gen tool.",
               "interjection_tier": 1, "stdin_protocol": "codex-app-server"},
     # Tier 2, not tier 1. Gemini CLI 0.62.0 has no input-format and no
     # mid-turn stdin inject. Headless is a non-TTY stdin prompt.
@@ -443,7 +443,7 @@ ADAPTER_CATALOG = {
     # --approval-mode. `--resume` and `--session-id` together are rejected
     # by the CLI, so the runner never passes both.
     "gemini": {"binary": "gemini", "argv": ["--skip-trust"], "concurrency": 1, "priority": 35,
-               "use_when": "通用编码与改文件。补一句不能插进正在跑的回合，会打断这一轮再在同一会话里继续。工具确认不会自动通过。",
+               "use_when": "General coding and file edits. A follow-up cannot be inserted into a running turn; that turn is interrupted and then continued in the same session. Tool confirmations are not approved automatically.",
                "interjection_tier": 2, "resume_protocol": "cli-session-resume",
                "secret_env": "GEMINI_API_KEY"},
     # Bundled fallback. Priority 40 is below every user-installed CLI above.
@@ -452,7 +452,7 @@ ADAPTER_CATALOG = {
                "--print", "--no-session", "--tools", "read,write,edit,grep,find,ls",
                "--offline", "--no-extensions", "--no-skills", "-e", str(PI_GUARD_PATH)],
            "concurrency": 1, "priority": 40,
-           "use_when": "内置兜底：没有更优先的已安装 CLI 时，在工作目录内读写文件。不能跑命令。",
+           "use_when": "Built-in fallback when no higher-priority installed CLI is present: read and write files in the working directory. Cannot run commands.",
            "pinned": True, "sha256": _pi_binary_sha(), "guard_sha256": PI_GUARD_SHA256,
            "extra_env": dict(_PI_EXTRA_ENV), "secret_env": "OPENAI_API_KEY", "models_json": True},
     # Session channel, not tier 1 or tier 2. No stdin inject, no --resume,
@@ -461,7 +461,7 @@ ADAPTER_CATALOG = {
     # The runner speaks ACP on stdin because session_protocol is registered,
     # not because the adapter name is special.
     "acp": {"binary": "xpp-acp", "argv": [], "concurrency": 1, "priority": 50,
-            "use_when": "ACP 会话：把一句话交给会说 ACP 的执行器，并拿回这一轮的原文。工具许可会发到对话里等你明确同意或拒绝，不会自动同意；提问和文件请求也不会自动答应。不能往正在跑的回合里插话。",
+            "use_when": "ACP session: send one sentence to an executor that speaks ACP and return that turn's text. Tool permission is asked in chat and is not approved automatically; questions and file requests are not accepted automatically. A line cannot be inserted into a running turn.",
             "session_protocol": ACP, "permission_bridge": runner.PERMISSION_BRIDGE_CHAT},
 }
 
