@@ -17,9 +17,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import runner
 from .adapters_file import merge as merge_custom_adapters
 from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_matches_pin,
-                       fetch_pinned_pi, materialize_executor_env,
-                       permission_bridge_for, pi_models_api, secret_env_name, task_interjection_tier,
-                       validate_extra_argv, write_pi_provider_config, _PI_BASE_URL_ENV)
+                       executor_parameter_schema, fetch_pinned_pi, installation_id,
+                       materialize_executor_env, permission_bridge_for, pi_models_api,
+                       secret_env_name, task_interjection_tier, validate_extra_argv,
+                       validate_staged_executor, write_pi_provider_config,
+                       _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
 from .store import Fault, Store, digest, encode, uid, os_family
 from .vault import secure_directory
@@ -506,6 +508,7 @@ class Service:
         self._backfill_inbox_metadata()
         self._backfill_workspace()
         self._backfill_installation_workspace()
+        self._backfill_executor_authorizations()
         # one-way door: stamp the DB as v2 so a rolled-back old binary
         # (which requires version==1) refuses to run on the migrated state machine.
         if self.store.schema_version() < 2:
@@ -4232,6 +4235,8 @@ class Service:
                                  + encode(required_outputs)
                                  + ". Before finishing, verify each of these files is written under the output directory $XPP_OUTPUT_DIR and is non-empty; missing any one fails delivery for this task.")
         host = self.execution.hosts[e["host_id"]]
+        self._persist_pending_device_grant(e["id"])
+        installation_authorized = self._grant_matches(e)
         # snapshot the exact cwd + canonical workspace_key + access_mode
         # on the task so a later installation.cwd change cannot cause a claim/execute
         # mismatch (execution.spec launches task['cwd'], not the live install).
@@ -4262,7 +4267,10 @@ class Service:
                 # prove the wrong timeout). Frozen with the rest of the spec.
                 "timeout_s": int(e.get("timeout_s", 3600)),
                 "access_mode": "verified_read" if verified_read else "write",
-                "resource_keys": e.get("resource_keys", [])}
+                "resource_keys": e.get("resource_keys", []),
+                "authorization_digest": self._captured_authorization_digest(e),
+                # No device knowledge base is selected or injected.
+                "device_kb": None}
         # Freeze the supervision the route admitted: the runner refuses a weaker tier
         # (no silent cgroup -> process-group downgrade) and receipts are judged
         # against it rather than against a later policy.
@@ -4280,8 +4288,12 @@ class Service:
         # confidence, not attribution doubt) and must not gate a user's own
         # follow-up task behind approval. grant_write=False still forces approval.
         weak_route = route_quality == "fallback"
-        needs_approval = ((not work["grant_write"] or weak_route)
-                          and not (e.get("risk") == "read" and e.get("permission_verified") is True))
+        verified_read = e.get("risk") == "read" and e.get("permission_verified") is True
+        if not installation_authorized:
+            task["installation_authorization"] = "required"
+            task["run_preview"] = self._run_preview(e)
+        needs_approval = ((not installation_authorized)
+                          or ((not work["grant_write"] or weak_route) and not verified_read))
         task["route_quality"] = route_quality or "deterministic"
         task["status"] = "awaiting_approval" if needs_approval else "queued"
         # queue_deadline bounds EXECUTOR queue wait, not operator-approval wait: only
@@ -4330,10 +4342,22 @@ class Service:
                 return
 
     def approve(self, task_id, body):
+        body = body or {}
+        if "always" in body and body.get("always") is not True and body.get("always") is not False:
+            raise Fault("invalid_task_approval", 400)
         with self.store.atomic():
             task = self.store.get("task", task_id)
             if task["status"] != "awaiting_approval" or body.get("spec_digest") != task["spec_digest"]:
                 raise Fault("approval_scope_changed")
+            if body.get("always") is True:
+                inst = self.execution.installations.get(task.get("installation_id"))
+                live = self._captured_authorization_digest(inst) if inst else None
+                frozen = task.get("authorization_digest")
+                if not frozen or frozen != live or not inst:
+                    raise Fault("approval_scope_changed")
+                if inst["id"] in self.execution.unknown_adapters:
+                    raise Fault("unknown_adapter")
+                self._put_executor_grant(inst["id"], live, "operator")
             # Start the executor queue clock at approval: time spent awaiting operator
             # approval is not executor queue time, so it must not count toward
             # queue_timeout (a task approved after the timeout window would otherwise
@@ -4353,6 +4377,7 @@ class Service:
             except Fault as error:
                 result = {"available": False, "reason": error.code}
         stored = self.store.put("probe", dict(result, id=installation_id, at=time.time()))
+        self._persist_pending_device_grant(installation_id)
         log.info("probe id=%s available=%s reason=%s", installation_id,
                  stored.get("available"), stored.get("reason"))
         return stored
@@ -4572,6 +4597,338 @@ class Service:
             changed = False
         if changed:
             self.commit_managed_config(candidate)
+
+    # Standing "always" grants live beside managed config, like a Routine's
+    # approved_digest: one settings row, keyed by installation id. The managed
+    # installation document is not rewritten. Schema version stays 2.
+    _EXECUTOR_GRANTS = "executor_grants"
+    _PI_OVERLAY_KEYS = ("extra_env", "secret_refs", "env_allowlist")
+    LIST_EXECUTORS_LIMIT = 32
+
+    def _backfill_executor_authorizations(self):
+        """One-time grant for installations that already existed.
+
+        Known rows are authorized always at the digest captured now. A connector
+        row uses the device-reported digest when the probe already has one, and
+        otherwise waits for that first report. Unknown adapters are skipped.
+        A later start does not refresh digests and does not grant rows added
+        after this marker. Existing tasks, routines and consent are not written.
+        """
+        try:
+            row = self.store.get("settings", self._EXECUTOR_GRANTS)
+        except Fault as error:
+            if error.status != 404:
+                raise
+            row = None
+        if row and row.get("migrated") is True:
+            return
+        grants = {}
+        pending = []
+        now = time.time()
+        for inst in self.config.get("installations", []):
+            iid = inst.get("id")
+            if not isinstance(iid, str) or not iid:
+                continue
+            if iid in self.execution.unknown_adapters or inst.get("adapter") not in ADAPTER_CATALOG:
+                continue
+            host = self.execution.hosts.get(inst.get("host_id"), {})
+            if host.get("transport") == "connector":
+                reported = self._device_reported_digest(iid)
+                if reported:
+                    grants[iid] = {"digest": reported, "granted_at": now, "origin": "migration"}
+                else:
+                    pending.append(iid)
+                continue
+            grants[iid] = {"digest": self._authorization_digest(iid), "granted_at": now,
+                           "origin": "migration"}
+        self.store.put("settings", {"id": self._EXECUTOR_GRANTS, "migrated": True,
+                                    "grants": grants, "pending_device": pending})
+
+    def _executor_grants_row(self):
+        try:
+            return self.store.get("settings", self._EXECUTOR_GRANTS)
+        except Fault as error:
+            if error.status != 404:
+                raise
+            return {"id": self._EXECUTOR_GRANTS, "migrated": False, "grants": {}, "pending_device": []}
+
+    def _executor_grant(self, installation_id):
+        return (self._executor_grants_row().get("grants") or {}).get(installation_id)
+
+    def _put_executor_grant(self, installation_id, digest_value, origin):
+        if not isinstance(digest_value, str) or not digest_value:
+            return None
+        if installation_id in self.execution.unknown_adapters:
+            return None
+        with self.store.atomic():
+            row = self._executor_grants_row()
+            grants = dict(row.get("grants") or {})
+            grants[installation_id] = {"digest": digest_value, "granted_at": time.time(), "origin": origin}
+            pending = [x for x in (row.get("pending_device") or []) if x != installation_id]
+            return self.store.put("settings", {"id": self._EXECUTOR_GRANTS, "migrated": True,
+                                               "grants": grants, "pending_device": pending})
+
+    def _device_reported_digest(self, installation_id):
+        try:
+            probe = self.store.get("probe", installation_id)
+        except Fault:
+            return None
+        reported = probe.get("authorization_digest") or probe.get("policy_digest")
+        return reported if isinstance(reported, str) and reported else None
+
+    def _persist_pending_device_grant(self, installation_id):
+        """Capture the first device digest for a connector row that existed at migration."""
+        row = self._executor_grants_row()
+        if installation_id not in (row.get("pending_device") or []):
+            return None
+        if (row.get("grants") or {}).get(installation_id):
+            return None
+        reported = self._device_reported_digest(installation_id)
+        if not reported:
+            return None
+        return self._put_executor_grant(installation_id, reported, "migration")
+
+    def _stored_managed_config(self):
+        try:
+            return self.store.get("settings", "managed")["config"]
+        except Fault:
+            return None
+
+    def _installations_diverge(self, live, stored):
+        if not self._profile_derived_pi(live):
+            return live != stored
+        keys = self._PI_OVERLAY_KEYS
+        return ({k: v for k, v in live.items() if k not in keys}
+                != {k: v for k, v in stored.items() if k not in keys})
+
+    def _config_for_digest(self):
+        """Operator config. The pi launch overlay is not an operator edit.
+
+        spec() reads the live installation, including the profile binding written
+        at launch. That binding is compared away so a launch does not invalidate
+        the grant. Any other live difference (argv, cwd, env, host consent) is
+        the config that will actually run, and is hashed as-is.
+        """
+        stored = self._stored_managed_config()
+        if not isinstance(stored, dict):
+            return self.config
+        if stored.get("hosts") != self.config.get("hosts"):
+            return self.config
+        if stored.get("resources") != self.config.get("resources"):
+            return self.config
+        live_rows = {i.get("id"): i for i in self.config.get("installations", []) if isinstance(i, dict)}
+        stored_rows = {i.get("id"): i for i in stored.get("installations", []) if isinstance(i, dict)}
+        if set(live_rows) != set(stored_rows):
+            return self.config
+        for iid, inst in live_rows.items():
+            if self._installations_diverge(inst, stored_rows[iid]):
+                return self.config
+        return stored
+
+    def _authorization_digest(self, installation_id, config=None):
+        """Authorization hash. Profile-derived pi also covers the credential identity
+        the next launch will bind. The launch overlay itself stays out of the hash,
+        so binding at start does not ask again."""
+        from .connector import authorization_digest
+        explicit = config is not None
+        config = config if explicit else self._config_for_digest()
+        base = authorization_digest(config, installation_id)
+        inst = next((i for i in config.get("installations", [])
+                     if isinstance(i, dict) and i.get("id") == installation_id), None)
+        if not inst or not self._profile_derived_pi(inst):
+            return base
+        profile = global_profile(config if explicit else self.config)
+        ref = profile.get("credential_ref")
+        env_name = profile.get("credential_env")
+        binding = {
+            "credential_ref": ref if isinstance(ref, str) else "",
+            "credential_env": env_name if isinstance(env_name, str) else "",
+        }
+        return digest({"authorization": base, "pi_binding": binding})
+
+    def _captured_authorization_digest(self, inst):
+        host = self.execution.hosts.get(inst.get("host_id"), {})
+        if host.get("transport") == "connector":
+            return self._device_reported_digest(inst["id"])
+        if inst["id"] not in {i.get("id") for i in self._config_for_digest().get("installations", [])}:
+            return None
+        return self._authorization_digest(inst["id"])
+
+    def _grant_matches(self, inst):
+        if inst["id"] in self.execution.unknown_adapters or inst.get("adapter") not in ADAPTER_CATALOG:
+            return False
+        live = self._captured_authorization_digest(inst)
+        if not live:
+            return False
+        grant = self._executor_grant(inst["id"])
+        if grant and grant.get("digest") == live:
+            return True
+        row = self._executor_grants_row()
+        if inst["id"] in (row.get("pending_device") or []) and self._device_reported_digest(inst["id"]) == live:
+            return True
+        return False
+
+    def _run_preview(self, inst):
+        """Facts the operator approval card shows. No secret values."""
+        host = self.execution.hosts.get(inst.get("host_id"), {})
+        try:
+            probe = self.store.get("probe", inst["id"])
+        except Fault:
+            probe = {}
+        manifest = probe.get("manifest") if isinstance(probe, dict) else None
+        truncated = False
+        if host.get("transport") == "connector" and isinstance(manifest, dict):
+            command = list(manifest.get("command") or [])
+            cwd = manifest.get("cwd")
+            roots = list(manifest.get("allowed_roots") or [])
+            credential_ids = list(manifest.get("credential_ids") or [])
+            truncated = manifest.get("truncated") is True
+        else:
+            command = list(inst.get("argv") or []) + list(inst.get("extra_argv") or [])
+            cwd = inst.get("cwd")
+            roots = list(host.get("allowed_roots") or [])
+            credential_ids = sorted(str(v) for v in (inst.get("secret_refs") or {}).values())
+        from .consent import CONSENT_KEY
+        preview = {"host_id": inst.get("host_id"), "host_name": host.get("name") or inst.get("host_id"),
+                   "command": command, "cwd": cwd, "allowed_roots": roots,
+                   "supervision": None if not isinstance(probe, dict) else probe.get("supervision"),
+                   "process_group_consent": host.get(CONSENT_KEY),
+                   "credential_ids": credential_ids}
+        if truncated:
+            preview["truncated"] = True
+        return preview
+
+    def list_executors(self):
+        """Stored inventory only. No probe, PATH scan, argv, env, endpoint or credential id."""
+        rows = []
+        ids = sorted(i for i in self.execution.installations if isinstance(i, str))
+        truncated = len(ids) > self.LIST_EXECUTORS_LIMIT
+        for iid in ids[:self.LIST_EXECUTORS_LIMIT]:
+            inst = self.execution.installations[iid]
+            unknown = iid in self.execution.unknown_adapters
+            try:
+                probe = self.store.get("probe", iid)
+            except Fault:
+                probe = None
+            if unknown:
+                availability = "unavailable"
+                authorization = "unavailable"
+            else:
+                if probe is None:
+                    availability = "unknown"
+                else:
+                    availability = "available" if probe.get("available") else "unavailable"
+                authorization = "always" if self._grant_matches(inst) else "required"
+            rows.append({
+                "installation_id": iid,
+                "adapter": inst.get("adapter"),
+                "profile": inst.get("profile"),
+                "host_id": inst.get("host_id"),
+                "use_when": None if unknown else self._use_when(inst),
+                "priority": None if unknown else self._route_priority(inst),
+                "enabled": inst.get("enabled") is True,
+                "availability": availability,
+                "authorization": authorization,
+            })
+        schema = executor_parameter_schema()
+        names = [item["name"] for item in schema]
+        return {"installations": rows, "truncated": truncated, "parameters": schema,
+                "adapters": [{"adapter": name, "parameters": list(names)}
+                             for name in sorted(ADAPTER_CATALOG)]}
+
+    def propose_executor(self, bot_id, work_id, body):
+        """Route and narrow directly. Execution-widening changes stay a setup request.
+
+        The request is the existing operator approval. Nothing here starts a run
+        or writes an always-grant; that happens when the operator approves.
+        """
+        if self.bot(bot_id)["kind"] != "main":
+            raise Fault("main_bot_required", 403)
+        if not isinstance(body, dict) or not body:
+            raise Fault("empty_executor_proposal", 400)
+        if "endpoint" in body:
+            raise Fault("operator_owned_setup_field", 400)
+        allowed = {"installation_id", "host_id", "adapter", "priority", "use_when", "enabled",
+                   "max_concurrency", "timeout_s", "cwd", "extra_argv", "env", "profile", "secret_refs"}
+        if set(body) - allowed:
+            raise Fault("unsupported_installation_field", 400)
+        inst = None
+        if body.get("installation_id"):
+            inst = self.execution.installations.get(body["installation_id"])
+            if not inst:
+                raise Fault("installation_not_found", 404)
+            if inst["id"] in self.execution.unknown_adapters or inst.get("adapter") not in ADAPTER_CATALOG:
+                raise Fault("unknown_adapter")
+            host = self.execution.hosts.get(inst["host_id"], {})
+        else:
+            host = self.execution.hosts.get(body.get("host_id"), {})
+            if host.get("transport") not in ("local", "connector"):
+                raise Fault("connector_host_required")
+            if body.get("adapter") not in ADAPTER_CATALOG:
+                raise Fault("unknown_adapter")
+        if inst is not None and "profile" in body:
+            if installation_id(inst.get("adapter"), inst.get("host_id"), body.get("profile") or None) != inst["id"]:
+                raise Fault("installation_approval_mismatch", 403)
+        direct = {}
+        local = host.get("transport") == "local"
+        if not local and any(key in body for key in ("enabled", "max_concurrency", "timeout_s", "secret_refs")):
+            raise Fault("unsupported_installation_field", 400)
+        if inst is None and any(key in body for key in ("enabled", "max_concurrency", "timeout_s")):
+            raise Fault("unsupported_installation_field", 400)
+        staged = {k: body[k] for k in ("cwd", "extra_argv", "env", "profile", "secret_refs") if k in body}
+        if inst is None:
+            # Naming only an adapter still opens a card. Routing waits on the new row.
+            extra = ("adapter", "priority", "use_when") if local else ("adapter",)
+            staged.update({k: body[k] for k in extra if k in body})
+        else:
+            if "priority" in body:
+                direct["priority"] = body["priority"]
+            if "use_when" in body:
+                direct["use_when"] = body["use_when"]
+            if local:
+                if "enabled" in body:
+                    if body["enabled"] is False:
+                        direct["enabled"] = False
+                    elif body["enabled"] is True and (
+                            inst.get("enabled") is not True or not self._grant_matches(inst)):
+                        staged["enabled"] = True
+                for key, default in (("max_concurrency", 1), ("timeout_s", 3600)):
+                    if key not in body:
+                        continue
+                    current = int(inst.get(key, default))
+                    proposed = body[key]
+                    if type(proposed) is int and proposed < current:
+                        direct[key] = proposed
+                    elif type(proposed) is int and proposed > current:
+                        staged[key] = proposed
+                    elif type(proposed) is not int:
+                        direct[key] = proposed
+        if not direct and not staged:
+            raise Fault("empty_executor_proposal", 400)
+        if staged:
+            validate_staged_executor((inst or {}).get("adapter") or body.get("adapter"),
+                                     inst["host_id"] if inst else body.get("host_id"), staged)
+        result = {}
+        if direct:
+            prepared = self.prepare_installation_config(inst["id"], direct)
+            committed = self.commit_installation_config(inst["id"], prepared)
+            result["applied"] = sorted(direct)
+            result["installation"] = {k: committed.get(k) for k in
+                                      ("id", "priority", "use_when", "enabled", "max_concurrency", "timeout_s")}
+        if staged:
+            req = self.onboarding.stage_executor(bot_id, work_id, inst, host, staged, body)
+            result["staged"] = {"request_id": req["id"], "status": req["status"],
+                                "fields": sorted(staged)}
+        return result
+
+    def operator_probe(self, host_id, installation_id):
+        """Re-probe one stored installation. Does not scan PATH or authorize a run."""
+        inst = self.execution.installations.get(installation_id)
+        if not inst or inst.get("host_id") != host_id:
+            raise Fault("installation_host_mismatch")
+        result = self.probe(installation_id)
+        return {"installation_id": installation_id, "available": bool(result.get("available")),
+                "reason": result.get("reason"), "probed": True}
 
     def ensure_local_host(self, workspace, discover=True):
         """Register this coordinator machine as a transport=local execution host and
@@ -5209,7 +5566,18 @@ class Service:
             elif receipt["status"] == "succeeded" and declared_missing:
                 adjudicated = "failed"
                 adj_error = "declared_output_missing"
-            current.update(status=adjudicated, receipt=receipt, ended=time.time())
+            stored_receipt = dict(receipt)
+            started_at, ended_at = stored_receipt.get("started"), stored_receipt.get("ended")
+            if (type(started_at) in (int, float) and type(ended_at) in (int, float)
+                    and not isinstance(started_at, bool) and not isinstance(ended_at, bool)):
+                stored_receipt["duration"] = ended_at - started_at
+                current["duration"] = stored_receipt["duration"]
+            for key in ("host_id", "installation_id", "authorization_digest", "policy_digest", "device_kb"):
+                if current.get(key):
+                    stored_receipt[key] = current[key]
+                else:
+                    stored_receipt.pop(key, None)
+            current.update(status=adjudicated, receipt=stored_receipt, ended=time.time())
             if adjudicated == "failed" and adj_error in ("required_output_missing", "declared_output_missing"):
                 # Durable business reason on the task (distinct from the raw receipt,
                 # which keeps the true execution error/none). Reuses the existing
@@ -5474,7 +5842,31 @@ class Service:
         # must stop here and never start pi.
         if self._profile_derived_pi(inst) and self._pi_profile_binding() is None:
             return "model_not_configured"
+        denied = self._authorization_denied(task, inst)
+        if denied:
+            return denied
         return None
+
+    def _authorization_denied(self, task, inst):
+        """Re-check the live digest at the last moment before a process starts.
+
+        A task approved under an older installation, or queued on an always-grant
+        that no longer matches, does not start. Tasks stored before this field
+        existed keep their existing approval and are not sent back for it.
+        """
+        if "authorization_digest" not in task:
+            return None
+        if not inst or not inst.get("id"):
+            return "installation_not_authorized"
+        self._persist_pending_device_grant(inst.get("id"))
+        live = self._captured_authorization_digest(inst)
+        if task.get("authorization_digest") != live:
+            return "installation_not_authorized"
+        if task.get("approved_at"):
+            return None
+        if self._grant_matches(inst):
+            return None
+        return "installation_not_authorized"
 
     def _supervision_admissible(self, installation, probe):
         """May a NEW launch go to this installation? The probed label must pass the

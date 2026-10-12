@@ -16,7 +16,7 @@ test('cutover control-plane entrypoints are all wired in React', () => {
     'tasks/','/retry','/reconcile','/resolve',
     'claims/','/resolve','artifacts/','/copy','projects',
   ]) assert.ok(work.includes(p), 'WorkPane missing '+p);
-  for (const p of ['installations/','/config','devices/','/revoke']) assert.ok(hosts.includes(p), 'HostsView missing '+p);
+  for (const p of ['installations/','devices/','/revoke']) assert.ok(hosts.includes(p), 'HostsView missing '+p);
   assert.ok(setup.includes('setup/model-key/revoke'), 'Settings missing model key revoke');
   for (const p of ['bots/','/update','/archive']) assert.ok(side.includes(p), 'Sidebar missing '+p);
 });

@@ -4,6 +4,8 @@ import type {Store} from '../store';
 import type {Task} from '../types';
 import {MessageBubble} from './MessageBubble';
 import {api} from '../api';
+import {RunPreview} from './RunPreview';
+import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
 import {conversationActivity, currentWorkId} from '../scope';
 
@@ -139,8 +141,9 @@ function TaskCard({task, store}: {task: Task; store: Store}) {
       <p className="mt-1 text-sm">{t('chat.needsConfirm')}</p>
       <p className="mt-1 text-xs text-muted">{(task.prompt || '').slice(0, 160)}</p>
       <p className="mt-1 text-xs text-muted">{t('chat.executorPrefix', {id: task.installation_id || '—'})}</p>
+      <RunPreview task={task} />
       <div className="mt-2 flex gap-2">
-        <ActionButton label={t('chat.approve')} run={() => api(`tasks/${task.id}/approve`, {spec_digest: task.spec_digest})} store={store} />
+        <ApprovalButtons task={task} store={store} single={t('chat.approve')} />
         <ActionButton label={t('chat.cancel')} ghost run={() => api(`tasks/${task.id}/cancel`, {})} store={store} />
       </div>
     </div>

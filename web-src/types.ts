@@ -53,6 +53,21 @@ export interface Task {
   prompt?: string;
   spec_digest?: string;
   approved_at?: number;
+  installation_authorization?: string;
+  authorization_digest?: string;
+  duration?: number;
+  device_kb?: null;
+  run_preview?: {
+    host_id?: string;
+    host_name?: string;
+    command?: string[];
+    cwd?: string;
+    allowed_roots?: string[];
+    supervision?: string | null;
+    process_group_consent?: string | null;
+    credential_ids?: string[];
+    truncated?: boolean;
+  };
   created?: number;
   route?: unknown;
   inputs?: unknown;

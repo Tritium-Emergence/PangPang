@@ -491,6 +491,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 if len(parts) == 3 and parts[0] == "setup":
                     if parts[2] == "approve":
                         self.respond(service.onboarding.approve(parts[1], body)); return
+                    if parts[2] == "deny":
+                        self.respond(service.onboarding.deny(parts[1])); return
                     if parts[2] == "secret":
                         self.respond(service.onboarding.secret(parts[1], body)); return
                 key = self.headers.get("Idempotency-Key")

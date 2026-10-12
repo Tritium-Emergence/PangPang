@@ -28,6 +28,14 @@ from pangpang.store import Fault, encode
 from pangpang.task_gate import TaskResultGate
 
 
+def admit_installation(app, task):
+    """An installation created after startup waits once. Existing per-task approval admits it."""
+    if task.get("installation_authorization") == "required":
+        app.approve(task["id"], {"spec_digest": task["spec_digest"]})
+        return app.store.get("task", task["id"])
+    return task
+
+
 def consenting(root):
     cfg = config(root)
     cfg["hosts"][0][consent.CONSENT_KEY] = consent.RISK_VERSION
@@ -1026,7 +1034,7 @@ class ExplicitL0MacProbeTests(unittest.TestCase):
         msg = app.send("bot-main", {"text": "记一条笔记", "allow_write": True}, "note")
         result = app.submit_task("bot-main", msg["work_id"], {
             "prompt": "写一条笔记", "installation_id": "inst-local-claude-code"})
-        task = app.store.get("task", result["task_id"])
+        task = admit_installation(app, app.store.get("task", result["task_id"]))
         self.assertEqual(task["status"], "queued")
         self.assertEqual(task["supervision_floor"], refreshed["supervision"])
         self.assertIsNone(app._start_denied(task))
@@ -1161,7 +1169,7 @@ class StartHarness(unittest.TestCase):
         msg = app.send("bot-main", {"text": "记一条笔记", "allow_write": True}, key)
         result = app.submit_task("bot-main", msg["work_id"], {
             "prompt": "写一条笔记", "installation_id": inst})
-        return app.store.get("task", result["task_id"])
+        return admit_installation(app, app.store.get("task", result["task_id"]))
 
 
 class OmittedDeploymentLevelStartTests(StartHarness):
@@ -1196,7 +1204,7 @@ class OmittedDeploymentLevelStartTests(StartHarness):
         msg = app.send("bot-main", {"text": "记一条笔记", "allow_write": True}, "note")
         result = app.submit_task("bot-main", msg["work_id"], {
             "prompt": "写一条笔记", "installation_id": "inst-local-claude-code"})
-        task = app.store.get("task", result["task_id"])
+        task = admit_installation(app, app.store.get("task", result["task_id"]))
         self.assertEqual(task["status"], "queued")
         self.assertEqual(task["supervision_floor"], "posix-pgroup-cooperative")
         self.assertIsNone(app._start_denied(task))
@@ -1227,7 +1235,7 @@ class OmittedDeploymentLevelStartTests(StartHarness):
         msg = app.send("bot-main", {"text": "记一条笔记", "allow_write": True}, "note-win")
         result = app.submit_task("bot-main", msg["work_id"], {
             "prompt": "写一条笔记", "installation_id": "inst-local-claude-code"})
-        task = app.store.get("task", result["task_id"])
+        task = admit_installation(app, app.store.get("task", result["task_id"]))
         self.assertEqual(task["status"], "queued")
         self.assertEqual(task["supervision_floor"], "windows-job-object")
         self.assertIsNone(app._start_denied(task))

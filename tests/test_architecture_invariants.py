@@ -212,7 +212,11 @@ class ArchitectureTests(unittest.TestCase):
         task.update(status="starting", started=time.time(), attempt_uuid="attempt")
         self.app.store.put("task", task)
         # Remote stand-in is Connector. SSH launches are refused before this
-        # lost-ACK path; Connector still has no local process view.
+        # lost-ACK path; Connector still has no local process view. The attempt
+        # was already admitted, so the device digest matches the frozen one.
+        probe = self.app.store.get("probe", task["installation_id"])
+        probe["authorization_digest"] = task["authorization_digest"]
+        self.app.store.put("probe", probe)
         self.app.execution.hosts["local"]["transport"] = "connector"
         self.app.execution.hosts["local"]["os"] = "linux"
         with patch.object(self.app.execution, "start", side_effect=Fault("transport_unavailable")), \

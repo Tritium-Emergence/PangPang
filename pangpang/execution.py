@@ -418,6 +418,28 @@ def secret_env_name(adapter):
     return "CODEX_API_KEY" if adapter == "codex" else "ANTHROPIC_API_KEY"
 
 
+def endpoint_extra_env(adapter, data, endpoint_value, model="", api=None):
+    """Catalog extra_env. A set endpoint replaces it; a blank one does not copy another row."""
+    cat = ADAPTER_CATALOG[adapter]
+    extra = materialize_executor_env(cat, data)
+    if not endpoint_value:
+        return extra
+    from .onboarding import endpoint as parse_endpoint
+    url = parse_endpoint(endpoint_value)
+    if cat.get("models_json"):
+        extra = dict(extra or {})
+        extra[_PI_BASE_URL_ENV] = url
+        resolved = pi_models_api({"api": api} if api else {})
+        if not resolved:
+            raise Fault("pi_api_unsupported")
+        if not model:
+            raise Fault("model_endpoint_and_name_required")
+        write_pi_provider_config(extra["PI_CODING_AGENT_DIR"], url, secret_env_name(adapter), model, resolved)
+        return extra
+    key = "OPENAI_BASE_URL" if adapter == "codex" else "ANTHROPIC_BASE_URL"
+    return {key: url}
+
+
 # Extensible executor catalog. Adding a new CLI = add one DATA row here
 # (operator edit, never AI). `argv` is the parameter template appended after the
 # probed binary; the real argv is [resolved_binary, *argv]. This is the single
@@ -486,6 +508,39 @@ def installation_id(adapter, host_id, profile=None):
         raise Fault("invalid_installation_profile", 400,
                     advice="profile must match ^[a-z0-9][a-z0-9-]{0,31}$")
     return adapter + "-" + profile + "-" + host_id
+
+
+def executor_parameter_schema():
+    """Names, types and limits the operator can change. No values."""
+    return [
+        {"name": "priority", "type": "integer", "minimum": 1, "maximum": 999, "effect": "applied"},
+        {"name": "use_when", "type": "string", "max_length": 500, "effect": "applied"},
+        {"name": "enabled", "type": "boolean", "effect": "applied_when_disabled"},
+        {"name": "max_concurrency", "type": "integer", "minimum": 1, "maximum": 16,
+         "effect": "applied_when_lower"},
+        {"name": "timeout_s", "type": "integer", "minimum": 30, "maximum": 86400,
+         "effect": "applied_when_lower"},
+        {"name": "cwd", "type": "string", "effect": "staged"},
+        {"name": "extra_argv", "type": "array", "max_items": 16, "effect": "staged"},
+        {"name": "env", "type": "object", "keys": sorted(PROFILE_ENV_KEYS), "effect": "staged"},
+        {"name": "profile", "type": "string", "effect": "staged"},
+        {"name": "secret_refs", "type": "object", "effect": "staged"},
+    ]
+
+
+_SECRET_REF_KEY = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_SECRET_REF_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
+
+
+def validate_secret_refs(refs):
+    """Credential ids only. Values belong in the vault, never in this map."""
+    if not isinstance(refs, dict) or len(refs) > 16:
+        raise Fault("invalid_secret_refs", 400)
+    for key, value in refs.items():
+        if not isinstance(key, str) or not _SECRET_REF_KEY.fullmatch(key):
+            raise Fault("invalid_secret_refs", 400)
+        if not isinstance(value, str) or not _SECRET_REF_ID.fullmatch(value):
+            raise Fault("invalid_secret_refs", 400)
 
 
 def validate_profile_env(env):
@@ -570,6 +625,18 @@ def validate_extra_argv(adapter, extra_argv):
                 index += 2
                 continue
             index += 1
+
+
+def validate_staged_executor(adapter, host_id, staged):
+    """One check for a staged executor draft, before any routing field is committed."""
+    if "env" in staged:
+        validate_profile_env(staged["env"])
+    if "extra_argv" in staged:
+        validate_extra_argv(adapter, staged["extra_argv"])
+    if "secret_refs" in staged:
+        validate_secret_refs(staged["secret_refs"])
+    if staged.get("profile"):
+        installation_id(adapter, host_id, staged["profile"])
 
 
 def unknown_adapter_advice(data, installation_id, adapter):

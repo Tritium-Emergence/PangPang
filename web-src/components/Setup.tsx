@@ -240,6 +240,7 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
   const {t} = useTranslation();
   const [endpoint, setEndpoint] = useState('');
   const p = (req.proposal || {}) as Record<string, any>;
+  const asksEndpoint = p.action === 'configure' || (p.action === 'executor_config' && !p.installation_id);
   const host = store.snapshot!.hosts.find((h) => h.id === req.host_id);
   return (
     <div className="mini mt-2 rounded-lg border border-line bg-raised p-3">
@@ -247,20 +248,30 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
       <p className="text-sm text-muted">{host?.name || req.host_id}</p>
       {req.status === 'needs_approval' ? (
         <>
-          <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli'): t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
+          <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli') : p.action === 'executor_config' ? t('setup.actionExecutorConfig') : t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
           <p className="text-xs">{t('setup.cwdLine', {cwd: p.cwd || t('setup.cwdDefault')})}</p>
           <p className="text-xs">{t('setup.authLine', {auth: p.auth === 'api_key' ? t('setup.authApiKey'): p.auth === 'existing' ? t('setup.authExisting'): p.auth || t('setup.authUnregistered')})}</p>
+          {p.draft ? <p className="mt-1 text-xs">{t('setup.draftLine', {draft: JSON.stringify({
+            profile: p.draft.profile, env: p.draft.env, extra_argv: p.draft.extra_argv, cwd: p.draft.cwd,
+            credential_ids: p.draft.secret_refs, command: p.command,
+          })})}</p>: null}
           {p.uses_qwen ? <p className="text-xs">{t('setup.sharedQwen')}</p>: null}
-          {p.action === 'configure' ? (
+          {asksEndpoint ? (
             <>
               <p className="mt-1 text-xs text-warn">{t('setup.securityBoundary')}</p>
               <label className="mt-1 block text-sm">{t('setup.apiEndpointOptional')}<input type="url" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1" /></label>
             </>
 ): null}
-          <button className="mt-2 rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={async () => {
-            try { await api('setup/' + req.id + '/approve', p.action === 'configure' ? {endpoint: endpoint.trim()}: {}); await store.refresh(); }
-            catch (e: any) { store.setNotice(e?.message || t('setup.operationFailed')); }
-          }}>{t('setup.applySettings')}</button>
+          <div className="mt-2 flex gap-2">
+            <button className="rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={async () => {
+              try { await api('setup/' + req.id + '/approve', asksEndpoint ? {endpoint: endpoint.trim()}: {}); await store.refresh(); }
+              catch (e: any) { store.setNotice(e?.message || t('setup.operationFailed')); }
+            }}>{t('setup.applySettings')}</button>
+            <button className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={async () => {
+              try { await api('setup/' + req.id + '/deny', {}); await store.refresh(); }
+              catch (e: any) { store.setNotice(e?.message || t('setup.operationFailed')); }
+            }}>{t('setup.denySettings')}</button>
+          </div>
         </>
 ): null}
       {req.status === 'needs_secret' ? (

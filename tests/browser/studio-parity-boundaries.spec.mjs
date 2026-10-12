@@ -139,45 +139,69 @@ test('recovery submits distinct conclusions and evidence, cancellation submits n
   await expect(page.locator('#tasks').getByRole('button', {name: '确认已停止'})).toBeEnabled(); expect(submitted).toHaveLength(2);
 });
 
-test('installation failures show friendly explanation plus exact server error and retain edits', async ({page}) => {
-  let code = 'installation_busy';
-  await page.route('**/api/v1/installations/*/config', r => r.fulfill({status: 409, json: {code}}));
-  await login(page); await page.locator('[data-view="hosts"]').click();
-  const config = page.locator('#hosts details').first(); await config.locator('summary').click();
-  await config.getByLabel('用途说明').fill('保持待保存的用途');
-  for (const [c, text] of [['installation_busy', '执行器仍在工作'], ['installation_config_changed', '配置已被其他请求更新'], ['cwd_outside_allowed_roots', '工作目录不在授权范围'], ['invalid_timeout_s', '超时须为'], ['future_error', 'future_error']]) {
-    code = c; await config.getByRole('button', {name: '保存配置'}).click();
-    await expect(config.getByRole('status')).toContainText(text); await expect(config.getByRole('status')).toContainText(c);
-    await expect(config.getByLabel('用途说明')).toHaveValue('保持待保存的用途');
-  }
+test('a new local profile card submits the typed endpoint and shows the command', async ({page}) => {
+  await project(page, (s) => {
+    s.setup.requests = [{
+      id: 'new-local', status: 'needs_approval', host_id: 'local',
+      proposal: {
+        action: 'executor_config', installation_id: null, adapter: 'codex',
+        command: ['/usr/bin/codex', 'exec', '-'],
+        draft: {profile: 'work', cwd: '/work'},
+      },
+    }];
+  });
+  await login(page);
+  const panel = page.locator('#setup-panel');
+  await expect(panel.locator('input[type="url"]')).toBeVisible();
+  await expect(panel).toContainText('/usr/bin/codex');
+  await expect(panel).toContainText('exec');
+  let sent;
+  await page.route('**/api/v1/setup/new-local/approve', (r) => {
+    sent = r.request().postDataJSON();
+    return r.fulfill({json: {accepted: true}});
+  });
+  await panel.locator('input[type="url"]').fill('https://127.0.0.1:9/v1');
+  await panel.getByRole('button', {name: '应用这些设置'}).click();
+  await expect.poll(() => sent).toEqual({endpoint: 'https://127.0.0.1:9/v1'});
 });
 
-test('a remote installation saves purpose only', async ({page}) => {
+test('an existing executor card does not ask for an endpoint', async ({page}) => {
+  await project(page, (s) => {
+    s.setup.requests = [{
+      id: 'edit-local', status: 'needs_approval', host_id: 'local',
+      proposal: {action: 'executor_config', installation_id: 'codex-local', adapter: 'codex', draft: {cwd: '/work'}},
+    }];
+  });
+  await login(page);
+  await expect(page.locator('#setup-panel input[type="url"]')).toHaveCount(0);
+});
+
+test('hosts keeps pairing and the device list without an executor edit form', async ({page}) => {
+  await login(page);
+  await page.locator('[data-view="hosts"]').click();
+  await expect(page.locator('#hosts .device-section')).toHaveCount(1);
+  await expect(page.locator('#pair-device')).toHaveCount(1);
+  await expect(page.locator('#hosts details')).toHaveCount(0);
+  await expect(page.getByText('保存配置')).toHaveCount(0);
+  await expect(page.getByText('配置执行器')).toHaveCount(0);
+});
+
+test('a projected remote device stays visible without an executor edit form', async ({page}) => {
   await project(page, s => {
     s.hosts.push({id: 'home-pc', name: '家里的开发机', transport: 'connector'});
     s.devices.push({id: 'home-pc', online: true});
     s.installations.push({id: 'codex-home-pc', host_id: 'home-pc', adapter: 'codex', cwd: '/home/dev/proj',
       max_concurrency: 1, timeout_s: 3600, enabled: true, priority: 30, use_when: '写代码'});
   });
-  const bodies = [];
-  await page.route('**/api/v1/installations/codex-home-pc/config', r => {
-    bodies.push(r.request().postDataJSON());
-    return r.fulfill({json: {id: 'codex-home-pc', max_concurrency: 1, timeout_s: 3600, cwd: '/home/dev/proj',
-      enabled: true, priority: 4, use_when: '家里的开发机：改这个项目'}});
-  });
   await login(page);
   await page.locator('[data-view="hosts"]').click();
   const remote = page.locator('#hosts .device-section').filter({hasText: '家里的开发机'});
-  await expect(remote.locator('[data-config="purpose"]')).toHaveCount(1);
-  await expect(remote.getByText('并行数')).toHaveCount(0);
-  await expect(remote.getByText('工作目录')).toHaveCount(0);
-  const config = remote.locator('[data-config="purpose"]');
-  await config.locator('summary').click();
-  await config.getByLabel('用途说明').fill('家里的开发机：改这个项目');
-  await config.getByLabel('优先级').fill('4');
-  await config.getByRole('button', {name: '保存配置'}).click();
-  await expect.poll(() => bodies.length).toBe(1);
-  expect(bodies[0]).toEqual({priority: 4, use_when: '家里的开发机：改这个项目'});
+  await expect(remote).toHaveCount(1);
+  await expect(remote.getByText('codex-home-pc')).toHaveCount(1);
+  await expect(remote.getByRole('button', {name: '撤销设备连接'})).toHaveCount(1);
+  await expect(remote.locator('[data-config]')).toHaveCount(0);
+  await expect(page.locator('#hosts details')).toHaveCount(0);
+  await expect(page.getByText('保存配置')).toHaveCount(0);
 });
 
 test('sidebar avatar and busy indicator follow server attention, not raw work status', async ({page}) => {

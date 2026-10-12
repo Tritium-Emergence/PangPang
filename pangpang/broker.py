@@ -128,7 +128,10 @@ class Broker:
             if proven < need:
                 return {"status": "starting"}
         payload = {k: task[k] for k in ("id", "execution_id", "spec_digest", "policy_digest",
-                   "host_id", "installation_id", "inputs", "outputs", "prompt")}
+                   "host_id", "installation_id", "inputs", "outputs", "prompt")
+                   if k in task}
+        if task.get("authorization_digest"):
+            payload["authorization_digest"] = task["authorization_digest"]
         payload["contract"] = launch_contract(task)
         payload["contract_digest"] = contract_digest(task)
         # Top-level anti-downgrade marker: a sibling of `contract`, so stripping

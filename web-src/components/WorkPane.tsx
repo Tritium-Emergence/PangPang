@@ -3,6 +3,8 @@ import {useTranslation} from 'react-i18next';
 import type {Store} from '../store';
 import type {Routine, Task, Work, Artifact} from '../types';
 import {api} from '../api';
+import {RunPreview} from './RunPreview';
+import {ApprovalButtons} from './ApprovalButtons';
 import {pageWindow} from '../pure';
 import {attentionLabel, taskLabel, exchangeLabel, dateTime, scheduleText, friendlyError, fileSize, checkpointView} from '../display';
 import {MediaPreview} from './MediaPreview';
@@ -309,8 +311,9 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
       <details className="mt-2"><summary className="cursor-pointer text-xs text-brand">{tr('workpane.viewTaskAndLogs')}</summary><Value value={{id: t.id, route: t.route, inputs: t.inputs, outputs: t.outputs, receipt: t.receipt, error: t.error}} /></details>
       {t.status === 'unknown' ? <p className="mt-1 text-xs text-warn">{tr('workpane.workspaceIsolatedFull')}</p>: null}
       {t.error ? <p className="mt-1 text-xs text-warn">{t.error}</p>: null}
+      <RunPreview task={t} />
       <div className="mt-2 flex flex-wrap gap-2">
-        {t.status === 'awaiting_approval' ? <Act label={tr('workpane.approveExecution')} run={() => api(`tasks/${t.id}/approve`, {spec_digest: t.spec_digest})} store={store} />: null}
+        {t.status === 'awaiting_approval' ? <ApprovalButtons task={t} store={store} single={tr('workpane.approveExecution')} /> : null}
         {!['succeeded', 'failed', 'cancelled'].includes(t.status) ? <Act label={tr('workpane.cancel')} run={() => api(`tasks/${t.id}/cancel`, {})} store={store} ghost />: null}
         {['unknown', 'running', 'cancel_requested'].includes(t.status) ? <Act ghost label={tr('workpane.reconcile')} run={() => api(`tasks/${t.id}/reconcile`, {})} store={store} />: null}
         {t.status === 'unknown' ? <RecoveryActions task={t} store={store} />: null}

@@ -11,7 +11,9 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from .store import Fault, digest, uid, encode
-from .execution import ADAPTER_CATALOG, installation_id, validate_extra_argv, validate_profile_env
+from .execution import (ADAPTER_CATALOG, endpoint_extra_env, installation_id,
+                       validate_extra_argv, validate_profile_env, validate_secret_refs,
+                       validate_staged_executor)
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
 
 
@@ -227,9 +229,11 @@ class Onboarding:
         if self.s.bot(bot_id)["kind"] != "main":
             raise Fault("main_bot_required", 403)
         host_id = body["host_id"]
+        action = body["action"]
+        if action == "probe":
+            return self.s.operator_probe(host_id, body.get("installation_id"))
         if self.s.execution.hosts.get(host_id, {}).get("transport") != "connector":
             raise Fault("connector_host_required")
-        action = body["action"]
         if action == "discover":
             cmd = self.s.broker.enqueue(host_id, "discover", {"bot_id": bot_id, "work_id": work_id})
             return {"command_id": cmd["id"], "yielded": True}
@@ -303,43 +307,235 @@ class Onboarding:
                   "expires": time.time() + 3600})
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
+    def stage_executor(self, bot_id, work_id, inst, host, staged, raw):
+        """One setup_request for execution changes. The installation is not written."""
+        host_id = inst["host_id"] if inst else raw.get("host_id")
+        adapter = (inst or {}).get("adapter") or raw.get("adapter") or staged.get("adapter")
+        if adapter not in ADAPTER_CATALOG:
+            raise Fault("unknown_adapter")
+        validate_staged_executor(adapter, host_id, staged)
+        local = (host or {}).get("transport") == "local"
+        proposal = {
+            "action": "executor_config" if local else "configure",
+            "installation_id": None if inst is None else inst["id"],
+            "adapter": adapter,
+            "draft": {k: staged[k] for k in staged if k != "adapter"},
+            "base_revision": self.s.config_revision,
+            "auth": raw.get("auth", "existing"),
+            "endpoint": "",
+            "endpoint_source": "operator",
+        }
+        if local and inst is None:
+            sibling = self._sibling_local_installation(host_id, adapter)
+            argv = (sibling or {}).get("argv") or []
+            if argv:
+                proposal["command"] = [argv[0], *ADAPTER_CATALOG[adapter]["argv"]]
+        req = self.store.put("setup_request", {
+            "id": uid("setup"), "host_id": host_id, "bot_id": bot_id, "work_id": work_id,
+            "origin": "executor_proposal", "proposal": proposal, "status": "needs_approval",
+            "expires": time.time() + 3600})
+        return req
+
+    def deny(self, identity):
+        with self.store.atomic():
+            req = self.checked_request(identity, "needs_approval")
+            req["status"] = "denied"
+            self.store.put("setup_request", req)
+        return {"denied": True}
+
+    def _sibling_local_installation(self, host_id, adapter):
+        """An already registered local row of this adapter. Its binary is reused."""
+        rows = [i for i in self.s.execution.installations.values()
+                if i.get("host_id") == host_id and i.get("adapter") == adapter
+                and i.get("id") not in self.s.execution.unknown_adapters
+                and i.get("argv")]
+        return sorted(rows, key=lambda i: i["id"])[0] if rows else None
+
+    def _prepare_new_local_profile(self, proposal, draft, body, host_id):
+        """Build a local profile row from an existing command. Does not write it."""
+        adapter = proposal.get("adapter")
+        if adapter not in ADAPTER_CATALOG or not host_id:
+            raise Fault("unknown_adapter")
+        profile = draft.get("profile") or None
+        iid = installation_id(adapter, host_id, profile)
+        if iid in self.s.execution.installations:
+            raise Fault("installation_already_exists", 409)
+        sibling = self._sibling_local_installation(host_id, adapter)
+        if not sibling:
+            raise Fault("cli_not_installed")
+        host = self.s.execution.hosts.get(host_id, {})
+        from . import runner
+        try:
+            runner.check_control_separation(host.get("allowed_roots") or [], [self.s.data])
+        except ValueError:
+            raise Fault("workspace_overlaps_control_plane", 400) from None
+        try:
+            cwd = str(runner.checked(str(draft.get("cwd") or sibling.get("cwd") or "").strip(),
+                                     host.get("allowed_roots") or []))
+        except (ValueError, OSError):
+            raise Fault("cwd_outside_allowed_roots", 400) from None
+        row = {
+            "id": iid, "host_id": host_id, "adapter": adapter,
+            "argv": [sibling["argv"][0], *ADAPTER_CATALOG[adapter]["argv"]],
+            "cwd": cwd, "enabled": True,
+            "prompt_mode": sibling.get("prompt_mode", "stdin"),
+            "risk": sibling.get("risk", "write"),
+            "timeout_s": sibling.get("timeout_s", 3600),
+            "max_concurrency": sibling.get("max_concurrency", ADAPTER_CATALOG[adapter]["concurrency"]),
+            "env_allowlist": list(sibling.get("env_allowlist") or []),
+            "resource_keys": list(sibling.get("resource_keys") or []),
+        }
+        if sibling.get("probe_argv"):
+            row["probe_argv"] = list(sibling["probe_argv"])
+        if profile:
+            row["profile"] = profile
+        if draft.get("env"):
+            row["env"] = dict(draft["env"])
+        if draft.get("extra_argv"):
+            row["extra_argv"] = list(draft["extra_argv"])
+        if draft.get("secret_refs"):
+            row["secret_refs"] = dict(draft["secret_refs"])
+        routing = {k: draft[k] for k in ("priority", "use_when") if k in draft}
+        if routing:
+            checked = self.s.prepare_installation_config(sibling["id"], routing)["updated"]
+            for key in routing:
+                if key in checked:
+                    row[key] = checked[key]
+        endpoint_value = (body or {}).get("endpoint")
+        model, api = "", None
+        if endpoint_value and ADAPTER_CATALOG[adapter].get("models_json"):
+            from .broker import global_profile
+            profile = global_profile(self.s.config)
+            model, api = profile.get("model") or "", profile.get("api") or "openai-completions"
+        extra = endpoint_extra_env(adapter, self.s.data, endpoint_value, model=model, api=api)
+        if extra:
+            row["extra_env"] = extra
+        self.s._stamp_workspace_key(row)
+        return row
+
+    def _finish_local_executor(self, identity, proposal, candidate, iid, creating=False):
+        with self.store.atomic():
+            current_req = self.checked_request(identity, "needs_approval")
+            if current_req.get("proposal", {}).get("base_revision") != self.s.config_revision:
+                raise Fault("installation_config_changed", 409)
+            if creating and iid in self.s.execution.installations:
+                raise Fault("installation_already_exists", 409)
+            self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
+            self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
+            current_req["status"] = "done"
+            self.store.put("setup_request", current_req)
+        return {"accepted": True, "installation_id": iid}
+
+    def _approve_local_executor(self, identity, body=None):
+        """Operator confirms a local execution change, then the always-grant matches it."""
+        body = body or {}
+        req = self.checked_request(identity, "needs_approval")
+        proposal = req.get("proposal") or {}
+        draft = dict(proposal.get("draft") or {})
+        iid = proposal.get("installation_id")
+        if not iid:
+            prepared = self._prepare_new_local_profile(proposal, draft, body, req.get("host_id"))
+            candidate = copy.deepcopy(self.s.config)
+            candidate["installations"] = list(candidate.get("installations") or []) + [prepared]
+            return self._finish_local_executor(identity, proposal, candidate, prepared["id"], creating=True)
+        inst = self.s.execution.installations.get(iid)
+        if not inst:
+            raise Fault("installation_not_found", 404)
+        fields = {k: draft[k] for k in ("cwd", "extra_argv", "enabled", "max_concurrency", "timeout_s") if k in draft}
+        prepared = self.s.prepare_installation_config(iid, fields) if fields else None
+        updated = dict(prepared["updated"] if prepared else inst)
+        if "env" in draft:
+            validate_profile_env(draft["env"])
+            if draft["env"]:
+                updated["env"] = dict(draft["env"])
+            else:
+                updated.pop("env", None)
+        if "secret_refs" in draft:
+            validate_secret_refs(draft["secret_refs"])
+            if draft["secret_refs"]:
+                updated["secret_refs"] = dict(draft["secret_refs"])
+            else:
+                updated.pop("secret_refs", None)
+        if draft.get("profile"):
+            if installation_id(updated.get("adapter"), updated.get("host_id"), draft["profile"]) != iid:
+                raise Fault("installation_approval_mismatch", 403)
+            updated["profile"] = draft["profile"]
+        candidate = copy.deepcopy(self.s.config)
+        candidate["installations"] = [updated if i.get("id") == iid else i
+                                      for i in candidate.get("installations", [])]
+        return self._finish_local_executor(identity, proposal, candidate, iid)
+
     def checked_request(self, identity, status):
         req = self.store.get("setup_request", identity)
         if req["status"] != status or req["expires"] < time.time():
             raise Fault("setup_request_expired_or_used", 409)
-        if self.store.get("device", req["host_id"]).get("revoked"):
-            raise Fault("device_revoked", 403)
+        # A local installation is this coordinator, not a paired device. Connector
+        # requests still require the device row and refuse a revoked one.
+        host = self.s.execution.hosts.get(req.get("host_id"), {})
+        if host.get("transport") != "local":
+            if self.store.get("device", req["host_id"]).get("revoked"):
+                raise Fault("device_revoked", 403)
         return req
 
     def approve(self, identity, body=None):
         body = body or {}
         if set(body) - {"endpoint", "profile", "env", "extra_argv"}:
             raise Fault("invalid_setup_approval", 400)
+        peeked = self.store.get("setup_request", identity)
+        if (peeked.get("proposal") or {}).get("action") == "executor_config":
+            creating = not (peeked.get("proposal") or {}).get("installation_id")
+            if creating:
+                if set(body) - {"endpoint"}:
+                    raise Fault("invalid_setup_approval", 400)
+            elif body:
+                raise Fault("invalid_setup_approval", 400)
+            return self._approve_local_executor(identity, body if creating else None)
         with self.store.atomic():
             req = self.checked_request(identity, "needs_approval")
             proposal = dict(req["proposal"])
             action = "configure" if proposal["action"] == "configure" else "credential_delete"
             if action == "configure":
-                # This value comes from the authenticated operator UI, never
-                # from model tool arguments. Blank means use the CLI default.
+                # Endpoint comes from the authenticated operator UI, never from
+                # model tool arguments. A displayed draft is applied only because
+                # this call is that confirmation. Blank endpoint means the CLI default.
+                draft = proposal.get("draft") or {}
+                if "base_revision" in proposal and proposal["base_revision"] != self.s.config_revision:
+                    raise Fault("installation_config_changed", 409)
+                if any(key in draft for key in ("enabled", "max_concurrency", "timeout_s", "secret_refs")):
+                    raise Fault("unsupported_installation_field", 400)
                 proposal["endpoint"] = endpoint(str(body.get("endpoint", "")))
                 proposal["endpoint_source"] = "operator"
-                profile = body.get("profile")
-                env = body.get("env")
+                profile = body["profile"] if "profile" in body else draft.get("profile")
+                env = body["env"] if "env" in body else draft.get("env")
                 if env is not None:
                     validate_profile_env(env)
-                extra_argv = body.get("extra_argv")
+                extra_argv = body["extra_argv"] if "extra_argv" in body else draft.get("extra_argv")
                 if extra_argv is not None:
                     validate_extra_argv(proposal["adapter"], extra_argv)
-                # Same canonical namespace as LocalSetup, derived by the server;
-                # profile is operator-supplied at approval, never model-supplied.
-                proposal["installation_id"] = installation_id(proposal["adapter"], req["host_id"], profile)
+                # Same canonical namespace as LocalSetup, derived by the server.
+                # A model draft is not sent to the device until this operator approval.
+                # An existing installation keeps its id. A profile that would rename
+                # it is refused. Omitting profile keeps the profile already stored.
+                locked = proposal.get("installation_id")
+                if locked:
+                    if profile and installation_id(proposal["adapter"], req["host_id"], profile) != locked:
+                        raise Fault("installation_approval_mismatch", 403)
+                    if not profile:
+                        previous_locked = next((i for i in self._config().get("installations", [])
+                                                if i["id"] == locked), {})
+                        if previous_locked.get("profile"):
+                            profile = previous_locked["profile"]
+                    proposal["installation_id"] = locked
+                else:
+                    proposal["installation_id"] = installation_id(proposal["adapter"], req["host_id"], profile)
                 if profile:
                     proposal["profile"] = profile
                 if env:
                     proposal["env"] = dict(env)
                 if extra_argv:
                     proposal["extra_argv"] = list(extra_argv)
+                if draft.get("cwd"):
+                    proposal["cwd"] = draft["cwd"]
                 previous = next((i for i in self._config().get("installations", [])
                                  if i["id"] == proposal["installation_id"]), {})
                 if previous and previous["host_id"] != req["host_id"]:
@@ -453,12 +649,29 @@ class Onboarding:
                 for key in ("priority", "use_when"):
                     if key in previous:
                         item[key] = previous[key]
+                # The approved profile is what the installation id was derived from.
+                # A rebuild that drops it makes the next configure compute a different id.
+                profile = payload.get("profile") if cmd["action"] == "configure" else None
+                if not profile:
+                    profile = previous.get("profile")
+                if profile:
+                    item["profile"] = profile
                 # Prepare once. DB writes are staged; publication is deferred until the
                 # OUTERMOST transaction commits (a later report can still roll back).
                 candidate["installations"] = [i for i in candidate.get("installations", []) if i["id"] != item["id"]] + [item]
                 self.s.commit_managed_config(candidate)
-                probe = {k: result.get("probe", {}).get(k) for k in ("available", "version", "os", "supervision", "policy_digest")}
+                from .connector import sanitize_manifest
+                probe_src = result.get("probe") if isinstance(result.get("probe"), dict) else {}
+                probe = {k: probe_src.get(k) for k in ("available", "version", "os", "supervision", "policy_digest", "authorization_digest")}
+                manifest = sanitize_manifest(probe_src.get("manifest"))
+                if manifest:
+                    probe["manifest"] = manifest
                 self.store.put("probe", dict(probe, id=item["id"], at=time.time()))
+                reported = probe.get("authorization_digest") or probe.get("policy_digest")
+                if cmd["action"] == "configure" and isinstance(reported, str) and reported:
+                    self.s._put_executor_grant(item["id"], reported, "operator")
+                else:
+                    self.s._persist_pending_device_grant(item["id"])
                 safe["installation"] = item
                 if req and payload.get("auth") == "api_key" and cmd["action"] == "configure":
                     if req.get("bot_id"):
