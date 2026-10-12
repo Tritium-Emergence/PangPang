@@ -346,12 +346,120 @@ class Onboarding:
             self.store.put("setup_request", req)
         return {"denied": True}
 
-    def _approve_local_executor(self, identity):
+    def _sibling_local_installation(self, host_id, adapter):
+        """An already registered local row of this adapter. Its argv is the command."""
+        rows = [i for i in self.s.execution.installations.values()
+                if i.get("host_id") == host_id and i.get("adapter") == adapter
+                and i.get("id") not in self.s.execution.unknown_adapters
+                and i.get("argv")]
+        return sorted(rows, key=lambda i: i["id"])[0] if rows else None
+
+    def _prepare_new_local_profile(self, proposal, draft, body, host_id):
+        """Build a local profile row from an existing command. Does not write it."""
+        adapter = proposal.get("adapter")
+        if adapter not in ADAPTER_CATALOG or not host_id:
+            raise Fault("unknown_adapter")
+        profile = draft.get("profile") or None
+        iid = installation_id(adapter, host_id, profile)
+        if iid in self.s.execution.installations:
+            raise Fault("installation_already_exists", 409)
+        sibling = self._sibling_local_installation(host_id, adapter)
+        if not sibling:
+            raise Fault("cli_not_installed")
+        if "env" in draft:
+            validate_profile_env(draft["env"])
+        if "extra_argv" in draft:
+            validate_extra_argv(adapter, draft["extra_argv"])
+        if "secret_refs" in draft:
+            validate_secret_refs(draft["secret_refs"])
+        host = self.s.execution.hosts.get(host_id, {})
+        from . import runner
+        try:
+            runner.check_control_separation(host.get("allowed_roots") or [], [self.s.data])
+        except ValueError:
+            raise Fault("workspace_overlaps_control_plane", 400) from None
+        try:
+            cwd = str(runner.checked(str(draft.get("cwd") or sibling.get("cwd") or "").strip(),
+                                     host.get("allowed_roots") or []))
+        except (ValueError, OSError):
+            raise Fault("cwd_outside_allowed_roots", 400) from None
+        row = {
+            "id": iid, "host_id": host_id, "adapter": adapter,
+            "argv": list(sibling.get("argv") or []),
+            "cwd": cwd, "enabled": True,
+            "prompt_mode": sibling.get("prompt_mode", "stdin"),
+            "risk": sibling.get("risk", "write"),
+            "timeout_s": sibling.get("timeout_s", 3600),
+            "max_concurrency": sibling.get("max_concurrency", ADAPTER_CATALOG[adapter]["concurrency"]),
+            "env_allowlist": list(sibling.get("env_allowlist") or []),
+            "resource_keys": list(sibling.get("resource_keys") or []),
+        }
+        if sibling.get("probe_argv"):
+            row["probe_argv"] = list(sibling["probe_argv"])
+        if profile:
+            row["profile"] = profile
+        if draft.get("env"):
+            row["env"] = dict(draft["env"])
+        if draft.get("extra_argv"):
+            row["extra_argv"] = list(draft["extra_argv"])
+        if draft.get("secret_refs"):
+            row["secret_refs"] = dict(draft["secret_refs"])
+        extra = self._endpoint_extra_env(adapter, sibling, (body or {}).get("endpoint"))
+        if extra:
+            row["extra_env"] = extra
+        self.s._stamp_workspace_key(row)
+        return row
+
+    def _endpoint_extra_env(self, adapter, sibling, endpoint_value):
+        """Same endpoint rule as LocalSetup.configure. Blank keeps the sibling env."""
+        url = endpoint(str(endpoint_value or ""))
+        if not url:
+            extra = sibling.get("extra_env")
+            return dict(extra) if extra else None
+        from .execution import (materialize_executor_env, pi_models_api, secret_env_name,
+                               write_pi_provider_config, _PI_BASE_URL_ENV)
+        cat = ADAPTER_CATALOG[adapter]
+        if cat.get("models_json"):
+            extra = dict(materialize_executor_env(cat, self.s.data) or {})
+            extra[_PI_BASE_URL_ENV] = url
+            directory = extra.get("PI_CODING_AGENT_DIR")
+            if directory:
+                from .broker import global_profile
+                profile = global_profile(self.s.config)
+                model_id = profile.get("model") or ""
+                api = pi_models_api(profile)
+                if not api:
+                    raise Fault("pi_api_unsupported")
+                if not model_id:
+                    raise Fault("model_endpoint_and_name_required")
+                write_pi_provider_config(directory, url, secret_env_name(adapter), model_id, api)
+            return extra
+        key = "OPENAI_BASE_URL" if adapter == "codex" else "ANTHROPIC_BASE_URL"
+        return {key: url}
+
+    def _approve_local_executor(self, identity, body=None):
         """Operator confirms a local execution change, then the always-grant matches it."""
+        body = body or {}
         req = self.checked_request(identity, "needs_approval")
         proposal = req.get("proposal") or {}
         draft = dict(proposal.get("draft") or {})
         iid = proposal.get("installation_id")
+        if not iid:
+            prepared = self._prepare_new_local_profile(proposal, draft, body, req.get("host_id"))
+            with self.store.atomic():
+                current_req = self.checked_request(identity, "needs_approval")
+                if current_req.get("proposal", {}).get("base_revision") != self.s.config_revision:
+                    raise Fault("installation_config_changed", 409)
+                if prepared["id"] in self.s.execution.installations:
+                    raise Fault("installation_already_exists", 409)
+                candidate = copy.deepcopy(self.s.config)
+                candidate["installations"] = list(candidate.get("installations") or []) + [prepared]
+                self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
+                self.s._put_executor_grant(
+                    prepared["id"], self.s._authorization_digest(prepared["id"], candidate), "operator")
+                current_req["status"] = "done"
+                self.store.put("setup_request", current_req)
+            return {"accepted": True, "installation_id": prepared["id"]}
         inst = self.s.execution.installations.get(iid)
         if not inst:
             raise Fault("installation_not_found", 404)
@@ -405,9 +513,13 @@ class Onboarding:
             raise Fault("invalid_setup_approval", 400)
         peeked = self.store.get("setup_request", identity)
         if (peeked.get("proposal") or {}).get("action") == "executor_config":
-            if body:
+            creating = not (peeked.get("proposal") or {}).get("installation_id")
+            if creating:
+                if set(body) - {"endpoint"}:
+                    raise Fault("invalid_setup_approval", 400)
+            elif body:
                 raise Fault("invalid_setup_approval", 400)
-            return self._approve_local_executor(identity)
+            return self._approve_local_executor(identity, body if creating else None)
         with self.store.atomic():
             req = self.checked_request(identity, "needs_approval")
             proposal = dict(req["proposal"])
@@ -567,6 +679,13 @@ class Onboarding:
                 for key in ("priority", "use_when"):
                     if key in previous:
                         item[key] = previous[key]
+                # The approved profile is what the installation id was derived from.
+                # A rebuild that drops it makes the next configure compute a different id.
+                profile = payload.get("profile") if cmd["action"] == "configure" else None
+                if not profile:
+                    profile = previous.get("profile")
+                if profile:
+                    item["profile"] = profile
                 # Prepare once. DB writes are staged; publication is deferred until the
                 # OUTERMOST transaction commits (a later report can still roll back).
                 candidate["installations"] = [i for i in candidate.get("installations", []) if i["id"] != item["id"]] + [item]

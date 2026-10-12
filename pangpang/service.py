@@ -4846,12 +4846,12 @@ class Service:
             raise Fault("main_bot_required", 403)
         if not isinstance(body, dict) or not body:
             raise Fault("empty_executor_proposal", 400)
+        if "endpoint" in body:
+            raise Fault("operator_owned_setup_field", 400)
         allowed = {"installation_id", "host_id", "adapter", "priority", "use_when", "enabled",
                    "max_concurrency", "timeout_s", "cwd", "extra_argv", "env", "profile", "secret_refs"}
         if set(body) - allowed:
             raise Fault("unsupported_installation_field", 400)
-        if "endpoint" in body:
-            raise Fault("operator_owned_setup_field", 400)
         inst = None
         if body.get("installation_id"):
             inst = self.execution.installations.get(body["installation_id"])
@@ -4862,9 +4862,7 @@ class Service:
             host = self.execution.hosts.get(inst["host_id"], {})
         else:
             host = self.execution.hosts.get(body.get("host_id"), {})
-            if host.get("transport") == "local":
-                raise Fault("installation_id_required", 400)
-            if host.get("transport") != "connector":
+            if host.get("transport") not in ("local", "connector"):
                 raise Fault("connector_host_required")
             if body.get("adapter") not in ADAPTER_CATALOG:
                 raise Fault("unknown_adapter")
@@ -4912,8 +4910,8 @@ class Service:
             if local and key in body:
                 staged[key] = body[key]
         if inst is None:
-            # A new connector installation has nothing to edit until the device
-            # applies the approved setup. Routing waits until that row exists.
+            # A new profile has nothing to edit until the operator approves it.
+            # Routing waits until that row exists.
             for key in ("cwd", "extra_argv", "env", "profile", "secret_refs", "adapter"):
                 if key in body:
                     staged[key] = body[key]
@@ -5597,13 +5595,11 @@ class Service:
                     and not isinstance(started_at, bool) and not isinstance(ended_at, bool)):
                 stored_receipt["duration"] = ended_at - started_at
                 current["duration"] = stored_receipt["duration"]
-            for key in ("host_id", "installation_id", "authorization_digest", "policy_digest"):
+            for key in ("host_id", "installation_id", "authorization_digest", "policy_digest", "device_kb"):
                 if current.get(key):
                     stored_receipt[key] = current[key]
                 else:
                     stored_receipt.pop(key, None)
-            if "device_kb" not in stored_receipt:
-                stored_receipt["device_kb"] = current.get("device_kb")
             current.update(status=adjudicated, receipt=stored_receipt, ended=time.time())
             if adjudicated == "failed" and adj_error in ("required_output_missing", "declared_output_missing"):
                 # Durable business reason on the task (distinct from the raw receipt,

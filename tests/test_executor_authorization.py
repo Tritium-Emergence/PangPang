@@ -396,6 +396,7 @@ class RunGateTests(unittest.TestCase):
             "status": "cancelled", "process_tree_confirmed": True, "not_launched": "queued_cancel",
             "artifacts": [], "host_id": "attacker-host", "installation_id": "attacker-inst",
             "authorization_digest": "forged-auth", "policy_digest": "forged-policy",
+            "device_kb": "forged-kb",
         }
         done = self.app.complete_task(task, forged)
         stored = done["receipt"]
@@ -403,8 +404,10 @@ class RunGateTests(unittest.TestCase):
         self.assertEqual(stored["installation_id"], task["installation_id"])
         self.assertEqual(stored["authorization_digest"], task["authorization_digest"])
         self.assertNotIn("policy_digest", stored)
+        self.assertIsNone(stored.get("device_kb"))
         self.assertEqual(forged["host_id"], "attacker-host")
         self.assertEqual(forged["policy_digest"], "forged-policy")
+        self.assertEqual(forged["device_kb"], "forged-kb")
 
     def test_cancel_does_not_start_a_process(self):
         self._drop_grant()
@@ -535,11 +538,65 @@ class ToolTests(unittest.TestCase):
             self.app.propose_executor("bot-main", self.work, {
                 "installation_id": "missing", "priority": 1})
 
-    def test_local_proposal_without_installation_is_refused(self):
+    def test_local_profile_waits_for_approval_then_runs_without_asking(self):
+        before = set(self.app.execution.installations)
         with self.assertRaises(Fault) as ctx:
             self.app.propose_executor("bot-main", self.work, {
-                "host_id": "local", "adapter": "codex", "cwd": str(self.root)})
-        self.assertEqual(ctx.exception.code, "installation_id_required")
+                "host_id": "local", "adapter": "codex", "profile": "work",
+                "endpoint": "https://127.0.0.1:9/v1"})
+        self.assertEqual(ctx.exception.code, "operator_owned_setup_field")
+        self.assertEqual(set(self.app.execution.installations), before)
+        staged = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "codex", "profile": "work",
+            "cwd": str(self.root), "env": {"CODEX_HOME": str(self.root / "profile")}})
+        self.assertEqual(set(self.app.execution.installations), before)
+        request = self.app.store.get("setup_request", staged["staged"]["request_id"])
+        self.assertEqual(request["status"], "needs_approval")
+        self.assertEqual(request["proposal"]["action"], "executor_config")
+        self.assertIsNone(request["proposal"]["installation_id"])
+        denied = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "codex", "profile": "dropped"})
+        self.app.onboarding.deny(denied["staged"]["request_id"])
+        self.assertNotIn("codex-dropped-local", self.app.execution.installations)
+        expired = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "codex", "profile": "stale"})
+        stale = self.app.store.get("setup_request", expired["staged"]["request_id"])
+        stale["expires"] = time.time() - 5
+        self.app.store.put("setup_request", stale)
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(stale["id"], {})
+        self.assertEqual(ctx.exception.code, "setup_request_expired_or_used")
+        self.assertNotIn("codex-stale-local", self.app.execution.installations)
+        endpoint = "https://127.0.0.1:9/v1"
+        approved = self.app.onboarding.approve(request["id"], {"endpoint": endpoint})
+        iid = "codex-work-local"
+        self.assertEqual(approved["installation_id"], iid)
+        created = self.app.execution.installations[iid]
+        sibling = self.app.execution.installations["codex-local"]
+        self.assertEqual(created["argv"], sibling["argv"])
+        self.assertEqual(created["profile"], "work")
+        self.assertEqual(created["extra_env"]["OPENAI_BASE_URL"], endpoint)
+        self.assertEqual(created["env"]["CODEX_HOME"], str(self.root / "profile"))
+        grant = self.app.store.get("settings", "executor_grants")["grants"][iid]
+        self.assertEqual(grant["origin"], "operator")
+        self.assertEqual(grant["digest"], self.app._authorization_digest(iid))
+        self.app.probe(iid)
+        submitted = self.app.submit_task("bot-main", self.work, {
+            "prompt": "go", "installation_id": iid})
+        self.assertEqual(submitted["status"], "queued")
+        self.app.cancel(submitted["task_id"])
+        again = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "codex", "profile": "work"})
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(again["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "installation_already_exists")
+        self.assertEqual(self.app.execution.installations[iid]["extra_env"]["OPENAI_BASE_URL"], endpoint)
+        missing = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "gemini", "profile": "work"})
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(missing["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "cli_not_installed")
+        self.assertNotIn("gemini-work-local", self.app.execution.installations)
         with self.assertRaises(Fault) as ctx:
             self.app.propose_executor("bot-main", self.work, {
                 "host_id": "missing", "adapter": "codex"})
@@ -718,6 +775,18 @@ class ConnectorProposalTests(unittest.TestCase):
         self.assertEqual(payload["cwd"], "/work/src")
         self.assertEqual(payload["extra_argv"], ["--strict-config"])
         self.assertNotIn("secret_refs", payload.get("draft") or {})
+        self.app.onboarding.report(command, {"installation": {
+            "id": "codex-work-pc", "host_id": "pc", "adapter": "codex", "cwd": "/work/src",
+            "resource_keys": [], "max_concurrency": 1}})
+        landed = self.app.execution.installations["codex-work-pc"]
+        self.assertEqual(landed.get("profile"), "work")
+        again = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-work-pc", "extra_argv": ["--strict-config"]})
+        self.app.onboarding.approve(again["staged"]["request_id"], {})
+        follow = [c for c in self.app.store.find("command", action="configure")
+                  if c["payload"].get("request_id") == again["staged"]["request_id"]][0]
+        self.assertEqual(follow["payload"]["installation_id"], "codex-work-pc")
+        self.assertEqual(follow["payload"]["profile"], "work")
 
 
 class ManifestTests(unittest.TestCase):
