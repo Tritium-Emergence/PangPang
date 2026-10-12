@@ -125,15 +125,8 @@ class CapabilityTests(unittest.TestCase):
         self.assertNotIn("/outside-workspace", outside[0])
         self.assertNotIn("writableRoots", outside[1])
         self.assertNotEqual(outside[1].get("sandbox"), "danger-full-access")
-
-    def test_explicit_bypass_yields_full_access_and_defaults_do_not(self):
-        launch, params = runner.codex_app_server_plan(
-            ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"])
-        self.assertEqual(params["sandbox"], "danger-full-access")
-        self.assertEqual(params["approvalPolicy"], "never")
-        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", launch)
         for argv in (
-            ["codex", *ADAPTER_CATALOG["codex"]["argv"]],
+            default,
             ["codex", "exec", "-"],
             ["codex", "exec", "--sandbox", "read-only", "-"],
             ["codex", "exec", "--sandbox", "workspace-write", "-"],
@@ -179,6 +172,129 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(user_input, [{"type": "text", "text": "加一句"}])
         self.assertEqual(message_id, "inject-uuid")
         self.assertNotIn("priority", user_input[0])
+
+
+BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+
+BYPASS_STUB = r"""
+import json, os, pathlib, sys
+pathlib.Path("bypass-ran.json").write_text(json.dumps({
+    "argv": sys.argv,
+    "cwd": os.getcwd(),
+}), encoding="utf-8")
+sys.stdin.read()
+print("ok")
+"""
+
+
+class CustomAdapterBypassTests(unittest.TestCase):
+    def setUp(self):
+        from pangpang import adapters_file
+        self.adapters_file = adapters_file
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.closers = []
+        self.addCleanup(self._close)
+        self.addCleanup(self._drop_custom_row)
+
+    def _close(self):
+        for app in reversed(self.closers):
+            try:
+                app.store.close()
+            except Exception:
+                pass
+
+    def _drop_custom_row(self):
+        ADAPTER_CATALOG.pop("open-exec", None)
+        self.adapters_file._merged_names.discard("open-exec")
+
+    def _track(self, app):
+        self.closers.append(app)
+        return app
+
+    def test_adapters_file_runs_the_bypass_and_chat_cannot_set_it(self):
+        root = Path(self.tmp.name).resolve()
+        workspace = root / "workspace"
+        workspace.mkdir()
+        data = root / "data"
+        data.mkdir()
+        stub = root / "stub.py"
+        stub.write_text(BYPASS_STUB, encoding="utf-8")
+        row = {"binary": sys.executable, "argv": [str(stub), BYPASS_FLAG],
+               "concurrency": 1, "priority": 80,
+               "use_when": "Run the recorded command with the sandbox bypass flag."}
+        path = data / "adapters.json"
+        path.write_text(json.dumps({"open-exec": row}), encoding="utf-8")
+        path.chmod(0o644)
+        from pangpang.onboarding import empty_config
+        app = self._track(Service(empty_config(), data))
+        self.assertEqual(ADAPTER_CATALOG["open-exec"]["argv"], [str(stub), BYPASS_FLAG])
+        self.assertNotIn("stdin_protocol", ADAPTER_CATALOG["open-exec"])
+        registered = app.ensure_local_host(str(workspace), discover=True)
+        self.assertIn("inst-local-open-exec", registered["installations"])
+        inst = app.execution.installations["inst-local-open-exec"]
+        self.assertEqual(inst["argv"], [sys.executable, str(stub), BYPASS_FLAG])
+        self.assertEqual(Path(inst["cwd"]).resolve(), workspace)
+        app.probe("inst-local-open-exec")
+        sent = app.send("bot-main", {"text": "run", "allow_write": True}, "bypass")
+        submitted = app.submit_task("bot-main", sent["work_id"], {
+            "prompt": "go", "installation_id": "inst-local-open-exec"})
+        self.assertEqual(submitted["status"], "awaiting_approval")
+        task = app.store.get("task", submitted["task_id"])
+        self.assertEqual(Path(task["cwd"]).resolve(), workspace)
+        spec = app.execution.spec(task)
+        self.assertNotIn("stdin_protocol", spec)
+        launched = runner.executor_argv(spec, task["prompt"])
+        self.assertEqual(launched, [sys.executable, str(stub), BYPASS_FLAG])
+        self.assertNotIn("app-server", launched)
+        app.approve(task["id"], {"spec_digest": task["spec_digest"]})
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            app.task_step()
+            task = app.store.get("task", task["id"])
+            if task["status"] in {"succeeded", "failed", "cancelled", "unknown"}:
+                break
+            time.sleep(0.05)
+        self.assertEqual(task["status"], "succeeded", task.get("receipt") or task.get("error"))
+        recorded = json.loads((workspace / "bypass-ran.json").read_text(encoding="utf-8"))
+        self.assertIn(BYPASS_FLAG, recorded["argv"])
+        self.assertNotIn("app-server", recorded["argv"])
+        self.assertEqual(Path(recorded["cwd"]).resolve(), workspace)
+        self.assertEqual(Path(recorded["cwd"]).resolve(), Path(task["cwd"]).resolve())
+
+        neg_root = root / "neg"
+        neg_root.mkdir()
+        neg = self._track(Service(config(neg_root), root / "neg-data"))
+        work = neg.send("bot-main", {"text": "run", "allow_write": True}, "chat")["work_id"]
+        stored = list(neg.execution.installations["codex-local"]["argv"])
+        for body in (
+            {"installation_id": "codex-local", "extra_argv": [BYPASS_FLAG]},
+            {"installation_id": "codex-local", "extra_argv": ["--yolo"]},
+            {"host_id": "local", "adapter": "codex", "profile": "bypass",
+             "extra_argv": [BYPASS_FLAG]},
+        ):
+            with self.assertRaises(Fault) as ctx:
+                neg.propose_executor("bot-main", work, body)
+            self.assertEqual(ctx.exception.code, "invalid_extra_argv")
+        with self.assertRaises(Fault) as ctx:
+            neg.propose_executor("bot-main", work, {
+                "installation_id": "codex-local", "argv": [stored[0], "--yolo"]})
+        self.assertEqual(ctx.exception.code, "unsupported_installation_field")
+        with self.assertRaises(Fault) as ctx:
+            neg.configure_installation("codex-local", {"extra_argv": ["--yolo"]})
+        self.assertEqual(ctx.exception.code, "invalid_extra_argv")
+        self.assertEqual(neg.execution.installations["codex-local"]["argv"], stored)
+        staged = neg.propose_executor("bot-main", work, {
+            "host_id": "local", "adapter": "codex", "profile": "plain",
+            "cwd": str(neg_root)})
+        request = neg.store.get("setup_request", staged["staged"]["request_id"])
+        self.assertEqual(request["proposal"]["command"][1:], ADAPTER_CATALOG["codex"]["argv"])
+        self.assertNotIn(BYPASS_FLAG, request["proposal"]["command"])
+        approved = neg.onboarding.approve(request["id"], {"endpoint": ""})
+        created = neg.execution.installations[approved["installation_id"]]
+        self.assertEqual(created["argv"][1:], ADAPTER_CATALOG["codex"]["argv"])
+        self.assertNotIn(BYPASS_FLAG, created["argv"])
+        self.assertNotIn("--yolo", created["argv"])
 
 
 class MailboxTests(unittest.TestCase):
