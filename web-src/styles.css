@@ -85,6 +85,27 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   .pager { gap: 8px; font-size: 12px; flex-wrap: wrap; }
   #activity { max-width: 40%; }
 }
+/* Narrow viewports: message field and send control share one row. Wide layout stays stacked. */
+@media (max-width: 640px) {
+  #composer .compose-row {
+    display: flex;
+    flex-flow: row nowrap;
+    align-items: flex-end;
+    min-width: 0;
+  }
+  #composer .compose-row > #message {
+    flex: 1 1 0%;
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+  #composer .compose-row > .compose-bottom {
+    flex: 0 0 auto;
+    margin-top: 0;
+    margin-left: 8px;
+  }
+  #composer #send { white-space: nowrap; }
+}
 /* Landscape and a reduced visual viewport must still expose the send control. */
 @media (max-height: 500px) {
   .shell-root main > header { padding-top: 6px; padding-bottom: 6px; }
