@@ -3832,9 +3832,9 @@ class Service:
     def _resolve_executor_intent(self, body):
         """Translate a model-supplied executor/host INTENT name into the real id
         before route()'s exact matching. The model only ever sees adapter names
-        ("qwen-claude") and host names in the UI/catalog, and naturally passes those
+        and host names in the UI/catalog, and naturally passes those
         as installation_id/host_id — but route matches on the internal id
-        ("inst-local-qwen-claude"), so an intent name would fail every executor and
+        (for example inst-local-codex), so an intent name would fail every executor and
         yield requested_executor_not_available. This is a deterministic name->id map
         (NOT fuzzy, NOT a relaxation of any availability/authorization gate): it only
         rewrites the target name; route still runs every enabled/probe/online/policy
@@ -4625,8 +4625,8 @@ class Service:
             host = {"id": "host-local", "name": "本机", "transport": "local",
                     "os": platform.system(), "allowed_roots": [workspace]}
         # executor capacity is a generic per-installation
-        # max_concurrency, not a hardcoded qwen resource slot. qwen-claude gets
-        # max_concurrency=2 (its documented capacity); no local-slot resource.
+        # max_concurrency, not a hardcoded resource slot. Catalog concurrency
+        # is copied onto each discovered installation; no local-slot resource.
 
         installations = []
         if discover:

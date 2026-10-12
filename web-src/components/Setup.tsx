@@ -250,7 +250,7 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
           <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli'): t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
           <p className="text-xs">{t('setup.cwdLine', {cwd: p.cwd || t('setup.cwdDefault')})}</p>
           <p className="text-xs">{t('setup.authLine', {auth: p.auth === 'api_key' ? t('setup.authApiKey'): p.auth === 'existing' ? t('setup.authExisting'): p.auth || t('setup.authUnregistered')})}</p>
-          {p.uses_qwen || p.adapter === 'qwen-claude' ? <p className="text-xs">{t('setup.sharedQwen')}</p>: null}
+          {p.uses_qwen ? <p className="text-xs">{t('setup.sharedQwen')}</p>: null}
           {p.action === 'configure' ? (
             <>
               <p className="mt-1 text-xs text-warn">{t('setup.securityBoundary')}</p>

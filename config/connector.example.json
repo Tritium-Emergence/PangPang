@@ -54,27 +54,6 @@
       "permission_verified": false,
       "resource_keys": [],
       "timeout_s": 3600
-    },
-    {
-      "id": "qwen-claude-linux-gpu",
-      "host_id": "linux-gpu",
-      "adapter": "qwen-claude",
-      "enabled": false,
-      "argv": [
-        "/REPLACE_WITH_VERIFIED_QWEN_CLAUDE_ENTRY"
-      ],
-      "probe_argv": [
-        "/REPLACE_WITH_VERIFIED_QWEN_CLAUDE_ENTRY",
-        "--version"
-      ],
-      "prompt_mode": "stdin",
-      "cwd": "/REPLACE_WITH_AUTHORIZED_WORKSPACE",
-      "risk": "write",
-      "permission_verified": false,
-      "resource_keys": [
-        "qwen-shared"
-      ],
-      "timeout_s": 3600
     }
   ],
   "resources": [

@@ -563,7 +563,7 @@ class Runtime:
             # blocked: Jev ran fine and affirmatively kept CURRENT — attribution is
             # trusted, only the switch-away confidence was mid. Treating it as
             # suspicious wrongly gated follow-up turns in an ongoing conversation
-            # (e.g. "用 qwen-claude 去查一下" mid-thread) behind approval.
+            # (e.g. a mid-thread request that names an executor) behind approval.
             # submit_task has an explicit approval state, so it is allowed through
             # and Service still upgrades it under a real fallback; other
             # consequential tools fail closed in P0a. cancel_dependency only

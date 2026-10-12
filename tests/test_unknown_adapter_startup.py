@@ -35,7 +35,7 @@ from pangpang.vault import Vault
 
 
 CLAUDE_ARGV = ["-p", "--permission-mode", "acceptEdits", "--allowed-tools", "Read", "Write"]
-QWEN_ROW = {"binary": "qwen-claude", "argv": ["-p"], "concurrency": 2, "priority": 10,
+LEGACY_ROW = {"binary": "legacy-private-cli", "argv": ["-p"], "concurrency": 2, "priority": 10,
             "use_when": "自定义执行器。"}
 
 
@@ -50,7 +50,7 @@ def _installation(adapter, argv, workspace, host="host-local"):
         "prompt_mode": "stdin",
         "risk": "write",
         "timeout_s": 3600,
-        "max_concurrency": 2 if adapter == "qwen-claude" else 1,
+        "max_concurrency": 2 if adapter == "legacy-private-cli" else 1,
         "workspace_key": [host, ["ws"]],
         "workspace_cwd": str(workspace),
     }
@@ -92,7 +92,7 @@ def _probe(installation_id):
 
 def _qwen_and_codex(workspace):
     return [
-        _installation("qwen-claude", ["/usr/bin/qwen-claude", "-p"], workspace),
+        _installation("legacy-private-cli", ["/usr/bin/legacy-private-cli", "-p"], workspace),
         _installation("codex", ["/usr/bin/codex", "exec", "-"], workspace),
     ]
 
@@ -100,7 +100,7 @@ def _qwen_and_codex(workspace):
 def _release_rows(workspace):
     """Four rows a 0.9.0 first start writes when those four CLIs are on PATH."""
     return [
-        _installation("qwen-claude", ["/usr/bin/qwen-claude", "-p"], workspace),
+        _installation("legacy-private-cli", ["/usr/bin/legacy-private-cli", "-p"], workspace),
         _installation("claude-code", ["/usr/bin/claude", *CLAUDE_ARGV], workspace),
         _installation("codex", ["/usr/bin/codex", "exec", "-"], workspace),
         _installation("gemini", ["/usr/bin/gemini", "--skip-trust"], workspace),
@@ -134,8 +134,8 @@ class StoredUnknownAdapterTests(unittest.TestCase):
 
     def _drop_custom_adapter(self):
         from pangpang import adapters_file
-        ADAPTER_CATALOG.pop("qwen-claude", None)
-        adapters_file._merged_names.discard("qwen-claude")
+        ADAPTER_CATALOG.pop("legacy-private-cli", None)
+        adapters_file._merged_names.discard("legacy-private-cli")
 
     def _start(self, installations, probes=()):
         config = _managed(self.workspace, installations)
@@ -156,52 +156,52 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         return app, before, messages
 
     def test_stored_unknown_adapter_is_unavailable_and_row_is_unchanged(self):
-        self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
+        self.assertNotIn("legacy-private-cli", ADAPTER_CATALOG)
         app, before, logs = self._start(
             _qwen_and_codex(self.workspace),
-            probes=[_probe("inst-local-codex"), _probe("inst-local-qwen-claude")])
+            probes=[_probe("inst-local-codex"), _probe("inst-local-legacy-private-cli")])
         self.assertEqual(_settings_blob(self.data / "bots.db"), before)
-        marked = app.execution.unknown_adapters["inst-local-qwen-claude"]
+        marked = app.execution.unknown_adapters["inst-local-legacy-private-cli"]
         self.assertEqual(marked["reason"], "unknown_adapter")
-        self.assertEqual(marked["adapter"], "qwen-claude")
+        self.assertEqual(marked["adapter"], "legacy-private-cli")
         self.assertNotIn("Setup", marked["advice"])
         self.assertIn("declare the adapter as a custom row", marked["advice"])
         self.assertIn(str(self.data / "adapters.json"), marked["advice"])
         self.assertIn("re-enable", marked["advice"])
-        matching = [line for line in logs if "inst-local-qwen-claude" in line and "qwen-claude" in line]
+        matching = [line for line in logs if "inst-local-legacy-private-cli" in line and "legacy-private-cli" in line]
         self.assertEqual(len(matching), 1)
         self.assertNotIn("Setup", matching[0])
         self.assertIn("declare the adapter as a custom row", matching[0])
         self.assertIn("adapters.json", matching[0])
         route = app.route("bot-main", {"id": "work-1"}, {})
         self.assertEqual(route["selected"]["installation_id"], "inst-local-codex")
-        self.assertNotIn("inst-local-qwen-claude",
+        self.assertNotIn("inst-local-legacy-private-cli",
                          [row["installation_id"] for row in route["candidates"]])
         rejected = {row["installation_id"]: row["reason"] for row in route["rejected"]}
-        self.assertEqual(rejected["inst-local-qwen-claude"], "unknown_adapter")
+        self.assertEqual(rejected["inst-local-legacy-private-cli"], "unknown_adapter")
         self.assertEqual(_settings_blob(self.data / "bots.db"), before)
-        probed = app.probe("inst-local-qwen-claude")
+        probed = app.probe("inst-local-legacy-private-cli")
         self.assertFalse(probed["available"])
         self.assertEqual(probed["reason"], "unknown_adapter")
         stored = json.loads(_settings_blob(self.data / "bots.db"))
-        qwen = next(row for row in stored["config"]["installations"] if row["adapter"] == "qwen-claude")
-        self.assertEqual(qwen["argv"], ["/usr/bin/qwen-claude", "-p"])
-        self.assertNotIn("unknown_adapter", qwen)
+        legacy = next(row for row in stored["config"]["installations"] if row["adapter"] == "legacy-private-cli")
+        self.assertEqual(legacy["argv"], ["/usr/bin/legacy-private-cli", "-p"])
+        self.assertNotIn("unknown_adapter", legacy)
 
     def test_custom_adapters_file_makes_the_same_row_available(self):
         self.data.mkdir()
         path = self.data / "adapters.json"
-        path.write_text(json.dumps({"qwen-claude": QWEN_ROW}), encoding="utf-8")
+        path.write_text(json.dumps({"legacy-private-cli": LEGACY_ROW}), encoding="utf-8")
         path.chmod(0o600)
         app, before, logs = self._start(
             _qwen_and_codex(self.workspace),
-            probes=[_probe("inst-local-codex"), _probe("inst-local-qwen-claude")])
+            probes=[_probe("inst-local-codex"), _probe("inst-local-legacy-private-cli")])
         self.assertEqual(_settings_blob(self.data / "bots.db"), before)
-        self.assertNotIn("inst-local-qwen-claude", app.execution.unknown_adapters)
-        self.assertEqual(app.execution.installations["inst-local-qwen-claude"]["adapter"], "qwen-claude")
-        self.assertFalse(any("inst-local-qwen-claude" in line for line in logs))
+        self.assertNotIn("inst-local-legacy-private-cli", app.execution.unknown_adapters)
+        self.assertEqual(app.execution.installations["inst-local-legacy-private-cli"]["adapter"], "legacy-private-cli")
+        self.assertFalse(any("inst-local-legacy-private-cli" in line for line in logs))
         route = app.route("bot-main", {"id": "work-1"}, {})
-        self.assertEqual(route["selected"]["installation_id"], "inst-local-qwen-claude")
+        self.assertEqual(route["selected"]["installation_id"], "inst-local-legacy-private-cli")
         self.assertNotIn("unknown_adapter", {row["reason"] for row in route["rejected"]})
 
     def test_startup_file_and_candidate_writes_still_reject_unknown_adapter(self):
@@ -225,12 +225,12 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.assertEqual(direct.exception.code, "invalid_adapter")
 
         removed = json.loads(json.dumps(app.config))
-        removed["installations"] = [row for row in removed["installations"] if row["adapter"] != "qwen-claude"]
+        removed["installations"] = [row for row in removed["installations"] if row["adapter"] != "legacy-private-cli"]
         removed["installations"][0]["enabled"] = False
         app.commit_managed_config(removed)
-        self.assertNotIn("qwen-claude", [row["adapter"] for row in app.config["installations"]])
+        self.assertNotIn("legacy-private-cli", [row["adapter"] for row in app.config["installations"]])
         self.assertEqual(app.execution.installations["inst-local-codex"]["enabled"], False)
-        self.assertNotIn("qwen-claude", app.execution.unknown_adapters)
+        self.assertNotIn("legacy-private-cli", app.execution.unknown_adapters)
 
     def test_connector_load_tolerates_and_device_save_rejects(self):
         config = _managed(self.workspace, _qwen_and_codex(self.workspace))
@@ -243,7 +243,7 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         before = _settings_blob(self.data / "connector.db")
         connector = Connector(config, self.data)
         self.addCleanup(connector.close)
-        self.assertEqual(connector.execution.unknown_adapters["inst-local-qwen-claude"]["reason"],
+        self.assertEqual(connector.execution.unknown_adapters["inst-local-legacy-private-cli"]["reason"],
                          "unknown_adapter")
         self.assertIn("inst-local-codex", connector.execution.installations)
         self.assertEqual(_settings_blob(self.data / "connector.db"), before)
@@ -289,10 +289,10 @@ class StoredUnknownAdapterTests(unittest.TestCase):
                     result = connector.execution.probe(installation_id)
             return spawned, result
 
-        spawned, direct = probe("inst-local-qwen-claude")
+        spawned, direct = probe("inst-local-legacy-private-cli")
         self.assertEqual(spawned, [])
         self.assertEqual(direct, {"available": False, "reason": "unknown_adapter"})
-        spawned, reported = probe("inst-local-qwen-claude", command=True)
+        spawned, reported = probe("inst-local-legacy-private-cli", command=True)
         self.assertEqual(spawned, [])
         self.assertFalse(reported["available"])
         self.assertEqual(reported["reason"], "unknown_adapter")
@@ -342,7 +342,7 @@ class StoredUnknownAdapterTests(unittest.TestCase):
 
     def test_release_rows_pass_cloud_check_without_rewriting_settings(self):
         config = _managed(self.workspace, _release_rows(self.workspace))
-        probes = [_probe("inst-local-" + name) for name in ("claude-code", "codex", "gemini", "qwen-claude")]
+        probes = [_probe("inst-local-" + name) for name in ("claude-code", "codex", "gemini", "legacy-private-cli")]
         before = _seed(self.data, config, probes=probes)
         from pangpang.__main__ import main
         argv = ["pangpang", "--data", str(self.data), "--config", str(self.root / "missing.json"), "--check"]
@@ -363,7 +363,7 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.assertEqual(_settings_blob(self.data / "bots.db"), before)
         stored = json.loads(before)
         adapters = [row["adapter"] for row in stored["config"]["installations"]]
-        self.assertEqual(adapters, ["qwen-claude", "claude-code", "codex", "gemini"])
+        self.assertEqual(adapters, ["legacy-private-cli", "claude-code", "codex", "gemini"])
 
     def test_startup_fault_prints_code_and_advice_without_traceback(self):
         from pangpang.__main__ import main
@@ -411,8 +411,8 @@ class UnknownAdapterBackupTests(unittest.TestCase):
 
     def _drop_custom_adapter(self):
         from pangpang import adapters_file
-        ADAPTER_CATALOG.pop("qwen-claude", None)
-        adapters_file._merged_names.discard("qwen-claude")
+        ADAPTER_CATALOG.pop("legacy-private-cli", None)
+        adapters_file._merged_names.discard("legacy-private-cli")
 
     def _vault(self):
         vault = Vault(self.data / "vault")
@@ -427,8 +427,8 @@ class UnknownAdapterBackupTests(unittest.TestCase):
         self.assertTrue(result["upgrade_allowed"])
         self.assertNotIn("unknown_adapter", result["upgrade_blocked"])
         listed = result["manifest"]["inventory"]["unknown_adapter_installations"]
-        self.assertEqual([row["id"] for row in listed], ["inst-local-qwen-claude"])
-        self.assertEqual(listed[0]["adapter"], "qwen-claude")
+        self.assertEqual([row["id"] for row in listed], ["inst-local-legacy-private-cli"])
+        self.assertEqual(listed[0]["adapter"], "legacy-private-cli")
         self.assertNotIn("Setup", listed[0]["advice"])
         self.assertIn("declare the adapter as a custom row", listed[0]["advice"])
         self.assertIn(str(self.data / "adapters.json"), listed[0]["advice"])
@@ -442,7 +442,7 @@ class UnknownAdapterBackupTests(unittest.TestCase):
         _seed(self.data, _managed(self.workspace, _qwen_and_codex(self.workspace)))
         self._vault()
         path = self.data / "adapters.json"
-        path.write_text(json.dumps({"qwen-claude": QWEN_ROW}), encoding="utf-8")
+        path.write_text(json.dumps({"legacy-private-cli": LEGACY_ROW}), encoding="utf-8")
         path.chmod(0o600)
         result = create_consistent_backup(self.data, self.root / "backup", confirm=True)
         self.assertTrue(result["upgrade_allowed"])
@@ -586,6 +586,44 @@ class ServiceTemplateTests(unittest.TestCase):
         self.assertTrue(any("allow-local-exec" in comment and "local execution host" in comment
                             for comment in comments))
         self.assertTrue(any("port" in comment and "8790" in comment for comment in comments))
+
+    def test_removed_private_adapter_name_is_absent_from_shipped_files(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(_shipped_hits(root), [])
+        planted = self._planted_tree()
+        self.assertEqual(_shipped_hits(planted), ["pangpang/note.txt"])
+
+    def _planted_tree(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        note = root / "pangpang"
+        note.mkdir()
+        (note / "note.txt").write_text("name=qwen-claude\n", encoding="utf-8")
+        (note / "clean.txt").write_text("codex\n", encoding="utf-8")
+        (root / "README.md").write_text("coordinator\n", encoding="utf-8")
+        return root
+
+
+def _shipped_hits(root):
+    """Files under the shipped trees that still contain the removed adapter name."""
+    needle = b"qwen-claude"
+    hits = []
+    trees = [root / "pangpang", root / "deploy", root / "config", root / "docs"]
+    files = []
+    for tree in trees:
+        if tree.is_dir():
+            files.extend(path for path in tree.rglob("*") if path.is_file())
+    files.extend(path for path in root.glob("README*") if path.is_file())
+    security = root / "SECURITY.md"
+    if security.is_file():
+        files.append(security)
+    for path in files:
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        if needle in path.read_bytes():
+            hits.append(str(path.relative_to(root)))
+    return sorted(hits)
 
 
 def _without_comments(name, text):
