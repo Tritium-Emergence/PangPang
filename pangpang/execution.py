@@ -455,9 +455,11 @@ ADAPTER_CATALOG = {
     "claude-code": {"binary": "claude", "argv": ["-p", "--permission-mode", "acceptEdits", "--allowed-tools", "Read", "Write"], "concurrency": 1, "priority": 20,
                     "use_when": "Edit code and local files. Not for financial data or image generation.",
                     "interjection_tier": 1, "stdin_protocol": "claude-stream-json"},
-    # Same declaration shape as claude-code. argv stays the stored `exec -`
-    # invocation; the runner switches that to app-server when this protocol is set.
-    "codex": {"binary": "codex", "argv": ["exec", "-"], "concurrency": 1, "priority": 30,
+    # Same declaration shape as claude-code. argv is the stored `exec`
+    # invocation with the workspace-write sandbox; the runner switches that
+    # to app-server and sends the sandbox on thread/start. The full bypass
+    # flag is not part of this argv.
+    "codex": {"binary": "codex", "argv": ["exec", "--sandbox", "workspace-write", "-"], "concurrency": 1, "priority": 30,
               "use_when": "Run code and commands, and generate images with the built-in image_gen tool.",
               "interjection_tier": 1, "stdin_protocol": "codex-app-server"},
     # Tier 2, not tier 1. Gemini CLI 0.62.0 has no input-format and no

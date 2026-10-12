@@ -38,7 +38,8 @@ class CapabilityTests(unittest.TestCase):
             {"interjection_tier": 2, "stdin_protocol": "gemini-stream"}), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["codex"]), 1)
         self.assertEqual(ADAPTER_CATALOG["codex"]["stdin_protocol"], "codex-app-server")
-        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"],
+                         ["exec", "--sandbox", "workspace-write", "-"])
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("qwen-claude")), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["claude-code"]), 1)

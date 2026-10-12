@@ -13,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
-from pangpang import consent
+from pangpang import consent, runner
 from pangpang.connector import Connector, authorization_digest, policy_digest
 from pangpang.execution import ADAPTER_CATALOG, Execution
 from pangpang.runtime import TOOLS, Runtime
@@ -235,6 +235,33 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn("inst-local-" + UNKNOWN, execution.unknown_adapters)
         self.assertIn("executor_grants", {row["id"] for row in store.find("settings")})
         store.close()
+
+    def test_grandfathered_codex_keeps_stored_argv_and_runs_without_a_prompt(self):
+        # Historical catalog command: exec with no sandbox flag. The upgrade
+        # grant is the digest of this stored argv, not the new catalog argv.
+        stored = [sys.executable, "exec", "-"]
+        app, before = self._start([_installation("codex", stored, self.workspace)])
+        live = app.execution.installations["inst-local-codex"]
+        self.assertEqual(live["argv"], stored)
+        self.assertEqual(_settings_blob(self.data / "bots.db"), before)
+        self.assertNotEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
+        self.assertIn("workspace-write", ADAPTER_CATALOG["codex"]["argv"])
+        grant = app.store.get("settings", "executor_grants")["grants"]["inst-local-codex"]
+        self.assertEqual(grant["origin"], "migration")
+        self.assertEqual(grant["digest"], app._authorization_digest("inst-local-codex"))
+        planned = runner.codex_app_server_plan(live["argv"])
+        self.assertNotIn("sandbox", planned[1])
+        self.assertNotEqual(planned[1].get("sandbox"), "danger-full-access")
+        self.assertNotEqual(planned[1].get("sandbox"), "workspace-write")
+        app.probe("inst-local-codex")
+        message = app.send("bot-main", {"text": "run", "allow_write": True}, "grandfather")
+        submitted = app.submit_task("bot-main", message["work_id"], {
+            "prompt": "go", "installation_id": "inst-local-codex"})
+        self.assertEqual(submitted["status"], "queued")
+        task = app.store.get("task", submitted["task_id"])
+        self.assertNotEqual(task["status"], "awaiting_approval")
+        self.assertEqual(app.execution.installations["inst-local-codex"]["argv"], stored)
+        app.cancel(submitted["task_id"])
 
 
 class RunGateTests(unittest.TestCase):
