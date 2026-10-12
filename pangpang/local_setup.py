@@ -50,10 +50,12 @@ class LocalSetup:
         self.c.config, self.c.execution, self.c.config_revision = candidate, execution, row["revision"]
 
     def info(self, identity):
-        from .connector import policy_digest
+        from .connector import authorization_digest, execution_manifest, policy_digest
         e = self.c.execution.installations[identity]
         p = self.c.execution.probe(identity)
         p["policy_digest"] = policy_digest(self.c.config, identity)
+        p["authorization_digest"] = authorization_digest(self.c.config, identity)
+        p["manifest"] = execution_manifest(self.c.config, identity)
         # Report resource_keys + max_concurrency so the cloud onboarding preserves
         # the device-owned executor capacity; without them the cloud
         # falls back to defaults and can over-admit a capacity-1 installation.

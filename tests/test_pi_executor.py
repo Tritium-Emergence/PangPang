@@ -700,6 +700,9 @@ class PiExecutorTests(unittest.TestCase):
             "prompt": "把 ok 写入 $XPP_OUTPUT_DIR/result.txt",
             "required_outputs": ["result.txt"], "installation_id": "inst-local-pi"})
         task = app.store.get("task", submitted["task_id"])
+        if task.get("installation_authorization") == "required":
+            app.approve(task["id"], {"spec_digest": task["spec_digest"]})
+            task = app.store.get("task", task["id"])
         deadline = time.time() + 90
         while time.time() < deadline:
             app.task_step()
@@ -888,6 +891,9 @@ class PiExecutorTests(unittest.TestCase):
             "prompt": "把 ok 写入 $XPP_OUTPUT_DIR/result.txt",
             "required_outputs": ["result.txt"], "installation_id": "inst-local-pi"})
         task = app.store.get("task", submitted["task_id"])
+        if task.get("installation_authorization") == "required":
+            app.approve(task["id"], {"spec_digest": task["spec_digest"]})
+            task = app.store.get("task", task["id"])
         deadline = time.time() + 90
         while time.time() < deadline:
             app.task_step()

@@ -74,12 +74,18 @@ TOOLS.extend([
     tool("resume_routine", "Resume a routine and recompute its next fire from the current time.", {"routine_id": S}, ["routine_id"]),
     tool("run_routine_now", "Run a routine once extra immediately; does not change the next normal schedule.", {"routine_id": S}, ["routine_id"]),
     tool("list_routines", "List visible routines with their next/last run.", {}),
-    tool("setup_agent", "Supervisor probes or configures a device CLI per the user's intent. The model may not specify an API endpoint or resource-management command; those come only from an operator / device-trusted policy. Secrets are requested only via the secure window.",
-         {"host_id": S, "action": {"type": "string", "enum": ["discover", "configure", "credential", "delete_credential"]},
+    tool("setup_agent", "Supervisor probes or configures a device CLI per the user's intent. The model may not specify an API endpoint or resource-management command; those come only from an operator / device-trusted policy. Secrets are requested only via the secure window. action=probe re-checks one stored installation and does not authorize a run.",
+         {"host_id": S, "action": {"type": "string", "enum": ["discover", "configure", "credential", "delete_credential", "probe"]},
           "adapter": S,
           "installation_id": S, "cwd": S,
           "auth": {"type": "string", "enum": ["existing", "api_key"]}},
-         ["host_id", "action"])
+         ["host_id", "action"]),
+    tool("list_executors", "List stored executors for the operator: id, adapter, profile, host, routing, enabled, availability and authorization. Does not probe, scan PATH, or return commands, env, endpoints or credential ids.", {}),
+    tool("propose_executor", "Propose an executor change. priority and use_when, and changes that only reduce enabled, concurrency or timeout, apply immediately on a local installation. cwd, extra argv, env, profile, credential ids and higher limits are staged until the operator approves that setup. This call does not start a run and cannot approve one. Endpoint is never accepted here.",
+         {"installation_id": S, "host_id": S, "adapter": S, "priority": I, "use_when": S, "enabled": B,
+          "max_concurrency": I, "timeout_s": I, "cwd": S, "profile": S,
+          "extra_argv": {"type": "array", "items": S},
+          "env": {"type": "object"}, "secret_refs": {"type": "object"}}),
 ])
 
 
@@ -138,7 +144,8 @@ class Runtime:
 
     def tools_for(self, turn):
         main = self.service.bot(turn["bot_id"])["kind"] == "main"
-        hidden = set() if main else {"create_bot", "update_bot", "archive_bot", "setup_agent"}
+        hidden = set() if main else {"create_bot", "update_bot", "archive_bot", "setup_agent",
+                                     "list_executors", "propose_executor"}
         return [t for t in TOOLS if t["function"]["name"] not in hidden]
 
     def final_round(self, turn):
@@ -175,7 +182,7 @@ class Runtime:
     # consequential and must be re-decided on the NEW Work identity next round.
     READONLY_TOOLS = {"read_state", "find_work", "read_work", "catalog", "inspect_bot",
                       "inspect_task", "read_evidence", "list_routines", "web_search",
-                      "search_history"}
+                      "search_history", "list_executors"}
     # Read-only tools that do blocking EXTERNAL I/O (network). Their call must run
     # OUTSIDE the store transaction (Invariant: no blocking I/O under the store
     # lock) — see durable_tool. Journaled after the fact via store.journal_once.
@@ -739,6 +746,10 @@ class Runtime:
         injecting = (name == "send_bot_message" and isinstance(body.get("dep_id"), str)
                      and body.get("dep_id").strip())
         permitting = name == "resolve_permission"
+        probing = name == "setup_agent" and isinstance(body, dict) and body.get("action") == "probe"
+        if probing:
+            result = self.invoke(turn, name, body)
+            return self.store.journal_once(scope, call["id"], call, result)
         if permitting:
             result = self.service.resolve_permission(
                 turn["bot_id"], turn["work_id"], body, turn_id=turn["id"])
@@ -836,6 +847,12 @@ class Runtime:
             return service.send_bot_message(bot_id, work["id"], body, root_request_id=turn.get("accounted_root_request_id"))
         if name == "setup_agent":
             return service.onboarding.request(bot_id, work["id"], body)
+        if name == "list_executors":
+            if service.bot(bot_id)["kind"] != "main":
+                raise Fault("main_bot_required", 403)
+            return service.list_executors()
+        if name == "propose_executor":
+            return service.propose_executor(bot_id, work["id"], body)
         if name == "catalog":
             from .context import model_project_view
             return {"setup": service.onboarding.status(bot_id), "bots": [self.bot_view(bot_id, b) for b in service.store.find("bot")],

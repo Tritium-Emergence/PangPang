@@ -3,6 +3,7 @@ import type {AttentionState, Task} from '../types';
 import {useTranslation} from 'react-i18next';
 import {conversationActivity, currentWorkId} from '../scope';
 import {api} from '../api';
+import {RunPreview} from './RunPreview';
 import {friendlyError} from '../display';
 import {RecoveryActions} from './WorkPane';
 import {AttentionPanel, type Goto} from './AttentionBar';
@@ -85,6 +86,7 @@ export function Inspector({store, botId, goto}: {store: Store; botId?: string; g
               {awaiting.map((t2: Task) => (
                 <div key={t2.id} className="mt-3 rounded-lg border border-warn/40 bg-warn/5 p-2">
                   <p className="text-xs">{t('inspector.needsApproval', {prompt: (t2.prompt || '').slice(0, 80)})}</p>
+                  <RunPreview task={t2} />
                   <div className="mt-1 flex gap-2">
                     <button className="rounded bg-brand px-2 py-1 text-xs text-white" onClick={() => act(() => api(`tasks/${t2.id}/approve`, {spec_digest: t2.spec_digest}))}>{t('inspector.approve')}</button>
                     <button className="rounded border border-line px-2 py-1 text-xs" onClick={() => act(() => api(`tasks/${t2.id}/cancel`, {}))}>{t('inspector.cancel')}</button>

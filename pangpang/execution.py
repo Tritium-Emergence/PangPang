@@ -488,6 +488,39 @@ def installation_id(adapter, host_id, profile=None):
     return adapter + "-" + profile + "-" + host_id
 
 
+def executor_parameter_schema():
+    """Names, types and limits the operator can change. No values."""
+    return [
+        {"name": "priority", "type": "integer", "minimum": 1, "maximum": 999, "effect": "applied"},
+        {"name": "use_when", "type": "string", "max_length": 500, "effect": "applied"},
+        {"name": "enabled", "type": "boolean", "effect": "applied_when_disabled"},
+        {"name": "max_concurrency", "type": "integer", "minimum": 1, "maximum": 16,
+         "effect": "applied_when_lower"},
+        {"name": "timeout_s", "type": "integer", "minimum": 30, "maximum": 86400,
+         "effect": "applied_when_lower"},
+        {"name": "cwd", "type": "string", "effect": "staged"},
+        {"name": "extra_argv", "type": "array", "max_items": 16, "effect": "staged"},
+        {"name": "env", "type": "object", "keys": sorted(PROFILE_ENV_KEYS), "effect": "staged"},
+        {"name": "profile", "type": "string", "effect": "staged"},
+        {"name": "secret_refs", "type": "object", "effect": "staged"},
+    ]
+
+
+_SECRET_REF_KEY = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_SECRET_REF_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
+
+
+def validate_secret_refs(refs):
+    """Credential ids only. Values belong in the vault, never in this map."""
+    if not isinstance(refs, dict) or len(refs) > 16:
+        raise Fault("invalid_secret_refs", 400)
+    for key, value in refs.items():
+        if not isinstance(key, str) or not _SECRET_REF_KEY.fullmatch(key):
+            raise Fault("invalid_secret_refs", 400)
+        if not isinstance(value, str) or not _SECRET_REF_ID.fullmatch(value):
+            raise Fault("invalid_secret_refs", 400)
+
+
 def validate_profile_env(env):
     """Per-installation operator env: a closed whitelist of profile-location
     variables only. Secrets go through secret_refs/vault; control-plane and

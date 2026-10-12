@@ -59,6 +59,54 @@ def policy_digest(config, installation_id):
     return digest({"installation": installation, "host": host, "resources": resources})
 
 
+def authorization_digest(config, installation_id):
+    """policy_digest without routing metadata.
+
+    priority and use_when choose which installation is preferred. They are not
+    part of what a run is allowed to execute, so they are removed before the
+    same installation + host + resources digest. The grant record is stored
+    outside the installation, so it is not hashed either.
+    """
+    installation = next(e for e in config["installations"] if e["id"] == installation_id)
+    installation = {k: v for k, v in installation.items() if k not in ("priority", "use_when")}
+    host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
+    resources = [r for r in config.get("resources", []) if r["key"] in installation.get("resource_keys", [])]
+    return digest({"installation": installation, "host": host, "resources": resources})
+
+
+def execution_manifest(config, installation_id):
+    """Operator-visible launch facts. Secret values are not included."""
+    installation = next(e for e in config["installations"] if e["id"] == installation_id)
+    host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
+    command = [str(x)[:500] for x in list(installation.get("argv") or [])
+               + list(installation.get("extra_argv") or [])][:32]
+    roots = [str(r)[:4096] for r in (host.get("allowed_roots") or []) if isinstance(r, str)][:32]
+    refs = installation.get("secret_refs") or {}
+    credential_ids = sorted(str(v)[:200] for v in refs.values() if isinstance(v, str))
+    return {"command": command, "cwd": str(installation.get("cwd") or "")[:4096],
+            "allowed_roots": roots, "credential_ids": credential_ids}
+
+
+def sanitize_manifest(value):
+    """Keep only the manifest fields a device is allowed to report."""
+    if not isinstance(value, dict):
+        return None
+    command = value.get("command")
+    if (not isinstance(command, list) or len(command) > 32
+            or not all(isinstance(x, str) and len(x) <= 500 for x in command)):
+        command = []
+    cwd = value.get("cwd") if isinstance(value.get("cwd"), str) and len(value.get("cwd")) <= 4096 else ""
+    roots = value.get("allowed_roots")
+    if (not isinstance(roots, list) or len(roots) > 32
+            or not all(isinstance(x, str) and len(x) <= 4096 for x in roots)):
+        roots = []
+    ids = value.get("credential_ids")
+    if (not isinstance(ids, list) or len(ids) > 32
+            or not all(isinstance(x, str) and len(x) <= 200 for x in ids)):
+        ids = []
+    return {"command": command, "cwd": cwd, "allowed_roots": roots, "credential_ids": list(ids)}
+
+
 class Connector:
     def __init__(self, config, data):
         self.config = copy.deepcopy(config)
@@ -234,7 +282,14 @@ class Connector:
                             advice=self.execution.unknown_adapters[task["installation_id"]]["advice"])
             if installation.get("enabled") is not True:
                 raise Fault("local_installation_disabled")
-            if task.get("policy_digest") != policy_digest(self.config, installation["id"]):
+            live_policy = policy_digest(self.config, installation["id"])
+            if task.get("policy_digest") != live_policy:
+                raise Fault("local_policy_changed_probe_and_resubmit")
+            # The cloud freezes the digest the operator approved. Re-check it
+            # against this device's config and refuse before any process starts.
+            frozen_auth = task.get("authorization_digest")
+            if frozen_auth is not None and frozen_auth not in (
+                    live_policy, authorization_digest(self.config, installation["id"])):
                 raise Fault("local_policy_changed_probe_and_resubmit")
             # the cloud's workspace_key must equal what THIS device computes for
             # the launch cwd. Proves the cloud's workspace claim matches the real target
@@ -390,6 +445,8 @@ class Connector:
                     raise Fault("local_installation_disabled")
                 result = self.execution.probe(body["installation_id"])
                 result["policy_digest"] = policy_digest(self.config, body["installation_id"])
+                result["authorization_digest"] = authorization_digest(self.config, body["installation_id"])
+                result["manifest"] = execution_manifest(self.config, body["installation_id"])
             elif action == "file":
                 if body["action"] not in {"hash", "read", "write", "receive", "list"}:
                     raise Fault("file_action_rejected")

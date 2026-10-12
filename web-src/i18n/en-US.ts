@@ -213,7 +213,7 @@ export default {
 
     apiEndpointOptional: 'API URL (leave blank to use the CLI default endpoint)', operationFailed: 'Operation failed',
 
-    applySettings: 'Apply these settings', cannotOpen: 'Cannot open', openSecretWindow: 'Open key window',
+    applySettings: 'Apply these settings', denySettings: 'Deny', draftLine: 'Change awaiting confirmation: {{draft}}', cannotOpen: 'Cannot open', openSecretWindow: 'Open key window',
 
     secretDialogTitle: 'Secure key entry', secretSaveHeading: 'Securely save the API key', cliDefaultEndpoint: 'CLI default endpoint',
 
@@ -277,6 +277,8 @@ export default {
     awaitingResult: 'Waiting for the result…', awaitingApprovalLabel: 'Awaiting your approval', needsConfirm: '⏸ Needs your confirmation before running',
 
     executorPrefix: 'Executor {{id}}', approve: 'Approve', cancel: 'Cancel', needsAttention: 'Needs attention',
+    runDevice: 'Device {{name}}', runCommand: 'Command {{command}}', runCwd: 'Working directory {{cwd}}',
+    runSupervision: 'Supervision {{supervision}} · process-group consent {{consent}}', runCredentials: 'Credentials {{ids}}',
 
     unknownTaskNote: 'Task {{id}} status is unknown; the working directory stays isolated. A stop request needs evidence the execution boundary has halted.',
 
