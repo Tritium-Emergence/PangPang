@@ -640,6 +640,22 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "invalid_priority")
         self.assertNotIn("codex-bad-local", self.app.execution.installations)
 
+    def test_new_local_profile_rejects_enabled_and_limits(self):
+        sibling = self.app.execution.installations["codex-local"]
+        before = {k: sibling.get(k) for k in ("enabled", "max_concurrency", "timeout_s")}
+        before_ids = [row["id"] for row in self.app.store.find("setup_request")]
+        installs = set(self.app.execution.installations)
+        base = {"host_id": "local", "adapter": "codex", "profile": "limited"}
+        for extra in ({"enabled": False}, {"max_concurrency": 2}, {"timeout_s": 30},
+                      {"enabled": False, "max_concurrency": 2, "timeout_s": 30}):
+            with self.assertRaises(Fault) as ctx:
+                self.app.propose_executor("bot-main", self.work, dict(base, **extra))
+            self.assertEqual(ctx.exception.code, "unsupported_installation_field")
+        self.assertEqual(set(self.app.execution.installations), installs)
+        self.assertEqual([row["id"] for row in self.app.store.find("setup_request")], before_ids)
+        self.assertEqual({k: self.app.execution.installations["codex-local"].get(k)
+                          for k in before}, before)
+
     def test_invalid_staged_env_does_not_apply_priority(self):
         before = self.app.execution.installations["codex-local"].get("priority")
         before_ids = [row["id"] for row in self.app.store.find("setup_request")]

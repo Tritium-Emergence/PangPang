@@ -4873,6 +4873,8 @@ class Service:
         local = host.get("transport") == "local"
         if not local and any(key in body for key in ("enabled", "max_concurrency", "timeout_s", "secret_refs")):
             raise Fault("unsupported_installation_field", 400)
+        if inst is None and any(key in body for key in ("enabled", "max_concurrency", "timeout_s")):
+            raise Fault("unsupported_installation_field", 400)
         staged = {k: body[k] for k in ("cwd", "extra_argv", "env", "profile", "secret_refs") if k in body}
         if inst is None:
             # Naming only an adapter still opens a card. Routing waits on the new row.

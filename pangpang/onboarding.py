@@ -406,7 +406,7 @@ class Onboarding:
         if endpoint_value and ADAPTER_CATALOG[adapter].get("models_json"):
             from .broker import global_profile
             profile = global_profile(self.s.config)
-            model, api = profile.get("model") or "", profile.get("api")
+            model, api = profile.get("model") or "", profile.get("api") or "openai-completions"
         extra = endpoint_extra_env(adapter, self.s.data, endpoint_value, model=model, api=api)
         if extra:
             row["extra_env"] = extra
