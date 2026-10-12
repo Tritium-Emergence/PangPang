@@ -139,6 +139,43 @@ test('recovery submits distinct conclusions and evidence, cancellation submits n
   await expect(page.locator('#tasks').getByRole('button', {name: '确认已停止'})).toBeEnabled(); expect(submitted).toHaveLength(2);
 });
 
+test('a new local profile card submits the typed endpoint and shows the command', async ({page}) => {
+  await project(page, (s) => {
+    s.setup.requests = [{
+      id: 'new-local', status: 'needs_approval', host_id: 'local',
+      proposal: {
+        action: 'executor_config', installation_id: null, adapter: 'codex',
+        command: ['/usr/bin/codex', 'exec', '-'],
+        draft: {profile: 'work', cwd: '/work'},
+      },
+    }];
+  });
+  await login(page);
+  const panel = page.locator('#setup-panel');
+  await expect(panel.locator('input[type="url"]')).toBeVisible();
+  await expect(panel).toContainText('/usr/bin/codex');
+  await expect(panel).toContainText('exec');
+  let sent;
+  await page.route('**/api/v1/setup/new-local/approve', (r) => {
+    sent = r.request().postDataJSON();
+    return r.fulfill({json: {accepted: true}});
+  });
+  await panel.locator('input[type="url"]').fill('https://127.0.0.1:9/v1');
+  await panel.getByRole('button', {name: '应用这些设置'}).click();
+  await expect.poll(() => sent).toEqual({endpoint: 'https://127.0.0.1:9/v1'});
+});
+
+test('an existing executor card does not ask for an endpoint', async ({page}) => {
+  await project(page, (s) => {
+    s.setup.requests = [{
+      id: 'edit-local', status: 'needs_approval', host_id: 'local',
+      proposal: {action: 'executor_config', installation_id: 'codex-local', adapter: 'codex', draft: {cwd: '/work'}},
+    }];
+  });
+  await login(page);
+  await expect(page.locator('#setup-panel input[type="url"]')).toHaveCount(0);
+});
+
 test('hosts keeps pairing and the device list without an executor edit form', async ({page}) => {
   await login(page);
   await page.locator('[data-view="hosts"]').click();

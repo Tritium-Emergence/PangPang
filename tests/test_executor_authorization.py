@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pangpang import consent
 from pangpang.connector import Connector, authorization_digest, policy_digest
-from pangpang.execution import Execution
+from pangpang.execution import ADAPTER_CATALOG, Execution
 from pangpang.runtime import TOOLS, Runtime
 from pangpang.service import Service
 from pangpang.store import Fault, Store, launch_contract, contract_digest
@@ -567,13 +567,18 @@ class ToolTests(unittest.TestCase):
             self.app.onboarding.approve(stale["id"], {})
         self.assertEqual(ctx.exception.code, "setup_request_expired_or_used")
         self.assertNotIn("codex-stale-local", self.app.execution.installations)
+        sibling = self.app.execution.installations["codex-local"]
+        expected_argv = [sibling["argv"][0], *ADAPTER_CATALOG["codex"]["argv"]]
+        self.assertEqual(request["proposal"]["command"], expected_argv)
+        request["proposal"]["command"] = ["evil-binary", "--not-catalog"]
+        self.app.store.put("setup_request", request)
         endpoint = "https://127.0.0.1:9/v1"
         approved = self.app.onboarding.approve(request["id"], {"endpoint": endpoint})
         iid = "codex-work-local"
         self.assertEqual(approved["installation_id"], iid)
         created = self.app.execution.installations[iid]
-        sibling = self.app.execution.installations["codex-local"]
-        self.assertEqual(created["argv"], sibling["argv"])
+        self.assertEqual(created["argv"], expected_argv)
+        self.assertNotEqual(created["argv"], sibling["argv"])
         self.assertEqual(created["profile"], "work")
         self.assertEqual(created["extra_env"]["OPENAI_BASE_URL"], endpoint)
         self.assertEqual(created["env"]["CODEX_HOME"], str(self.root / "profile"))
@@ -601,6 +606,39 @@ class ToolTests(unittest.TestCase):
             self.app.propose_executor("bot-main", self.work, {
                 "host_id": "missing", "adapter": "codex"})
         self.assertEqual(ctx.exception.code, "connector_host_required")
+
+    def test_blank_endpoint_uses_catalog_env_and_keeps_routing(self):
+        staged = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "codex", "profile": "plain",
+            "cwd": str(self.root), "priority": 4, "use_when": "notes only"})
+        self.assertEqual(sorted(staged["staged"]["fields"]),
+                         ["adapter", "cwd", "priority", "profile", "use_when"])
+        request = self.app.store.get("setup_request", staged["staged"]["request_id"])
+        sibling = self.app.execution.installations["codex-local"]
+        expected = [sibling["argv"][0], *ADAPTER_CATALOG["codex"]["argv"]]
+        self.assertEqual(request["proposal"]["command"], expected)
+        self.assertEqual(request["proposal"]["draft"]["priority"], 4)
+        self.assertEqual(request["proposal"]["draft"]["use_when"], "notes only")
+        approved = self.app.onboarding.approve(request["id"], {"endpoint": ""})
+        row = self.app.execution.installations[approved["installation_id"]]
+        self.assertEqual(row["argv"], expected)
+        self.assertNotIn("extra_env", row)
+        self.assertNotIn("CANARY_PROXY_VALUE", json.dumps(row))
+        self.assertEqual(row["priority"], 4)
+        self.assertEqual(row["use_when"], "notes only")
+        grant = self.app.store.get("settings", "executor_grants")["grants"][row["id"]]
+        self.assertEqual(grant["digest"], self.app._authorization_digest(row["id"]))
+        self.app.probe(row["id"])
+        submitted = self.app.submit_task("bot-main", self.work, {
+            "prompt": "go", "installation_id": row["id"]})
+        self.assertEqual(submitted["status"], "queued")
+        self.app.cancel(submitted["task_id"])
+        bad = self.app.propose_executor("bot-main", self.work, {
+            "host_id": "local", "adapter": "codex", "profile": "bad", "priority": 0})
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(bad["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "invalid_priority")
+        self.assertNotIn("codex-bad-local", self.app.execution.installations)
 
     def test_invalid_staged_env_does_not_apply_priority(self):
         before = self.app.execution.installations["codex-local"].get("priority")

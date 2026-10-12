@@ -20,7 +20,7 @@ from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_match
                        executor_parameter_schema, fetch_pinned_pi, installation_id,
                        materialize_executor_env, permission_bridge_for, pi_models_api,
                        secret_env_name, task_interjection_tier, validate_extra_argv,
-                       validate_profile_env, validate_secret_refs, write_pi_provider_config,
+                       validate_staged_executor, write_pi_provider_config,
                        _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
 from .store import Fault, Store, digest, encode, uid, os_family
@@ -4869,70 +4869,45 @@ class Service:
         if inst is not None and "profile" in body:
             if installation_id(inst.get("adapter"), inst.get("host_id"), body.get("profile") or None) != inst["id"]:
                 raise Fault("installation_approval_mismatch", 403)
-        direct, staged = {}, {}
+        direct = {}
         local = host.get("transport") == "local"
         if not local and any(key in body for key in ("enabled", "max_concurrency", "timeout_s", "secret_refs")):
             raise Fault("unsupported_installation_field", 400)
-        if "priority" in body:
-            direct["priority"] = body["priority"]
-        if "use_when" in body:
-            direct["use_when"] = body["use_when"]
-        if local and inst is not None:
-            if "enabled" in body:
-                if body["enabled"] is False:
-                    direct["enabled"] = False
-                elif body["enabled"] is True and (
-                        inst.get("enabled") is not True or not self._grant_matches(inst)):
-                    staged["enabled"] = True
-            if "max_concurrency" in body:
-                current = int(inst.get("max_concurrency", 1))
-                proposed = body["max_concurrency"]
-                if type(proposed) is int and proposed < current:
-                    direct["max_concurrency"] = proposed
-                elif type(proposed) is int and proposed > current:
-                    staged["max_concurrency"] = proposed
-                elif type(proposed) is not int:
-                    direct["max_concurrency"] = proposed  # prepare rejects a bad value
-            if "timeout_s" in body:
-                current = int(inst.get("timeout_s", 3600))
-                proposed = body["timeout_s"]
-                if type(proposed) is int and proposed < current:
-                    direct["timeout_s"] = proposed
-                elif type(proposed) is int and proposed > current:
-                    staged["timeout_s"] = proposed
-                elif type(proposed) is not int:
-                    direct["timeout_s"] = proposed
-        elif not local:
-            for key in ("cwd", "extra_argv", "env", "profile"):
-                if key in body:
-                    staged[key] = body[key]
-        for key in ("cwd", "extra_argv", "env", "profile", "secret_refs"):
-            if local and key in body:
-                staged[key] = body[key]
+        staged = {k: body[k] for k in ("cwd", "extra_argv", "env", "profile", "secret_refs") if k in body}
         if inst is None:
-            # A new profile has nothing to edit until the operator approves it.
-            # Routing waits until that row exists.
-            for key in ("cwd", "extra_argv", "env", "profile", "secret_refs", "adapter"):
-                if key in body:
-                    staged[key] = body[key]
-            direct = {}
+            # Naming only an adapter still opens a card. Routing waits on the new row.
+            extra = ("adapter", "priority", "use_when") if local else ("adapter",)
+            staged.update({k: body[k] for k in extra if k in body})
+        else:
+            if "priority" in body:
+                direct["priority"] = body["priority"]
+            if "use_when" in body:
+                direct["use_when"] = body["use_when"]
+            if local:
+                if "enabled" in body:
+                    if body["enabled"] is False:
+                        direct["enabled"] = False
+                    elif body["enabled"] is True and (
+                            inst.get("enabled") is not True or not self._grant_matches(inst)):
+                        staged["enabled"] = True
+                for key, default in (("max_concurrency", 1), ("timeout_s", 3600)):
+                    if key not in body:
+                        continue
+                    current = int(inst.get(key, default))
+                    proposed = body[key]
+                    if type(proposed) is int and proposed < current:
+                        direct[key] = proposed
+                    elif type(proposed) is int and proposed > current:
+                        staged[key] = proposed
+                    elif type(proposed) is not int:
+                        direct[key] = proposed
         if not direct and not staged:
             raise Fault("empty_executor_proposal", 400)
         if staged:
-            adapter = (inst or {}).get("adapter") or body.get("adapter")
-            host_id = inst["host_id"] if inst else body.get("host_id")
-            if "env" in staged:
-                validate_profile_env(staged["env"])
-            if "extra_argv" in staged:
-                validate_extra_argv(adapter, staged["extra_argv"])
-            if "secret_refs" in staged:
-                validate_secret_refs(staged["secret_refs"])
-            if staged.get("profile"):
-                installation_id(adapter, host_id, staged["profile"])
+            validate_staged_executor((inst or {}).get("adapter") or body.get("adapter"),
+                                     inst["host_id"] if inst else body.get("host_id"), staged)
         result = {}
         if direct:
-            if inst is None:
-                raise Fault("installation_not_found", 404)
             prepared = self.prepare_installation_config(inst["id"], direct)
             committed = self.commit_installation_config(inst["id"], prepared)
             result["applied"] = sorted(direct)

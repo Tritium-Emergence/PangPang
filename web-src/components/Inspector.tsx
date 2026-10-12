@@ -4,6 +4,7 @@ import {useTranslation} from 'react-i18next';
 import {conversationActivity, currentWorkId} from '../scope';
 import {api} from '../api';
 import {RunPreview} from './RunPreview';
+import {ApprovalButtons} from './ApprovalButtons';
 import {friendlyError} from '../display';
 import {RecoveryActions} from './WorkPane';
 import {AttentionPanel, type Goto} from './AttentionBar';
@@ -88,14 +89,7 @@ export function Inspector({store, botId, goto}: {store: Store; botId?: string; g
                   <p className="text-xs">{t('inspector.needsApproval', {prompt: (t2.prompt || '').slice(0, 80)})}</p>
                   <RunPreview task={t2} />
                   <div className="mt-1 flex gap-2">
-                    {t2.installation_authorization === 'required' ? (
-                      <>
-                        <button className="rounded bg-brand px-2 py-1 text-xs text-white" onClick={() => act(() => api(`tasks/${t2.id}/approve`, {spec_digest: t2.spec_digest}))}>{t('chat.approveOnce')}</button>
-                        <button className="rounded bg-brand px-2 py-1 text-xs text-white" onClick={() => act(() => api(`tasks/${t2.id}/approve`, {spec_digest: t2.spec_digest, always: true}))}>{t('chat.approveAlways')}</button>
-                      </>
-                    ) : (
-                      <button className="rounded bg-brand px-2 py-1 text-xs text-white" onClick={() => act(() => api(`tasks/${t2.id}/approve`, {spec_digest: t2.spec_digest}))}>{t('inspector.approve')}</button>
-                    )}
+                    <ApprovalButtons task={t2} store={store} single={t('inspector.approve')} compact />
                     <button className="rounded border border-line px-2 py-1 text-xs" onClick={() => act(() => api(`tasks/${t2.id}/cancel`, {}))}>{t('inspector.cancel')}</button>
                   </div>
                 </div>

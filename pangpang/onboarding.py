@@ -11,8 +11,9 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from .store import Fault, digest, uid, encode
-from .execution import (ADAPTER_CATALOG, installation_id, validate_extra_argv,
-                       validate_profile_env, validate_secret_refs)
+from .execution import (ADAPTER_CATALOG, endpoint_extra_env, installation_id,
+                       validate_extra_argv, validate_profile_env, validate_secret_refs,
+                       validate_staged_executor)
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
 
 
@@ -312,14 +313,7 @@ class Onboarding:
         adapter = (inst or {}).get("adapter") or raw.get("adapter") or staged.get("adapter")
         if adapter not in ADAPTER_CATALOG:
             raise Fault("unknown_adapter")
-        if "env" in staged:
-            validate_profile_env(staged["env"])
-        if "extra_argv" in staged:
-            validate_extra_argv(adapter, staged["extra_argv"])
-        if "secret_refs" in staged:
-            validate_secret_refs(staged["secret_refs"])
-        if staged.get("profile"):
-            installation_id(adapter, host_id, staged["profile"])
+        validate_staged_executor(adapter, host_id, staged)
         local = (host or {}).get("transport") == "local"
         proposal = {
             "action": "executor_config" if local else "configure",
@@ -331,8 +325,11 @@ class Onboarding:
             "endpoint": "",
             "endpoint_source": "operator",
         }
-        if not local and inst is None:
-            proposal["action"] = "configure"
+        if local and inst is None:
+            sibling = self._sibling_local_installation(host_id, adapter)
+            argv = (sibling or {}).get("argv") or []
+            if argv:
+                proposal["command"] = [argv[0], *ADAPTER_CATALOG[adapter]["argv"]]
         req = self.store.put("setup_request", {
             "id": uid("setup"), "host_id": host_id, "bot_id": bot_id, "work_id": work_id,
             "origin": "executor_proposal", "proposal": proposal, "status": "needs_approval",
@@ -347,7 +344,7 @@ class Onboarding:
         return {"denied": True}
 
     def _sibling_local_installation(self, host_id, adapter):
-        """An already registered local row of this adapter. Its argv is the command."""
+        """An already registered local row of this adapter. Its binary is reused."""
         rows = [i for i in self.s.execution.installations.values()
                 if i.get("host_id") == host_id and i.get("adapter") == adapter
                 and i.get("id") not in self.s.execution.unknown_adapters
@@ -366,12 +363,6 @@ class Onboarding:
         sibling = self._sibling_local_installation(host_id, adapter)
         if not sibling:
             raise Fault("cli_not_installed")
-        if "env" in draft:
-            validate_profile_env(draft["env"])
-        if "extra_argv" in draft:
-            validate_extra_argv(adapter, draft["extra_argv"])
-        if "secret_refs" in draft:
-            validate_secret_refs(draft["secret_refs"])
         host = self.s.execution.hosts.get(host_id, {})
         from . import runner
         try:
@@ -385,7 +376,7 @@ class Onboarding:
             raise Fault("cwd_outside_allowed_roots", 400) from None
         row = {
             "id": iid, "host_id": host_id, "adapter": adapter,
-            "argv": list(sibling.get("argv") or []),
+            "argv": [sibling["argv"][0], *ADAPTER_CATALOG[adapter]["argv"]],
             "cwd": cwd, "enabled": True,
             "prompt_mode": sibling.get("prompt_mode", "stdin"),
             "risk": sibling.get("risk", "write"),
@@ -404,38 +395,36 @@ class Onboarding:
             row["extra_argv"] = list(draft["extra_argv"])
         if draft.get("secret_refs"):
             row["secret_refs"] = dict(draft["secret_refs"])
-        extra = self._endpoint_extra_env(adapter, sibling, (body or {}).get("endpoint"))
+        routing = {k: draft[k] for k in ("priority", "use_when") if k in draft}
+        if routing:
+            checked = self.s.prepare_installation_config(sibling["id"], routing)["updated"]
+            for key in routing:
+                if key in checked:
+                    row[key] = checked[key]
+        endpoint_value = (body or {}).get("endpoint")
+        model, api = "", None
+        if endpoint_value and ADAPTER_CATALOG[adapter].get("models_json"):
+            from .broker import global_profile
+            profile = global_profile(self.s.config)
+            model, api = profile.get("model") or "", profile.get("api")
+        extra = endpoint_extra_env(adapter, self.s.data, endpoint_value, model=model, api=api)
         if extra:
             row["extra_env"] = extra
         self.s._stamp_workspace_key(row)
         return row
 
-    def _endpoint_extra_env(self, adapter, sibling, endpoint_value):
-        """Same endpoint rule as LocalSetup.configure. Blank keeps the sibling env."""
-        url = endpoint(str(endpoint_value or ""))
-        if not url:
-            extra = sibling.get("extra_env")
-            return dict(extra) if extra else None
-        from .execution import (materialize_executor_env, pi_models_api, secret_env_name,
-                               write_pi_provider_config, _PI_BASE_URL_ENV)
-        cat = ADAPTER_CATALOG[adapter]
-        if cat.get("models_json"):
-            extra = dict(materialize_executor_env(cat, self.s.data) or {})
-            extra[_PI_BASE_URL_ENV] = url
-            directory = extra.get("PI_CODING_AGENT_DIR")
-            if directory:
-                from .broker import global_profile
-                profile = global_profile(self.s.config)
-                model_id = profile.get("model") or ""
-                api = pi_models_api(profile)
-                if not api:
-                    raise Fault("pi_api_unsupported")
-                if not model_id:
-                    raise Fault("model_endpoint_and_name_required")
-                write_pi_provider_config(directory, url, secret_env_name(adapter), model_id, api)
-            return extra
-        key = "OPENAI_BASE_URL" if adapter == "codex" else "ANTHROPIC_BASE_URL"
-        return {key: url}
+    def _finish_local_executor(self, identity, proposal, candidate, iid, creating=False):
+        with self.store.atomic():
+            current_req = self.checked_request(identity, "needs_approval")
+            if current_req.get("proposal", {}).get("base_revision") != self.s.config_revision:
+                raise Fault("installation_config_changed", 409)
+            if creating and iid in self.s.execution.installations:
+                raise Fault("installation_already_exists", 409)
+            self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
+            self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
+            current_req["status"] = "done"
+            self.store.put("setup_request", current_req)
+        return {"accepted": True, "installation_id": iid}
 
     def _approve_local_executor(self, identity, body=None):
         """Operator confirms a local execution change, then the always-grant matches it."""
@@ -446,54 +435,35 @@ class Onboarding:
         iid = proposal.get("installation_id")
         if not iid:
             prepared = self._prepare_new_local_profile(proposal, draft, body, req.get("host_id"))
-            with self.store.atomic():
-                current_req = self.checked_request(identity, "needs_approval")
-                if current_req.get("proposal", {}).get("base_revision") != self.s.config_revision:
-                    raise Fault("installation_config_changed", 409)
-                if prepared["id"] in self.s.execution.installations:
-                    raise Fault("installation_already_exists", 409)
-                candidate = copy.deepcopy(self.s.config)
-                candidate["installations"] = list(candidate.get("installations") or []) + [prepared]
-                self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
-                self.s._put_executor_grant(
-                    prepared["id"], self.s._authorization_digest(prepared["id"], candidate), "operator")
-                current_req["status"] = "done"
-                self.store.put("setup_request", current_req)
-            return {"accepted": True, "installation_id": prepared["id"]}
+            candidate = copy.deepcopy(self.s.config)
+            candidate["installations"] = list(candidate.get("installations") or []) + [prepared]
+            return self._finish_local_executor(identity, proposal, candidate, prepared["id"], creating=True)
         inst = self.s.execution.installations.get(iid)
         if not inst:
             raise Fault("installation_not_found", 404)
         fields = {k: draft[k] for k in ("cwd", "extra_argv", "enabled", "max_concurrency", "timeout_s") if k in draft}
         prepared = self.s.prepare_installation_config(iid, fields) if fields else None
-        with self.store.atomic():
-            current_req = self.checked_request(identity, "needs_approval")
-            if current_req.get("proposal", {}).get("base_revision") != self.s.config_revision:
-                raise Fault("installation_config_changed", 409)
-            updated = dict(prepared["updated"] if prepared else self.s.execution.installations[iid])
-            if "env" in draft:
-                validate_profile_env(draft["env"])
-                if draft["env"]:
-                    updated["env"] = dict(draft["env"])
-                else:
-                    updated.pop("env", None)
-            if "secret_refs" in draft:
-                validate_secret_refs(draft["secret_refs"])
-                if draft["secret_refs"]:
-                    updated["secret_refs"] = dict(draft["secret_refs"])
-                else:
-                    updated.pop("secret_refs", None)
-            if draft.get("profile"):
-                if installation_id(updated.get("adapter"), updated.get("host_id"), draft["profile"]) != iid:
-                    raise Fault("installation_approval_mismatch", 403)
-                updated["profile"] = draft["profile"]
-            candidate = copy.deepcopy(self.s.config)
-            candidate["installations"] = [updated if i.get("id") == iid else i
-                                          for i in candidate.get("installations", [])]
-            self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
-            self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
-            current_req["status"] = "done"
-            self.store.put("setup_request", current_req)
-        return {"accepted": True, "installation_id": iid}
+        updated = dict(prepared["updated"] if prepared else inst)
+        if "env" in draft:
+            validate_profile_env(draft["env"])
+            if draft["env"]:
+                updated["env"] = dict(draft["env"])
+            else:
+                updated.pop("env", None)
+        if "secret_refs" in draft:
+            validate_secret_refs(draft["secret_refs"])
+            if draft["secret_refs"]:
+                updated["secret_refs"] = dict(draft["secret_refs"])
+            else:
+                updated.pop("secret_refs", None)
+        if draft.get("profile"):
+            if installation_id(updated.get("adapter"), updated.get("host_id"), draft["profile"]) != iid:
+                raise Fault("installation_approval_mismatch", 403)
+            updated["profile"] = draft["profile"]
+        candidate = copy.deepcopy(self.s.config)
+        candidate["installations"] = [updated if i.get("id") == iid else i
+                                      for i in candidate.get("installations", [])]
+        return self._finish_local_executor(identity, proposal, candidate, iid)
 
     def checked_request(self, identity, status):
         req = self.store.get("setup_request", identity)

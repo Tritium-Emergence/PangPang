@@ -1,9 +1,9 @@
 """Fixed device adapters and locally enforced workspace policy."""
 import copy
 import shutil
-from .execution import (Execution, ADAPTER_CATALOG, binary_matches_pin, fetch_pinned_pi,
-                       installation_id, materialize_executor_env, pi_models_api, secret_env_name,
-                       validate_extra_argv, validate_profile_env, write_pi_provider_config, _PI_BASE_URL_ENV)
+from .execution import (Execution, ADAPTER_CATALOG, binary_matches_pin, endpoint_extra_env,
+                       fetch_pinned_pi, installation_id, secret_env_name,
+                       validate_extra_argv, validate_profile_env)
 from .runner import checked, probe
 from .store import Fault, digest
 
@@ -100,26 +100,8 @@ class LocalSetup:
         # hold qwen-shared". A real shared external device lock is legitimate but must
         # come from operator/device policy as explicit resource_keys (preserved above
         # from `old`), never inferred from the adapter name.
-        extra = materialize_executor_env(cat, self.c.data)
-        if body.get("endpoint"):
-            from .onboarding import endpoint
-            url = endpoint(body["endpoint"])
-            if cat.get("models_json"):
-                extra = dict(extra or {})
-                extra[_PI_BASE_URL_ENV] = url
-                # approve() copies the Bot profile's model and api onto this payload.
-                # A missing api is the Bot default (openai-completions).
-                model_id = body.get("model") or ""
-                api = pi_models_api({"api": body["api"]} if body.get("api") else {})
-                if not api:
-                    raise Fault("pi_api_unsupported")
-                if not model_id:
-                    raise Fault("model_endpoint_and_name_required")
-                write_pi_provider_config(extra["PI_CODING_AGENT_DIR"], url, secret_env_name(adapter),
-                                         model_id, api)
-            else:
-                key = "OPENAI_BASE_URL" if adapter == "codex" else "ANTHROPIC_BASE_URL"
-                extra = {key: url}
+        extra = endpoint_extra_env(adapter, self.c.data, body.get("endpoint"),
+                                   model=body.get("model") or "", api=body.get("api"))
         if extra:
             e["extra_env"] = extra
         if body.get("auth") == "api_key":

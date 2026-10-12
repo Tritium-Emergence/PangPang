@@ -418,6 +418,28 @@ def secret_env_name(adapter):
     return "CODEX_API_KEY" if adapter == "codex" else "ANTHROPIC_API_KEY"
 
 
+def endpoint_extra_env(adapter, data, endpoint_value, model="", api=None):
+    """Catalog extra_env. A set endpoint replaces it; a blank one does not copy another row."""
+    cat = ADAPTER_CATALOG[adapter]
+    extra = materialize_executor_env(cat, data)
+    if not endpoint_value:
+        return extra
+    from .onboarding import endpoint as parse_endpoint
+    url = parse_endpoint(endpoint_value)
+    if cat.get("models_json"):
+        extra = dict(extra or {})
+        extra[_PI_BASE_URL_ENV] = url
+        resolved = pi_models_api({"api": api} if api else {})
+        if not resolved:
+            raise Fault("pi_api_unsupported")
+        if not model:
+            raise Fault("model_endpoint_and_name_required")
+        write_pi_provider_config(extra["PI_CODING_AGENT_DIR"], url, secret_env_name(adapter), model, resolved)
+        return extra
+    key = "OPENAI_BASE_URL" if adapter == "codex" else "ANTHROPIC_BASE_URL"
+    return {key: url}
+
+
 # Extensible executor catalog. Adding a new CLI = add one DATA row here
 # (operator edit, never AI). `argv` is the parameter template appended after the
 # probed binary; the real argv is [resolved_binary, *argv]. This is the single
@@ -603,6 +625,18 @@ def validate_extra_argv(adapter, extra_argv):
                 index += 2
                 continue
             index += 1
+
+
+def validate_staged_executor(adapter, host_id, staged):
+    """One check for a staged executor draft, before any routing field is committed."""
+    if "env" in staged:
+        validate_profile_env(staged["env"])
+    if "extra_argv" in staged:
+        validate_extra_argv(adapter, staged["extra_argv"])
+    if "secret_refs" in staged:
+        validate_secret_refs(staged["secret_refs"])
+    if staged.get("profile"):
+        installation_id(adapter, host_id, staged["profile"])
 
 
 def unknown_adapter_advice(data, installation_id, adapter):
