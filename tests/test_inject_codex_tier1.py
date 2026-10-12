@@ -36,7 +36,10 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["codex"]), 1)
         self.assertEqual(ADAPTER_CATALOG["codex"]["stdin_protocol"], "codex-app-server")
         # Stored invocation is still exec. The runner rewrites it at launch.
-        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"],
+                         ["exec", "--sandbox", "workspace-write", "-"])
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox",
+                         ADAPTER_CATALOG["codex"]["argv"])
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("qwen-claude")), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(
@@ -101,6 +104,43 @@ class CapabilityTests(unittest.TestCase):
         self.assertNotIn("accept", json.dumps(params))
         with self.assertRaises(ValueError):
             runner.codex_app_server_plan(["codex", "app-server", "--listen", "ws://127.0.0.1:9"])
+
+    def test_default_plan_is_workspace_write_and_outside_writes_stay_unprivileged(self):
+        default = ["codex", *ADAPTER_CATALOG["codex"]["argv"]]
+        launch, params = runner.codex_app_server_plan(default)
+        self.assertEqual(params["sandbox"], "workspace-write")
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertNotIn("writableRoots", params)
+        self.assertNotIn("writable_roots", params)
+        self.assertNotIn("--sandbox", launch)
+        self.assertNotIn("workspace-write", launch)
+        self.assertNotEqual(params.get("sandbox"), "danger-full-access")
+        # --add-dir would widen the writable set past the task workspace.
+        # The plan drops it, so that write is not granted.
+        outside = runner.codex_app_server_plan([
+            "codex", "exec", "--sandbox", "workspace-write",
+            "--add-dir", "/outside-workspace", "-"])
+        self.assertEqual(outside[1]["sandbox"], "workspace-write")
+        self.assertNotIn("--add-dir", outside[0])
+        self.assertNotIn("/outside-workspace", outside[0])
+        self.assertNotIn("writableRoots", outside[1])
+        self.assertNotEqual(outside[1].get("sandbox"), "danger-full-access")
+
+    def test_explicit_bypass_yields_full_access_and_defaults_do_not(self):
+        launch, params = runner.codex_app_server_plan(
+            ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"])
+        self.assertEqual(params["sandbox"], "danger-full-access")
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", launch)
+        for argv in (
+            ["codex", *ADAPTER_CATALOG["codex"]["argv"]],
+            ["codex", "exec", "-"],
+            ["codex", "exec", "--sandbox", "read-only", "-"],
+            ["codex", "exec", "--sandbox", "workspace-write", "-"],
+            ["codex", "app-server"],
+        ):
+            planned = runner.codex_app_server_plan(argv)
+            self.assertNotEqual(planned[1].get("sandbox"), "danger-full-access", argv)
 
     def test_delivery_is_client_id_and_approval_requests_are_not_answered(self):
         state = {"result_text": None, "confirmed": set()}

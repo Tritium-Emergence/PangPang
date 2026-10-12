@@ -83,7 +83,8 @@ class ClaudeCodeGrantTests(unittest.TestCase):
         self.assertNotIn("bypassPermissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("Bash", CLAUDE_CODE_ARGV)
         self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
-        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], ["exec", "-"])
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"],
+                         ["exec", "--sandbox", "workspace-write", "-"])
 
     def _connector(self, installations):
         data = self.root / "device"

@@ -200,6 +200,9 @@ PangPang 能操作真实文件和真实机器。因此，比起展示“完全�
 
 - 模型和执行器的输出均不能自行授予权限。
 - 新的对话 Work 默认 `grant_write=true`。这允许执行器在自己的 workspace 里写文件，不是操作系统授权。只读必须显式关闭。
+- 内置 Codex 执行器默认使用 `workspace-write` 沙箱（`exec --sandbox workspace-write`）。编码任务可以在任务 workspace 内写文件。workspace 之外的写入仍然被拒绝：plan 发送 `sandbox=workspace-write`，不附加 writable root，并丢弃 `--add-dir`。这是 Codex 的沙箱档位，不是操作系统授权。
+- 完整绕过不是默认。operator 把它写进该 installation 或 profile 的存储命令（`--dangerously-bypass-approvals-and-sandbox`）才会启用。plan 这时发送 `sandbox=danger-full-access`，除非同一条命令另外指定了 `--sandbox`。catalog argv 不包含该 flag，`extra_argv` 也会拒绝它。
+- 已经存下来的 installation 保留自己的 argv。升级迁移按这条已存储命令授权，因此不会因为这次 catalog 默认变化而重新要求批准，授权摘要也不变。再次 configure 会复制当前 catalog 命令，摘要随之改变。没有 `--sandbox` 的已存储命令仍然以 read-only 启动。
 - 密钥由控制面管理；自定义 API 端点需要明确确认。
 - 已批准的 Routine 一旦发生影响授权的修改，需要重新批准。
 - 未经核实的设备报告不能直接变成最终执行事实。

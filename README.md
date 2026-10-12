@@ -198,6 +198,9 @@ PangPang operates real files on real machines. So we care less about demonstrati
 
 - Neither model nor executor output can grant itself permissions.
 - A new conversation Work is created with `grant_write=true`. That lets an executor write inside its workspace. It is not an operating-system grant. Read-only work has to be set explicitly.
+- The built-in Codex executor defaults to the `workspace-write` sandbox (`exec --sandbox workspace-write`). A coding task can write inside the task workspace. A write outside that workspace is still refused: the plan sends `sandbox=workspace-write`, adds no writable root, and drops `--add-dir`. This is the Codex sandbox tier, not an operating-system grant.
+- Full bypass is not a default. An operator enables it by putting `--dangerously-bypass-approvals-and-sandbox` on that installation or profile's stored command. The plan then sends `sandbox=danger-full-access` unless the same command also names `--sandbox`. The catalog argv does not include the flag, and `extra_argv` rejects it.
+- An installation already stored keeps its argv. The upgrade migration authorizes that stored command, so the installation keeps running without a new approval prompt. Its authorization digest does not change. Configuring it again copies the current catalog command and changes the digest. A stored command with no `--sandbox` still comes up read-only.
 - Secrets are managed by the control plane; custom API endpoints require explicit confirmation.
 - An approved Routine that changes in a way affecting its authority must be re-approved.
 - An unverified device report never becomes a final execution fact directly.
