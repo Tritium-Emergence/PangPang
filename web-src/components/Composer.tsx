@@ -178,18 +178,20 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
         </div>
 ): null}
 
-      <textarea
-        id="message"
-        rows={3}
-        required
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !(e as any).isComposing) { e.preventDefault(); if (!sending) void send(); } }}
-        placeholder={t('composer.placeholder')}
-        className="mt-2 w-full resize-none rounded-xl border border-line px-3 py-2 text-sm"
-      />
-      <div className="compose-bottom mt-2 flex justify-end">
-        <button id="send" className="rounded-lg bg-brand px-4 py-2 font-medium text-white disabled:opacity-50" disabled={sending || uploads > 0}>{t('composer.send')} →</button>
+      <div className="compose-row">
+        <textarea
+          id="message"
+          rows={3}
+          required
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !(e as any).isComposing) { e.preventDefault(); if (!sending) void send(); } }}
+          placeholder={t('composer.placeholder')}
+          className="mt-2 w-full resize-none rounded-xl border border-line px-3 py-2 text-sm"
+        />
+        <div className="compose-bottom mt-2 flex justify-end">
+          <button id="send" className="rounded-lg bg-brand px-4 py-2 font-medium text-white disabled:opacity-50" disabled={sending || uploads > 0}>{t('composer.send')} →</button>
+        </div>
       </div>
     </form>
 );
