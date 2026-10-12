@@ -19,6 +19,10 @@ export async function api<T = any>(path: string, body?: unknown, requestKey?: st
   }
   const r = await fetch('/api/v1/' + path, options);
   const value = await r.json().catch(() => ({}));
-  if (!r.ok) throw new ApiError(value.code || r.statusText, r.status);
+  if (!r.ok) {
+    const code = typeof value.code === 'string' && value.code ? value.code : r.statusText;
+    const advice = typeof value.advice === 'string' ? value.advice.trim() : '';
+    throw new ApiError(advice ? `${code}: ${advice}` : code, r.status);
+  }
   return value as T;
 }

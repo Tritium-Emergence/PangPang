@@ -1,6 +1,7 @@
 """Stored installations whose adapter is no longer in the catalog still load.
 
-A startup file and every config write still reject an unknown adapter.
+A startup file, a direct Execution(), and a write that adds or edits an unknown
+adapter still reject it. A write that leaves that row identical does not.
 Pairing distinguishes an answered 4xx from a transport or TLS failure.
 Service templates can name a port and document local execution only as a comment.
 """
@@ -204,7 +205,7 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.assertEqual(route["selected"]["installation_id"], "inst-local-legacy-private-cli")
         self.assertNotIn("unknown_adapter", {row["reason"] for row in route["rejected"]})
 
-    def test_startup_file_and_candidate_writes_still_reject_unknown_adapter(self):
+    def test_startup_file_rejects_unknown_adapter_and_unchanged_rows_do_not_block_writes(self):
         config = _managed(self.workspace, _qwen_and_codex(self.workspace))
         with self.assertRaises(Fault) as raised:
             Service(config, self.data, deployment_level="L0")
@@ -216,13 +217,29 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         self.apps.append(app)
         candidate = json.loads(json.dumps(app.config))
         candidate["installations"][1]["enabled"] = False
-        with self.assertRaises(Fault) as rejected:
-            app.commit_managed_config(candidate)
-        self.assertEqual(rejected.exception.code, "invalid_adapter")
-        self.assertEqual(_settings_blob(self.data / "bots.db"), before)
+        app.commit_managed_config(candidate)
+        stored = json.loads(_settings_blob(self.data / "bots.db"))
+        legacy = next(row for row in stored["config"]["installations"] if row["adapter"] == "legacy-private-cli")
+        original = next(row for row in json.loads(before)["config"]["installations"] if row["adapter"] == "legacy-private-cli")
+        self.assertEqual(legacy, original)
+        self.assertFalse(app.execution.installations["inst-local-codex"]["enabled"])
+        self.assertIn("inst-local-legacy-private-cli", app.execution.unknown_adapters)
         with self.assertRaises(Fault) as direct:
             Execution(candidate, self.data)
         self.assertEqual(direct.exception.code, "invalid_adapter")
+        self.assertTrue(direct.exception.advice)
+
+        mutated = json.loads(json.dumps(app.config))
+        for row in mutated["installations"]:
+            if row["adapter"] == "legacy-private-cli":
+                row["enabled"] = False
+        before_mutation = _settings_blob(self.data / "bots.db")
+        with self.assertRaises(Fault) as rejected:
+            app.commit_managed_config(mutated)
+        self.assertEqual(rejected.exception.code, "invalid_adapter")
+        self.assertIn("inst-local-legacy-private-cli", rejected.exception.advice or "")
+        self.assertIn("adapters.json", rejected.exception.advice or "")
+        self.assertEqual(_settings_blob(self.data / "bots.db"), before_mutation)
 
         removed = json.loads(json.dumps(app.config))
         removed["installations"] = [row for row in removed["installations"] if row["adapter"] != "legacy-private-cli"]

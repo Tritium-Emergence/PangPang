@@ -635,7 +635,12 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 log.exception("request failed %s code=%s", path, code)
             else:
                 log.info("request rejected %s code=%s status=%s", path, code, status)
-            self.respond({"code": code, "message": code, "retryable": False}, status)
+            advice = error.advice if isinstance(error, Fault) and error.advice else None
+            message = code if not advice else "%s: %s" % (code, advice)
+            body = {"code": code, "message": message, "retryable": False}
+            if advice:
+                body["advice"] = advice
+            self.respond(body, status)
 
     server = ThreadingHTTPServer((host, port), Handler)
     if port == 0:

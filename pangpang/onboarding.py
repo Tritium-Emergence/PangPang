@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from .store import Fault, digest, uid, encode
+from .store import Fault, digest, uid, encode, in_transaction
 from .execution import (ADAPTER_CATALOG, endpoint_extra_env, installation_id,
                        validate_extra_argv, validate_profile_env, validate_secret_refs,
                        validate_staged_executor)
@@ -424,7 +424,54 @@ class Onboarding:
             self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
             current_req["status"] = "done"
             self.store.put("setup_request", current_req)
-        return {"accepted": True, "installation_id": iid}
+            finished = {"id": current_req["id"], "bot_id": current_req.get("bot_id"),
+                        "work_id": current_req.get("work_id"), "host_id": current_req.get("host_id"),
+                        "action": (current_req.get("proposal") or {}).get("action")}
+        result = {"accepted": True, "installation_id": iid}
+        # The grant is already committed. A probe failure stays a probe result.
+        if not in_transaction():
+            probe = self._probe_approved_executor(iid)
+            if probe is not None:
+                result["probe"] = probe
+                self._publish_setup_probe(finished, iid, probe)
+        return result
+
+    def _probe_approved_executor(self, installation_id):
+        """The operator probe, on the host that owns this installation.
+
+        Unknown-adapter rows are not probed. A failure is returned as a probe
+        result and does not undo the approval that just committed.
+        """
+        if installation_id in self.s.execution.unknown_adapters:
+            return None
+        inst = self.s.execution.installations.get(installation_id)
+        if not inst or inst.get("adapter") not in ADAPTER_CATALOG:
+            return None
+        try:
+            stored = self.s.probe(installation_id)
+        except Exception as error:
+            reason = error.code if isinstance(error, Fault) else "probe_failed"
+            return {"available": False, "reason": reason, "probed": True}
+        view = {"available": stored.get("available") is True, "probed": True}
+        if stored.get("reason"):
+            view["reason"] = stored.get("reason")
+        if stored.get("supervision"):
+            view["supervision"] = stored.get("supervision")
+        return view
+
+    def _publish_setup_probe(self, req, installation_id, probe):
+        """Tell the assistant the approval finished and what the probe found."""
+        bot_id, work_id = req.get("bot_id"), req.get("work_id")
+        if not bot_id or not work_id or not probe:
+            return
+        try:
+            work = self.store.get("work", work_id)
+        except Fault:
+            return
+        safe = {"action": req.get("action") or "executor_config", "host_id": req.get("host_id"),
+                "accepted": True, "installation_id": installation_id, "probe": probe}
+        root = self.s._new_root("operator", "setup:" + str(req.get("id") or installation_id))["id"]
+        self.s.new_turn(bot_id, work, safe, "setup_result", "device", root_request_id=root)
 
     def _approve_local_executor(self, identity, body=None):
         """Operator confirms a local execution change, then the always-grant matches it."""
@@ -667,6 +714,12 @@ class Onboarding:
                 if manifest:
                     probe["manifest"] = manifest
                 self.store.put("probe", dict(probe, id=item["id"], at=time.time()))
+                if isinstance(result.get("probe"), dict):
+                    probe_view = {"available": probe.get("available") is True, "probed": True}
+                    reason = probe_src.get("reason")
+                    if isinstance(reason, str) and reason:
+                        probe_view["reason"] = reason
+                    safe["probe"] = probe_view
                 reported = probe.get("authorization_digest") or probe.get("policy_digest")
                 if cmd["action"] == "configure" and isinstance(reported, str) and reported:
                     self.s._put_executor_grant(item["id"], reported, "operator")

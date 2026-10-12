@@ -19,8 +19,8 @@ from .adapters_file import merge as merge_custom_adapters
 from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_matches_pin,
                        executor_parameter_schema, fetch_pinned_pi, installation_id,
                        materialize_executor_env, permission_bridge_for, pi_models_api,
-                       secret_env_name, task_interjection_tier, validate_extra_argv,
-                       validate_staged_executor, write_pi_provider_config,
+                       secret_env_name, task_interjection_tier, unknown_adapter_advice,
+                       validate_extra_argv, validate_staged_executor, write_pi_provider_config,
                        _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
 from .store import Fault, Store, digest, encode, uid, os_family
@@ -3162,9 +3162,13 @@ class Service:
         published in between is a conflict, not a lost update. Callers prepare `candidate` (a copy, never the live
         dict) and order Vault side effects around the commit: new secrets cleaned
         on failure, old secrets deleted only after this commit. Onboarding.pair is
-        the one deliberate in-transaction Vault write (see there)."""
+        the one deliberate in-transaction Vault write (see there).
+
+        A stored installation whose adapter is no longer in the catalog stays in
+        the document. It does not block a write that leaves that row identical.
+        Adding or editing such a row still raises invalid_adapter."""
         if execution is None:
-            execution = Execution(candidate, self.data)
+            execution = self._execution_for_candidate(candidate)
         execution.broker = self.broker
         execution.deployment_level = self.deployment_level
         profile = global_profile(candidate)
@@ -3181,6 +3185,29 @@ class Service:
                 self.config_revision = row["revision"]
             self.store.after_commit("managed_config", publish)
         return row
+
+    def _execution_for_candidate(self, candidate):
+        """Validate a managed-config candidate.
+
+        Unknown-adapter rows that are identical to the stored document are loaded
+        and left out of routing. A new or different unknown-adapter row is the
+        requested adapter and is rejected with advice. Direct Execution() without
+        this preservation still rejects every unknown adapter.
+        """
+        installations = candidate.get("installations") or []
+        if not isinstance(installations, list):
+            return Execution(candidate, self.data)
+        unknown = [row for row in installations
+                   if isinstance(row, dict) and row.get("adapter") not in ADAPTER_CATALOG]
+        if not unknown:
+            return Execution(candidate, self.data)
+        stored = {row.get("id"): row for row in self.config.get("installations", [])
+                  if isinstance(row, dict)}
+        for row in unknown:
+            if stored.get(row.get("id")) != row:
+                raise Fault("invalid_adapter", 400,
+                            advice=unknown_adapter_advice(self.data, row.get("id"), row.get("adapter")))
+        return Execution(candidate, self.data, tolerate_unknown_adapters=True)
 
     def set_host_execution_level(self, host_id, body):
         """Operator-only: declare the isolation level that governs a CONNECTOR
