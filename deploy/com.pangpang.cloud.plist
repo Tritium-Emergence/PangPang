@@ -8,9 +8,9 @@
 <string>/Users/REPLACE/Library/Application Support/pangpang</string>
 </array>
 <key>WorkingDirectory</key><string>/Users/REPLACE/Library/Application Support/pangpang</string>
-<!-- Set PANGPANG_TOKEN in the launchd environment, not in this file. --origin disables POSIX L0 inference. -->
-<!-- --port 8790 -->
-<!-- --allow-local-exec registers this machine as a local execution host: the CLI runs as this account in the workspace, outside a sandbox, with the configured API key injected. -->
+<!-- Set PANGPANG_TOKEN in the launchd environment, not in this file. An origin value disables POSIX L0 inference. -->
+<!-- Optional port argument, for example 8790. -->
+<!-- Optional allow-local-exec argument registers this machine as a local execution host: the CLI runs as this account in the workspace, outside a sandbox, with the configured API key injected. -->
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 </dict></plist>

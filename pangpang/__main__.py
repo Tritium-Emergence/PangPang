@@ -180,81 +180,84 @@ def main():
         return 1
     from .onboarding import empty_config
     config_file = Path(args.config)
+    service = None
     try:
         service = Service(json.loads(config_file.read_text(encoding="utf-8")) if config_file.exists() else empty_config(), data,
                           control_only=args.control_only, deployment_level=args.deployment_level)
+        service.config_path = Path(args.config).resolve()
+        # A model cannot start a process, so registration cannot be triggered by a
+        # bot. First-run registration additionally requires the operator's explicit
+        # consent (interactive confirmation or --allow-local-exec); an already
+        # registered local host needs no re-consent. Failure here must not block serving.
+        if service.control_only:
+            # Do NOT auto-register a local executor. If one is already in the DB, the
+            # runtime hard gate (route/admit/start/recover) neutralises it; warn the
+            # operator so they can remove it deliberately (we never auto-delete config).
+            existing_local = [h for h in service.execution.hosts.values() if h.get("transport") == "local"]
+            if existing_local:
+                log.warning("control-only: %d local executor host(s) exist in config but are DISABLED "
+                            "by the runtime gate; remove them deliberately if unwanted (not auto-deleted)",
+                            len(existing_local))
+            else:
+                log.info("control-only: no local executor registered; execution runs on connector/ssh devices only")
+        else:
+            workspace = args.workspace or data.with_name(data.name + "-workspace")
+            consented = (any(h.get("transport") == "local" for h in service.execution.hosts.values())
+                         or service.config.get(LOCAL_EXEC_CONSENT_KEY) == LOCAL_EXEC_CONSENT_VERSION)
+            if not consented:
+                granted = args.allow_local_exec
+                if not granted and _SYS.stdin.isatty():
+                    print(LOCAL_EXEC_RISK_TEXT.format(version=LOCAL_EXEC_CONSENT_VERSION, workspace=workspace))
+                    granted = input().strip().lower() in {"y", "yes"}
+                if granted:
+                    candidate = copy.deepcopy(service.config)
+                    candidate[LOCAL_EXEC_CONSENT_KEY] = LOCAL_EXEC_CONSENT_VERSION
+                    service.commit_managed_config(candidate)
+                    consented = True
+                else:
+                    log.warning("local executor not registered: first-run consent not granted "
+                                "(confirm in an interactive terminal, or pass --allow-local-exec; "
+                                "for a control-plane-only deployment use --control-only)")
+            if consented:
+                try:
+                    result = service.ensure_local_host(workspace, discover=True)
+                    if result.get("skipped"):
+                        log.info("local execution host already registered: %s", result["host_id"])
+                    else:
+                        found = ", ".join(result["installations"]) or "no local CLI found"
+                        log.info("registered local execution host %s (workspace %s); discovered: %s",
+                                 result["host_id"], result["workspace"], found)
+                except Exception as error:
+                    log.warning("local host auto-registration skipped: %s", error)
+            # Existing installations are not rediscovered. L0 still has to replace a
+            # stored macos-pgroup-postverify / posix-process-group marker, or the
+            # log's "L0 enables the cooperative tiers" never reaches the probe row.
+            if service.deployment_level == "L0":
+                service.refresh_l0_local_probes()
+        if service.deployment_level is None:
+            log.warning("deployment level not declared: only Windows Job Object executors can run; "
+                        "pass --deployment-level L0 to enable the L0 cooperative tiers")
+        if not args.check:
+            for warning in service.capability_warnings():
+                log.warning("capability: %s", warning)
+        text, status = render_self_check(service)
+        write_self_check(text)
+        _SYS.stderr.write(build_line())
+        _SYS.stderr.flush()
+        if args.check:
+            # Same projection startup prints, after the first-run registration above.
+            # This does not listen. It is not a read-only query. Release the DB
+            # and the process lock before returning so a later start is not blocked.
+            service.store.close()
+            lock.file.close()
+            return status
     except Fault as error:
         _SYS.stderr.write("%s: %s\n" % (error.code, error.advice or error.code))
         _SYS.stderr.flush()
+        if service is not None:
+            service.store.close()
         lock.file.close()
         return 1
-    service.config_path = Path(args.config).resolve()
-    # A model cannot start a process, so registration cannot be triggered by a
-    # bot. First-run registration additionally requires the operator's explicit
-    # consent (interactive confirmation or --allow-local-exec); an already
-    # registered local host needs no re-consent. Failure here must not block serving.
-    if service.control_only:
-        # Do NOT auto-register a local executor. If one is already in the DB, the
-        # runtime hard gate (route/admit/start/recover) neutralises it; warn the
-        # operator so they can remove it deliberately (we never auto-delete config).
-        existing_local = [h for h in service.execution.hosts.values() if h.get("transport") == "local"]
-        if existing_local:
-            log.warning("control-only: %d local executor host(s) exist in config but are DISABLED "
-                        "by the runtime gate; remove them deliberately if unwanted (not auto-deleted)",
-                        len(existing_local))
-        else:
-            log.info("control-only: no local executor registered; execution runs on connector/ssh devices only")
-    else:
-        workspace = args.workspace or data.with_name(data.name + "-workspace")
-        consented = (any(h.get("transport") == "local" for h in service.execution.hosts.values())
-                     or service.config.get(LOCAL_EXEC_CONSENT_KEY) == LOCAL_EXEC_CONSENT_VERSION)
-        if not consented:
-            granted = args.allow_local_exec
-            if not granted and _SYS.stdin.isatty():
-                print(LOCAL_EXEC_RISK_TEXT.format(version=LOCAL_EXEC_CONSENT_VERSION, workspace=workspace))
-                granted = input().strip().lower() in {"y", "yes"}
-            if granted:
-                candidate = copy.deepcopy(service.config)
-                candidate[LOCAL_EXEC_CONSENT_KEY] = LOCAL_EXEC_CONSENT_VERSION
-                service.commit_managed_config(candidate)
-                consented = True
-            else:
-                log.warning("local executor not registered: first-run consent not granted "
-                            "(confirm in an interactive terminal, or pass --allow-local-exec; "
-                            "for a control-plane-only deployment use --control-only)")
-        if consented:
-            try:
-                result = service.ensure_local_host(workspace, discover=True)
-                if result.get("skipped"):
-                    log.info("local execution host already registered: %s", result["host_id"])
-                else:
-                    found = ", ".join(result["installations"]) or "no local CLI found"
-                    log.info("registered local execution host %s (workspace %s); discovered: %s",
-                             result["host_id"], result["workspace"], found)
-            except Exception as error:
-                log.warning("local host auto-registration skipped: %s", error)
-        # Existing installations are not rediscovered. L0 still has to replace a
-        # stored macos-pgroup-postverify / posix-process-group marker, or the
-        # log's "L0 enables the cooperative tiers" never reaches the probe row.
-        if service.deployment_level == "L0":
-            service.refresh_l0_local_probes()
-    if service.deployment_level is None:
-        log.warning("deployment level not declared: only Windows Job Object executors can run; "
-                    "pass --deployment-level L0 to enable the L0 cooperative tiers")
-    if not args.check:
-        for warning in service.capability_warnings():
-            log.warning("capability: %s", warning)
-    text, status = render_self_check(service)
-    write_self_check(text)
-    _SYS.stderr.write(build_line())
-    _SYS.stderr.flush()
-    if args.check:
-        # Same projection startup prints, after the first-run registration above.
-        # This does not listen. It is not a read-only query. Release the DB
-        # and the process lock before returning so a later start is not blocked.
-        service.store.close()
-        lock.file.close()
-        return status
     install_routine_scheduler_gate(service)
     runtime = Runtime(service)
     stop = threading.Event()

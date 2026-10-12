@@ -573,10 +573,10 @@ def validate_extra_argv(adapter, extra_argv):
 
 
 def unknown_adapter_advice(data, installation_id, adapter):
-    """Both remedies for an installation whose adapter is not in the catalog."""
+    """How to turn a stored installation back on when its adapter is not in the catalog."""
     path = str(Path(data) / "adapters.json")
     text = ("installation %s adapter %s is not in the built-in catalog or %s; "
-            "remove the installation in Setup, or declare the adapter as a custom row in %s to re-enable it"
+            "declare the adapter as a custom row in %s to re-enable it"
             % (installation_id, adapter, path, path))
     return " ".join(str(text).split())
 
@@ -736,6 +736,8 @@ class Execution:
         return self.call(host, action, directory, payload)
 
     def probe(self, installation_id):
+        if installation_id in self.unknown_adapters:
+            return {"available": False, "reason": "unknown_adapter"}
         e = self.installations[installation_id]
         h = self.hosts[e["host_id"]]
         if h["transport"] == "connector":

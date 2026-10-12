@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import plistlib
 import re
 import socket
 import sqlite3
@@ -163,12 +164,14 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         marked = app.execution.unknown_adapters["inst-local-qwen-claude"]
         self.assertEqual(marked["reason"], "unknown_adapter")
         self.assertEqual(marked["adapter"], "qwen-claude")
-        self.assertIn("Setup", marked["advice"])
+        self.assertNotIn("Setup", marked["advice"])
+        self.assertIn("declare the adapter as a custom row", marked["advice"])
         self.assertIn(str(self.data / "adapters.json"), marked["advice"])
         self.assertIn("re-enable", marked["advice"])
         matching = [line for line in logs if "inst-local-qwen-claude" in line and "qwen-claude" in line]
         self.assertEqual(len(matching), 1)
-        self.assertIn("Setup", matching[0])
+        self.assertNotIn("Setup", matching[0])
+        self.assertIn("declare the adapter as a custom row", matching[0])
         self.assertIn("adapters.json", matching[0])
         route = app.route("bot-main", {"id": "work-1"}, {})
         self.assertEqual(route["selected"]["installation_id"], "inst-local-codex")
@@ -252,6 +255,90 @@ class StoredUnknownAdapterTests(unittest.TestCase):
         with self.assertRaises(Fault) as startup:
             Connector(config, fresh)
         self.assertEqual(startup.exception.code, "invalid_adapter")
+
+    def test_connector_probe_does_not_run_an_unknown_adapter(self):
+        config = _managed(self.workspace, _qwen_and_codex(self.workspace))
+        config["host_id"] = "host-local"
+        config["cloud_url"] = "http://127.0.0.1:9"
+        data = self.root / "probe-connector"
+        data.mkdir()
+        store = Store(data / "connector.db")
+        store.put("settings", {"id": "managed", "config": config})
+        store.close()
+        before = _settings_blob(data / "connector.db")
+        connector = Connector(config, data)
+        self.addCleanup(connector.close)
+
+        def probe(installation_id, command=False):
+            spawned = []
+
+            def fake_run(argv, input=None, stdout=None, stderr=None, timeout=None):
+                spawned.append(list(argv))
+                stdout.write(b'{"available": true, "supervision": "windows-job-object"}')
+                return SimpleNamespace(returncode=0)
+
+            with patch("pangpang.execution.subprocess.run", side_effect=fake_run):
+                if command:
+                    connector.execute({
+                        "id": "cmd-" + installation_id,
+                        "action": "probe",
+                        "payload": {"installation_id": installation_id},
+                    })
+                    result = connector.store.get("local_command", "cmd-" + installation_id)["result"]
+                else:
+                    result = connector.execution.probe(installation_id)
+            return spawned, result
+
+        spawned, direct = probe("inst-local-qwen-claude")
+        self.assertEqual(spawned, [])
+        self.assertEqual(direct, {"available": False, "reason": "unknown_adapter"})
+        spawned, reported = probe("inst-local-qwen-claude", command=True)
+        self.assertEqual(spawned, [])
+        self.assertFalse(reported["available"])
+        self.assertEqual(reported["reason"], "unknown_adapter")
+        self.assertIn("policy_digest", reported)
+        spawned, known = probe("inst-local-codex")
+        self.assertTrue(spawned)
+        self.assertIn("probe", spawned[0])
+        self.assertTrue(known["available"])
+        self.assertEqual(_settings_blob(data / "connector.db"), before)
+
+    def test_startup_fault_after_construct_prints_code_without_traceback(self):
+        from pangpang.__main__ import main
+        argv = ["pangpang", "--data", str(self.root / "consent-cloud"),
+                "--config", str(self.root / "missing.json"), "--allow-local-exec", "--check"]
+        err = io.StringIO()
+
+        def reject(self, candidate, execution=None, base_revision=None):
+            raise Fault("state_conflict", advice="managed config changed")
+
+        with patch.dict(os.environ, {"PANGPANG_TOKEN": "t" * 24}, clear=False), \
+                patch("sys.argv", argv), \
+                patch.object(Service, "commit_managed_config", reject), \
+                patch("pangpang.service.shutil.which", return_value=None), \
+                contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = main()
+        text = err.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("state_conflict: managed config changed", text)
+        self.assertNotIn("Traceback", text)
+
+        err = io.StringIO()
+        out = io.StringIO()
+        argv = ["pangpang", "--data", str(self.root / "consent-cloud-ok"),
+                "--config", str(self.root / "missing.json"), "--allow-local-exec", "--check"]
+        with patch.dict(os.environ, {"PANGPANG_TOKEN": "t" * 24}, clear=False), \
+                patch("sys.argv", argv), \
+                patch("pangpang.service.shutil.which", return_value=None), \
+                patch("pangpang.service.fetch_pinned_pi", return_value=None), \
+                contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(out):
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            code = main()
+        self.assertEqual(code, 0, err.getvalue() + out.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertNotIn("state_conflict", err.getvalue())
 
     def test_release_rows_pass_cloud_check_without_rewriting_settings(self):
         config = _managed(self.workspace, _release_rows(self.workspace))
@@ -342,7 +429,8 @@ class UnknownAdapterBackupTests(unittest.TestCase):
         listed = result["manifest"]["inventory"]["unknown_adapter_installations"]
         self.assertEqual([row["id"] for row in listed], ["inst-local-qwen-claude"])
         self.assertEqual(listed[0]["adapter"], "qwen-claude")
-        self.assertIn("Setup", listed[0]["advice"])
+        self.assertNotIn("Setup", listed[0]["advice"])
+        self.assertIn("declare the adapter as a custom row", listed[0]["advice"])
         self.assertIn(str(self.data / "adapters.json"), listed[0]["advice"])
         self.assertIn("re-enable", listed[0]["advice"])
         live = _settings_blob(self.data / "bots.db")
@@ -477,14 +565,27 @@ class ServiceTemplateTests(unittest.TestCase):
         self.assertNotIn("--allow-local-exec", script)
         self.assertNotIn("& $Python -m pangpang.cli cloud --data $Data", script)
 
-        for name in ("pangpang-cloud.service", "com.pangpang.cloud.plist"):
-            text = (root / name).read_text(encoding="utf-8")
-            self.assertIn("--allow-local-exec", text)
-            self.assertIn("--port", text)
-            self.assertIn("local execution host", text)
-            active = _without_comments(name, text)
-            self.assertNotIn("--allow-local-exec", active)
-            self.assertNotIn("--port", active)
+        service = (root / "pangpang-cloud.service").read_text(encoding="utf-8")
+        self.assertIn("--allow-local-exec", service)
+        self.assertIn("--port", service)
+        self.assertIn("local execution host", service)
+        active = _without_comments("pangpang-cloud.service", service)
+        self.assertNotIn("--allow-local-exec", active)
+        self.assertNotIn("--port", active)
+
+        plist_text = (root / "com.pangpang.cloud.plist").read_text(encoding="utf-8")
+        parsed = plistlib.loads(plist_text.encode("utf-8"))
+        arguments = " ".join(parsed["ProgramArguments"])
+        self.assertIn("pangpang.cli", arguments)
+        self.assertNotIn("allow-local-exec", arguments)
+        self.assertNotIn("--port", parsed["ProgramArguments"])
+        comments = re.findall(r"<!--(.*?)-->", plist_text, flags=re.S)
+        self.assertGreaterEqual(len(comments), 3)
+        for comment in comments:
+            self.assertNotIn("--", comment)
+        self.assertTrue(any("allow-local-exec" in comment and "local execution host" in comment
+                            for comment in comments))
+        self.assertTrue(any("port" in comment and "8790" in comment for comment in comments))
 
 
 def _without_comments(name, text):
