@@ -634,9 +634,16 @@ def codex_app_server_plan(argv):
     `app-server` thread comes up `on-request`. `never` means the server does
     not ask; it is not an accept. A stored `--ask-for-approval` value is sent
     unchanged and still not answered. `--approve-for-me` is dropped.
-    `--dangerously-bypass-approvals-and-sandbox` is the measured exec effect
-    `sandbox=danger-full-access` plus `approvalPolicy=never`, unless a stored
-    `--sandbox` or `--ask-for-approval` already names the value.
+    The catalog default argv is `exec --sandbox workspace-write`. A stored
+    `--sandbox` value is sent as `thread/start.sandbox`. `workspace-write`
+    can write inside the task workspace. This plan does not add writable
+    roots and drops `--add-dir`, so a write outside that workspace is not
+    granted. An argv with no sandbox flag leaves `sandbox` unset, and that
+    thread comes up read-only. `--dangerously-bypass-approvals-and-sandbox`
+    is the measured exec effect `sandbox=danger-full-access` plus
+    `approvalPolicy=never`, unless a stored `--sandbox` or
+    `--ask-for-approval` already names the value. The catalog default does
+    not include that flag.
     """
     if not argv:
         return None
