@@ -87,7 +87,12 @@ class Connector:
             raise Fault("connector_requires_one_local_host")
         if any(e["host_id"] != self.host_id for e in config.get("installations", [])):
             raise Fault("connector_installation_host_mismatch")
-        self.execution = Execution(self.config, self.data)
+        try:
+            self.execution = Execution(self.config, self.data,
+                                       tolerate_unknown_adapters=self.config_revision != 0)
+        except Exception:
+            self.close()
+            raise
         self.stop = threading.Event()
         endpoint = config["cloud_url"].rstrip("/")
         parsed = urlsplit(endpoint)
@@ -224,6 +229,9 @@ class Connector:
                 raise Fault("wrong_device")
             self.execution.directory(self.execution.hosts[self.host_id], task["execution_id"])
             installation = self.execution.installations[task["installation_id"]]
+            if task["installation_id"] in self.execution.unknown_adapters:
+                raise Fault("unknown_adapter",
+                            advice=self.execution.unknown_adapters[task["installation_id"]]["advice"])
             if installation.get("enabled") is not True:
                 raise Fault("local_installation_disabled")
             if task.get("policy_digest") != policy_digest(self.config, installation["id"]):
@@ -546,6 +554,17 @@ def paired_config(args):
         try:
             with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
                 result = json.loads(response.read(16384))
+        except urllib.error.HTTPError as exc:
+            # HTTPError is a URLError. A 4xx means the coordinator answered.
+            if 400 <= exc.code <= 499:
+                raise Fault(
+                    "pairing_code_rejected",
+                    advice="The coordinator is reachable, so the code is wrong or expired. "
+                           "Generate a new one in the web UI.") from None
+            fault = cloud_connection_fault(exc)
+            if fault.code == "cloud_connection_failed":
+                raise Fault("pairing_failed_check_code_and_cloud", advice=fault.advice) from None
+            raise fault from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             fault = cloud_connection_fault(exc)
             if fault.code == "cloud_connection_failed":
@@ -581,10 +600,10 @@ def main():
     try:
         config = json.loads(Path(args.config).read_text(encoding="utf-8")) if args.config else paired_config(args)
         merge_custom_adapters(Path(args.data) / "adapters.json")
+        connector = Connector(config, args.data)
     except Fault as error:
         print("%s: %s" % (error.code, error.advice or error.code), flush=True)
         return 1
-    connector = Connector(config, args.data)
     try:
         connector.run()
     except KeyboardInterrupt:

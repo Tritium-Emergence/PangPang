@@ -97,7 +97,7 @@ class LocalSetup:
         # not a product-level qwen special case. PangPang does not hardcode "qwen must
         # hold qwen-shared". A real shared external device lock is legitimate but must
         # come from operator/device policy as explicit resource_keys (preserved above
-        # from `old`), never inferred from adapter == "qwen-claude".
+        # from `old`), never inferred from the adapter name.
         extra = materialize_executor_env(cat, self.c.data)
         if body.get("endpoint"):
             from .onboarding import endpoint

@@ -1,21 +1,4 @@
 {
-  "qwen-claude": {
-    "argv": [
-      "/REPLACE_WITH_VERIFIED_QWEN_CLAUDE_ENTRY",
-      "{intent}"
-    ],
-    "risk": "write",
-    "needs_qwen_slot": true,
-    "slot_acquire_argv": [
-      "/REPLACE_WITH_VERIFIED_QWEN_SLOT",
-      "acquire"
-    ],
-    "slot_release_argv": [
-      "/REPLACE_WITH_VERIFIED_QWEN_SLOT",
-      "release"
-    ],
-    "timeout_s": 7200
-  },
   "claude-code": {
     "argv": [
       "claude",

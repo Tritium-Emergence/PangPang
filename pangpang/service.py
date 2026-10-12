@@ -132,6 +132,7 @@ ROUTE_ERROR = {
     "user_executor_constraint": "work_routing_constraint",
     "not_discovered": "requested_executor_not_registered",
     "discovery_failed": "requested_executor_not_registered",
+    "unknown_adapter": "requested_executor_not_registered",
     # Installed, but its cleanup (supervision) capability is insufficient for the
     # declared deployment level — distinct from "not installed".
     "platform_supervision_unverified": "executor_cleanup_unsupported",
@@ -466,7 +467,10 @@ class Service:
         for profile in self.config.get("models", []):
             normalize_profile(profile)
         merge_custom_adapters(self.data / "adapters.json")
-        self.execution = Execution(self.config, self.data)
+        # A stored document may name an adapter the catalog no longer has.
+        # The file passed on a first start is still rejected.
+        self.execution = Execution(self.config, self.data,
+                                   tolerate_unknown_adapters=self.config_revision != 0)
         self.execution.deployment_level = self.deployment_level
         self.onboarding = Onboarding(self)
         profile = global_profile(self.config)
@@ -3828,9 +3832,9 @@ class Service:
     def _resolve_executor_intent(self, body):
         """Translate a model-supplied executor/host INTENT name into the real id
         before route()'s exact matching. The model only ever sees adapter names
-        ("qwen-claude") and host names in the UI/catalog, and naturally passes those
+        and host names in the UI/catalog, and naturally passes those
         as installation_id/host_id — but route matches on the internal id
-        ("inst-local-qwen-claude"), so an intent name would fail every executor and
+        (for example inst-local-codex), so an intent name would fail every executor and
         yield requested_executor_not_available. This is a deterministic name->id map
         (NOT fuzzy, NOT a relaxation of any availability/authorization gate): it only
         rewrites the target name; route still runs every enabled/probe/online/policy
@@ -4078,6 +4082,8 @@ class Service:
                     "user_host_constraint", "user_executor_constraint",
                     "host_constraint", "executor_constraint"}:
                 reason = "ssh_transport_retired"
+            if e["id"] in self.execution.unknown_adapters:
+                reason = "unknown_adapter"
             if reason:
                 log.debug("route reject id=%s host=%s reason=%s", e["id"], e["host_id"], reason)
             (rejected if reason else candidates).append({"installation_id": e["id"], "host_id": e["host_id"], "reason": reason})
@@ -4339,10 +4345,13 @@ class Service:
     def probe(self, installation_id):
         if installation_id not in self.execution.installations:
             raise Fault("installation_not_found", 404)
-        try:
-            result = self.execution.probe(installation_id)
-        except Fault as error:
-            result = {"available": False, "reason": error.code}
+        if installation_id in self.execution.unknown_adapters:
+            result = {"available": False, "reason": "unknown_adapter"}
+        else:
+            try:
+                result = self.execution.probe(installation_id)
+            except Fault as error:
+                result = {"available": False, "reason": error.code}
         stored = self.store.put("probe", dict(result, id=installation_id, at=time.time()))
         log.info("probe id=%s available=%s reason=%s", installation_id,
                  stored.get("available"), stored.get("reason"))
@@ -4360,6 +4369,8 @@ class Service:
         for inst in list(self.execution.installations.values()):
             host = self.execution.hosts.get(inst.get("host_id"), {})
             if host.get("transport") != "local":
+                continue
+            if inst["id"] in self.execution.unknown_adapters:
                 continue
             try:
                 current = self.store.get("probe", inst["id"])
@@ -4550,9 +4561,15 @@ class Service:
         candidate = copy.deepcopy(self.config)
         changed = False
         for e in candidate.get("installations", []):
+            # Leave a stored row whose adapter is outside the catalog untouched.
+            if e.get("adapter") not in ADAPTER_CATALOG:
+                continue
             if not e.get("workspace_key") or e.get("workspace_cwd") != e.get("cwd", ""):
                 self._stamp_workspace_key(e)
                 changed = True
+        if changed and any(isinstance(e, dict) and e.get("adapter") not in ADAPTER_CATALOG
+                           for e in candidate.get("installations", [])):
+            changed = False
         if changed:
             self.commit_managed_config(candidate)
 
@@ -4608,8 +4625,8 @@ class Service:
             host = {"id": "host-local", "name": "本机", "transport": "local",
                     "os": platform.system(), "allowed_roots": [workspace]}
         # executor capacity is a generic per-installation
-        # max_concurrency, not a hardcoded qwen resource slot. qwen-claude gets
-        # max_concurrency=2 (its documented capacity); no local-slot resource.
+        # max_concurrency, not a hardcoded resource slot. Catalog concurrency
+        # is copied onto each discovered installation; no local-slot resource.
 
         installations = []
         if discover:
@@ -5426,10 +5443,11 @@ class Service:
     def _start_denied(self, task):
         """Fail-closed pre-start gate (SECURITY L1). Returns the stable
         model-facing error when a task must NEVER launch on its target, else None.
-        Three deterministic reasons: (1) transport=ssh is retired and must not
+        Four deterministic reasons: (1) transport=ssh is retired and must not
         launch; (2) control-only coordinator + local transport; (3) the
-        executor's probed supervision is not accepted at the declared
-        deployment level (supervision_ok).
+        installation adapter is not in the catalog; (4) the executor's probed
+        supervision is not accepted at the declared deployment level
+        (supervision_ok).
         route() rejects these for NEW submissions; this is the migration/existing-task
         net at admission + start so a task queued BEFORE the gate (old code) can never
         launch. Deterministic (never asks the model); returns the mapped BUSINESS code,
@@ -5442,6 +5460,8 @@ class Service:
             return ROUTE_ERROR["ssh_transport_retired"]
         if self.control_only and host.get("transport") == "local":
             return ROUTE_ERROR["control_only_no_local_executor"]
+        if task.get("installation_id") in self.execution.unknown_adapters:
+            return ROUTE_ERROR["unknown_adapter"]
         inst = self.execution.installations.get(task.get("installation_id"), {})
         try:
             probe = self.store.get("probe", inst.get("id"))

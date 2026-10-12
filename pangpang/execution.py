@@ -20,7 +20,10 @@ from pathlib import Path
 
 from . import runner
 from .consent import host_consented
+from .logs import get_logger
 from .store import Fault, digest, encode, os_family
+
+log = get_logger("execution")
 
 
 def artifact_bytes(artifact, data):
@@ -569,15 +572,32 @@ def validate_extra_argv(adapter, extra_argv):
             index += 1
 
 
+def unknown_adapter_advice(data, installation_id, adapter):
+    """How to turn a stored installation back on when its adapter is not in the catalog."""
+    path = str(Path(data) / "adapters.json")
+    text = ("installation %s adapter %s is not in the built-in catalog or %s; "
+            "declare the adapter as a custom row in %s to re-enable it"
+            % (installation_id, adapter, path, path))
+    return " ".join(str(text).split())
+
+
 class Execution:
-    def __init__(self, config, data):
+    def __init__(self, config, data, *, tolerate_unknown_adapters=False):
+        """Validate a config.
+
+        ``tolerate_unknown_adapters`` is for a stored config loaded at process
+        start. An adapter outside the built-in catalog and adapters.json stays
+        in the document, is marked unavailable, and is left out of routing.
+        Write paths leave the flag false and still raise ``invalid_adapter``.
+        """
         self.config, self.data = config, Path(data)
         self.broker = None
+        self.unknown_adapters = {}
         # Set by Service from --deployment-level. None until then: do not treat
         # an Execution built for validation as an L0 declaration.
         self.deployment_level = None
         self.hosts = {h["id"]: h for h in config.get("hosts", [])}
-        self.installations = {e["id"]: e for e in config.get("installations", [])}
+        self.installations = {}
         self.resources = {r["key"]: r for r in config.get("resources", [])}
         for r in self.resources.values():
             for verb in ("acquire_argv", "release_argv"):
@@ -600,12 +620,18 @@ class Execution:
                     raise Fault("invalid_runner_root", 400)
                 if not re.fullmatch(r"[a-zA-Z0-9_/.:\\ -]+", h.get("python", "python3")):
                     raise Fault("invalid_remote_python", 400)
-        for e in self.installations.values():
+        for e in config.get("installations", []):
             if e.get("adapter") not in ADAPTER_CATALOG:
-                raise Fault("invalid_adapter", 400,
-                            advice="adapter rows come from the built-in catalog plus custom rows in %s; "
-                                   "a removed or renamed adapters.json requires restoring it or removing "
-                                   "the installations that reference its adapters" % (self.data / "adapters.json"))
+                if not tolerate_unknown_adapters:
+                    raise Fault("invalid_adapter", 400,
+                                advice="adapter rows come from the built-in catalog plus custom rows in %s; "
+                                       "a removed or renamed adapters.json requires restoring it or removing "
+                                       "the installations that reference its adapters" % (self.data / "adapters.json"))
+                advice = unknown_adapter_advice(self.data, e.get("id"), e.get("adapter"))
+                self.unknown_adapters[e.get("id")] = {
+                    "id": e.get("id"), "adapter": e.get("adapter"),
+                    "reason": "unknown_adapter", "advice": advice}
+                log.warning("%s", advice)
             if not isinstance(e.get("argv"), list) or not e["argv"] or not all(isinstance(a, str) and "\x00" not in a for a in e["argv"]):
                 raise Fault("invalid_argv", 400)
             if "env" in e:
@@ -621,6 +647,7 @@ class Execution:
             for key in e.get("resource_keys", []):
                 if key not in self.resources:
                     raise Fault("unknown_resource", 400)
+            self.installations[e["id"]] = e
 
     def ssh(self, host):
         # No ssh argv. A caller cannot fall this host back onto a local shell.
@@ -709,6 +736,8 @@ class Execution:
         return self.call(host, action, directory, payload)
 
     def probe(self, installation_id):
+        if installation_id in self.unknown_adapters:
+            return {"available": False, "reason": "unknown_adapter"}
         e = self.installations[installation_id]
         h = self.hosts[e["host_id"]]
         if h["transport"] == "connector":
