@@ -897,10 +897,77 @@ class ConnectorProposalTests(unittest.TestCase):
                       "policy_digest": "migrated-digest"},
         })
         stored = self.app.store.get("settings", "executor_grants")
-        self.assertEqual(stored["grants"]["codex-work-pc"]["origin"], "migration")
-        self.assertEqual(stored["grants"]["codex-work-pc"]["digest"], "migrated-digest")
+        self.assertNotIn("codex-work-pc", stored["grants"])
         self.assertNotIn("codex-work-pc", stored["pending_device"])
         self.assertNotIn("codex-notes-pc", stored["grants"])
+        self.assertEqual(self.app.store.get("setup_request", migrated["staged"]["request_id"])["status"], "done")
+        self.assertFalse(self.app._grant_matches(self.app.execution.installations["codex-work-pc"]))
+        self.app.broker._last_seen["pc"] = time.time()
+        submitted = self.app.submit_task("bot-main", self.work, {
+            "prompt": "go", "installation_id": "codex-work-pc"})
+        self.assertEqual(submitted["status"], "awaiting_approval")
+        task = self.app.store.get("task", submitted["task_id"])
+        self.assertEqual(task["installation_authorization"], "required")
+        self.assertIn("run_preview", task)
+        self.app.cancel(submitted["task_id"])
+        after = self.app.store.get("settings", "executor_grants")
+        self.assertNotIn("codex-work-pc", after["grants"])
+        self.assertNotIn("codex-work-pc", after["pending_device"])
+
+    def test_invalid_adapter_advice_is_the_setup_error(self):
+        advice = ("installation inst-x adapter retired-adapter is not in the built-in catalog "
+                  "or /data/adapters.json")
+        request_id = "setup-adapter-advice"
+        self.app.store.put("setup_request", {
+            "id": request_id, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-advice", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": request_id},
+        }, {"error": "invalid_adapter", "advice": " \n" + advice + " \n"})
+        self.assertEqual(self.app.store.get("setup_request", request_id)["status"], "failed")
+        noted = [m["content"] for m in self.app.store.find("message", work_id=self.work)
+                 if m.get("kind") == "setup_result"]
+        self.assertEqual(noted[-1]["error"], "invalid_adapter: " + advice)
+
+        blank = "setup-blank-advice"
+        self.app.store.put("setup_request", {
+            "id": blank, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-blank", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": blank},
+        }, {"error": "invalid_adapter", "advice": "   "})
+        self.assertEqual(self.app.store.get("setup_request", blank)["status"], "failed")
+
+        other = "setup-other-error"
+        self.app.store.put("setup_request", {
+            "id": other, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-other", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": other},
+        }, {"error": "cli_not_installed", "advice": "ignore this advice " + ("x" * 50)})
+        long_id = "setup-long-advice"
+        self.app.store.put("setup_request", {
+            "id": long_id, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-long", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": long_id},
+        }, {"error": "invalid_adapter", "advice": "a" * 600})
+        contents = [m["content"] for m in self.app.store.find("message", work_id=self.work)
+                    if m.get("kind") == "setup_result"]
+        by_action = {m["error"]: m for m in contents if m.get("error")}
+        self.assertEqual(by_action["invalid_adapter: " + advice]["error"], "invalid_adapter: " + advice)
+        self.assertIn("device_setup_failed", by_action)
+        self.assertEqual(by_action["invalid_adapter: " + ("a" * 500)]["error"], "invalid_adapter: " + ("a" * 500))
+        self.assertFalse(any("ignore this advice" in (m.get("error") or "") for m in contents))
+        self.assertNotIn("codex-notes-pc", self.app.execution.installations)
 
 
 class ManifestTests(unittest.TestCase):

@@ -200,6 +200,21 @@ class SetupApprovalTests(unittest.TestCase):
         self.assertNotIn("error", noted[0])
         self._unknown_untouched()
 
+    def test_unexpected_probe_error_is_logged_and_the_approval_stays_done(self):
+        with self.assertLogs("pangpang.onboarding", level="ERROR") as captured:
+            with patch.object(Service, "probe", autospec=True, side_effect=RuntimeError("probe boom")):
+                staged = self.app.propose_executor("bot-main", self.work, {
+                    "host_id": "local", "adapter": "codex", "profile": "logged", "cwd": str(self.root)})
+                approved = self.app.onboarding.approve(staged["staged"]["request_id"], {"endpoint": ""})
+        self.assertTrue(approved["accepted"])
+        self.assertEqual(approved["probe"]["reason"], "probe_failed")
+        self.assertTrue(approved["probe"]["probed"])
+        self.assertNotIn("error", approved)
+        self.assertEqual(self.app.store.get("setup_request", staged["staged"]["request_id"])["status"], "done")
+        self.assertIn("codex-logged-local", self.app.execution.installations)
+        self.assertTrue(any("probe boom" in line for line in captured.output))
+        self._unknown_untouched()
+
     def test_requested_unknown_adapter_is_advice_not_a_bare_code(self):
         request_id = "setup-retired"
         self.app.store.put("setup_request", {

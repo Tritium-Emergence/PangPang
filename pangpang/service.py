@@ -19,7 +19,7 @@ from .adapters_file import merge as merge_custom_adapters
 from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_matches_pin,
                        executor_parameter_schema, fetch_pinned_pi, installation_id,
                        materialize_executor_env, permission_bridge_for, pi_models_api,
-                       secret_env_name, task_interjection_tier, unknown_adapter_advice,
+                       secret_env_name, task_interjection_tier, execution_for_stored_candidate,
                        validate_extra_argv, validate_staged_executor, write_pi_provider_config,
                        _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
@@ -3187,27 +3187,8 @@ class Service:
         return row
 
     def _execution_for_candidate(self, candidate):
-        """Validate a managed-config candidate.
-
-        Unknown-adapter rows that are identical to the stored document are loaded
-        and left out of routing. A new or different unknown-adapter row is the
-        requested adapter and is rejected with advice. Direct Execution() without
-        this preservation still rejects every unknown adapter.
-        """
-        installations = candidate.get("installations") or []
-        if not isinstance(installations, list):
-            return Execution(candidate, self.data)
-        unknown = [row for row in installations
-                   if isinstance(row, dict) and row.get("adapter") not in ADAPTER_CATALOG]
-        if not unknown:
-            return Execution(candidate, self.data)
-        stored = {row.get("id"): row for row in self.config.get("installations", [])
-                  if isinstance(row, dict)}
-        for row in unknown:
-            if stored.get(row.get("id")) != row:
-                raise Fault("invalid_adapter", 400,
-                            advice=unknown_adapter_advice(self.data, row.get("id"), row.get("adapter")))
-        return Execution(candidate, self.data, tolerate_unknown_adapters=True)
+        """Validate a managed-config candidate. See execution_for_stored_candidate."""
+        return execution_for_stored_candidate(candidate, self.config, self.data)
 
     def set_host_execution_level(self, host_id, body):
         """Operator-only: declare the isolation level that governs a CONNECTOR
@@ -4715,6 +4696,17 @@ class Service:
             return None
         return self._put_executor_grant(installation_id, reported, "migration")
 
+    def _drop_pending_device(self, installation_id):
+        """A configure report ends migration deferral and does not grant the row."""
+        row = self._executor_grants_row()
+        pending = row.get("pending_device") or []
+        if installation_id not in pending:
+            return None
+        return self.store.put("settings", {
+            "id": self._EXECUTOR_GRANTS, "migrated": True,
+            "grants": dict(row.get("grants") or {}),
+            "pending_device": [x for x in pending if x != installation_id]})
+
     def _stored_managed_config(self):
         try:
             return self.store.get("settings", "managed")["config"]
@@ -4752,19 +4744,18 @@ class Service:
                 return self.config
         return stored
 
-    def _authorization_digest(self, installation_id, config=None):
+    def _authorization_digest(self, installation_id):
         """Authorization hash. Profile-derived pi also covers the credential identity
         the next launch will bind. The launch overlay itself stays out of the hash,
         so binding at start does not ask again."""
         from .connector import authorization_digest
-        explicit = config is not None
-        config = config if explicit else self._config_for_digest()
+        config = self._config_for_digest()
         base = authorization_digest(config, installation_id)
         inst = next((i for i in config.get("installations", [])
                      if isinstance(i, dict) and i.get("id") == installation_id), None)
         if not inst or not self._profile_derived_pi(inst):
             return base
-        profile = global_profile(config if explicit else self.config)
+        profile = global_profile(self.config)
         ref = profile.get("credential_ref")
         env_name = profile.get("credential_env")
         binding = {

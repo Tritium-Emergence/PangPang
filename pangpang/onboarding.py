@@ -10,11 +10,14 @@ import time
 from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from .store import Fault, digest, uid, encode, in_transaction
+from .store import Fault, digest, uid, encode
 from .execution import (ADAPTER_CATALOG, endpoint_extra_env, installation_id,
                        validate_extra_argv, validate_profile_env, validate_secret_refs,
                        validate_staged_executor)
+from .logs import get_logger
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
+
+log = get_logger("onboarding")
 
 
 def apply_model_concurrency(candidate, value):
@@ -428,11 +431,10 @@ class Onboarding:
                         "action": (current_req.get("proposal") or {}).get("action")}
         result = {"accepted": True, "installation_id": iid}
         # The installation is already committed. A probe failure stays a probe result.
-        if not in_transaction():
-            probe = self._probe_approved_executor(iid)
-            if probe is not None:
-                result["probe"] = probe
-                self._publish_setup_probe(finished, iid, probe)
+        probe = self._probe_approved_executor(iid)
+        if probe is not None:
+            result["probe"] = probe
+            self._publish_setup_probe(finished, iid, probe)
         return result
 
     def _probe_approved_executor(self, installation_id):
@@ -448,9 +450,11 @@ class Onboarding:
             return None
         try:
             stored = self.s.probe(installation_id)
-        except Exception as error:
-            reason = error.code if isinstance(error, Fault) else "probe_failed"
-            return {"available": False, "reason": reason, "probed": True}
+        except Fault as error:
+            return {"available": False, "reason": error.code, "probed": True}
+        except Exception:
+            log.exception("executor probe failed after approval installation=%s", installation_id)
+            return {"available": False, "reason": "probe_failed", "probed": True}
         view = {"available": stored.get("available") is True, "probed": True}
         if stored.get("reason"):
             view["reason"] = stored.get("reason")
@@ -632,7 +636,9 @@ class Onboarding:
                 req = self.store.get("setup_request", payload["request_id"])
             safe = {"action": cmd["action"], "host_id": cmd["host_id"]}
             if result.get("error"):
-                safe["error"] = "device_setup_failed"
+                advice = result.get("advice") if result.get("error") == "invalid_adapter" else None
+                folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
+                safe["error"] = "invalid_adapter: " + folded if folded else "device_setup_failed"
             elif cmd["action"] == "discover":
                 items = [{k: str(x[k])[:500] for k in ("adapter", "binary", "version") if k in x}
                          for x in result.get("inventory", [])[:20] if isinstance(x, dict)]
@@ -719,7 +725,10 @@ class Onboarding:
                     if isinstance(reason, str) and reason:
                         probe_view["reason"] = reason
                     safe["probe"] = probe_view
-                self.s._persist_pending_device_grant(item["id"])
+                if cmd["action"] == "configure":
+                    self.s._drop_pending_device(item["id"])
+                else:
+                    self.s._persist_pending_device_grant(item["id"])
                 safe["installation"] = item
                 if req and payload.get("auth") == "api_key" and cmd["action"] == "configure":
                     if req.get("bot_id"):
