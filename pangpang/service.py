@@ -4866,8 +4866,9 @@ class Service:
     def propose_executor(self, bot_id, work_id, body):
         """Route and narrow directly. Execution-widening changes stay a setup request.
 
-        The request is the existing operator approval. Nothing here starts a run
-        or writes an always-grant; that happens when the operator approves.
+        Nothing here starts a run or writes an always-grant. Approving the setup
+        request does not either. A run asks once or always until the operator
+        chooses always.
         """
         if self.bot(bot_id)["kind"] != "main":
             raise Fault("main_bot_required", 403)

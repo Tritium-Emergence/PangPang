@@ -421,14 +421,13 @@ class Onboarding:
             if creating and iid in self.s.execution.installations:
                 raise Fault("installation_already_exists", 409)
             self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
-            self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
             current_req["status"] = "done"
             self.store.put("setup_request", current_req)
             finished = {"id": current_req["id"], "bot_id": current_req.get("bot_id"),
                         "work_id": current_req.get("work_id"), "host_id": current_req.get("host_id"),
                         "action": (current_req.get("proposal") or {}).get("action")}
         result = {"accepted": True, "installation_id": iid}
-        # The grant is already committed. A probe failure stays a probe result.
+        # The installation is already committed. A probe failure stays a probe result.
         if not in_transaction():
             probe = self._probe_approved_executor(iid)
             if probe is not None:
@@ -474,7 +473,7 @@ class Onboarding:
         self.s.new_turn(bot_id, work, safe, "setup_result", "device", root_request_id=root)
 
     def _approve_local_executor(self, identity, body=None):
-        """Operator confirms a local execution change, then the always-grant matches it."""
+        """Operator confirms a local execution change. Run authorization is unchanged."""
         body = body or {}
         req = self.checked_request(identity, "needs_approval")
         proposal = req.get("proposal") or {}
@@ -720,11 +719,7 @@ class Onboarding:
                     if isinstance(reason, str) and reason:
                         probe_view["reason"] = reason
                     safe["probe"] = probe_view
-                reported = probe.get("authorization_digest") or probe.get("policy_digest")
-                if cmd["action"] == "configure" and isinstance(reported, str) and reported:
-                    self.s._put_executor_grant(item["id"], reported, "operator")
-                else:
-                    self.s._persist_pending_device_grant(item["id"])
+                self.s._persist_pending_device_grant(item["id"])
                 safe["installation"] = item
                 if req and payload.get("auth") == "api_key" and cmd["action"] == "configure":
                     if req.get("bot_id"):

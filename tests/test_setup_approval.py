@@ -108,15 +108,13 @@ class SetupApprovalTests(unittest.TestCase):
         self.assertTrue(approved["probe"]["available"], approved["probe"])
         self.assertTrue(approved["probe"]["probed"])
         self.assertEqual(self.app.store.get("setup_request", created["staged"]["request_id"])["status"], "done")
-        grant = self.app.store.get("settings", "executor_grants")["grants"][iid]
-        self.assertEqual(grant["origin"], "operator")
-        self.assertEqual(grant["digest"], self.app._authorization_digest(iid))
+        self.assertNotIn(iid, self.app.store.get("settings", "executor_grants")["grants"])
         stored_probe = self.app.store.get("probe", iid)
         self.assertTrue(stored_probe["available"])
         route = self.app.route("bot-main", {"id": self.work}, {"installation_id": iid})
         self.assertEqual(route["selected"]["installation_id"], iid)
         submitted = self.app.submit_task("bot-main", self.work, {"prompt": "go", "installation_id": iid})
-        self.assertEqual(submitted["status"], "queued")
+        self.assertEqual(submitted["status"], "awaiting_approval")
         self.app.cancel(submitted["task_id"])
         noted = [m["content"] for m in self.app.store.find("message", work_id=self.work)
                  if m.get("kind") == "setup_result" and m["content"].get("installation_id") == iid]
@@ -126,6 +124,51 @@ class SetupApprovalTests(unittest.TestCase):
         self.assertNotIn("error", noted[0])
         self._unknown_untouched()
         self.assertFalse((self.root / "result.txt").exists())
+
+    def _grant(self, installation_id):
+        return (self.app.store.get("settings", "executor_grants").get("grants") or {}).get(installation_id)
+
+    def test_setup_approval_does_not_grant_the_first_run(self):
+        before = dict(self._grant("codex-local"))
+        self.assertEqual(before["origin"], "migration")
+        staged = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-local", "extra_argv": ["--strict-config"]})
+        approved = self.app.onboarding.approve(staged["staged"]["request_id"], {})
+        self.assertTrue(approved["accepted"])
+        self.assertEqual(self._grant("codex-local"), before)
+        first = self.app.submit_task("bot-main", self.work, {
+            "prompt": "go", "installation_id": "codex-local"})
+        self.assertEqual(first["status"], "awaiting_approval")
+        task = self.app.store.get("task", first["task_id"])
+        self.assertEqual(task["installation_authorization"], "required")
+        self.assertIn("--strict-config", task["run_preview"]["command"])
+        self.app.approve(task["id"], {"spec_digest": task["spec_digest"]})
+        self.assertEqual(self._grant("codex-local"), before)
+        self.app.cancel(task["id"])
+        asked = self.app.submit_task("bot-main", self.work, {
+            "prompt": "again", "installation_id": "codex-local"})
+        self.assertEqual(asked["status"], "awaiting_approval")
+        task = self.app.store.get("task", asked["task_id"])
+        self.app.approve(task["id"], {"spec_digest": task["spec_digest"], "always": True})
+        grant = self._grant("codex-local")
+        self.assertEqual(grant["origin"], "operator")
+        self.assertEqual(grant["digest"], self.app._authorization_digest("codex-local"))
+        self.app.cancel(task["id"])
+        held = self.app.submit_task("bot-main", self.work, {
+            "prompt": "held", "installation_id": "codex-local"})
+        self.assertEqual(held["status"], "queued")
+        self.assertNotIn("installation_authorization", self.app.store.get("task", held["task_id"]))
+        self.app.cancel(held["task_id"])
+        standing = dict(self._grant("codex-local"))
+        changed = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-local", "extra_argv": ["--enable", "feature"]})
+        self.app.onboarding.approve(changed["staged"]["request_id"], {})
+        self.assertEqual(self._grant("codex-local"), standing)
+        waited = self.app.submit_task("bot-main", self.work, {
+            "prompt": "changed", "installation_id": "codex-local"})
+        self.assertEqual(waited["status"], "awaiting_approval")
+        self.app.cancel(waited["task_id"])
+        self._unknown_untouched()
 
     def test_probe_failure_stays_a_probe_result(self):
         def fail(self, installation_id):
