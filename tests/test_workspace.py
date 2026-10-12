@@ -201,6 +201,9 @@ class WorkspaceIdentityTests(unittest.TestCase):
         m = self.app.send('bot-main', {'text': 'x', 'allow_write': True}, 'qd')
         res = self.app.submit_task('bot-main', m['work_id'], {'prompt': 'x'})
         task = self.app.store.get('task', res['task_id'])
+        if task.get('installation_authorization') == 'required':
+            self.app.approve(task['id'], {'spec_digest': task['spec_digest']})
+            task = self.app.store.get('task', task['id'])
         task['queue_deadline'] = 1.0 # far in the past
         self.app.store.put('task', task)
         self.app.sweep_deadlines()

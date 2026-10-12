@@ -83,7 +83,11 @@ class OrchestrationFanoutTests(unittest.TestCase):
         if installation_id:
             body["installation_id"] = installation_id
         m = self.app.send("bot-main", {"text": prompt, "allow_write": True}, tag)
-        return self.app.submit_task("bot-main", m["work_id"], body)["task_id"]
+        result = self.app.submit_task("bot-main", m["work_id"], body)
+        task = self.app.store.get("task", result["task_id"])
+        if task.get("installation_authorization") == "required":
+            self.app.approve(task["id"], {"spec_digest": task["spec_digest"]})
+        return result["task_id"]
 
     def _drain(self, task_ids, timeout=30.0):
         deadline = time.monotonic() + timeout
