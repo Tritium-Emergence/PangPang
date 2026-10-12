@@ -17,10 +17,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import runner
 from .adapters_file import merge as merge_custom_adapters
 from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_matches_pin,
-                       executor_parameter_schema, fetch_pinned_pi, materialize_executor_env,
-                       permission_bridge_for, pi_models_api, secret_env_name, task_interjection_tier,
-                       validate_extra_argv, validate_profile_env, validate_secret_refs,
-                       write_pi_provider_config, _PI_BASE_URL_ENV)
+                       executor_parameter_schema, fetch_pinned_pi, installation_id,
+                       materialize_executor_env, permission_bridge_for, pi_models_api,
+                       secret_env_name, task_interjection_tier, validate_extra_argv,
+                       validate_profile_env, validate_secret_refs, write_pi_provider_config,
+                       _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
 from .store import Fault, Store, digest, encode, uid, os_family
 from .vault import secure_directory
@@ -4341,10 +4342,22 @@ class Service:
                 return
 
     def approve(self, task_id, body):
+        body = body or {}
+        if "always" in body and body.get("always") is not True and body.get("always") is not False:
+            raise Fault("invalid_task_approval", 400)
         with self.store.atomic():
             task = self.store.get("task", task_id)
             if task["status"] != "awaiting_approval" or body.get("spec_digest") != task["spec_digest"]:
                 raise Fault("approval_scope_changed")
+            if body.get("always") is True:
+                inst = self.execution.installations.get(task.get("installation_id"))
+                live = self._captured_authorization_digest(inst) if inst else None
+                frozen = task.get("authorization_digest")
+                if not frozen or frozen != live or not inst:
+                    raise Fault("approval_scope_changed")
+                if inst["id"] in self.execution.unknown_adapters:
+                    raise Fault("unknown_adapter")
+                self._put_executor_grant(inst["id"], live, "operator")
             # Start the executor queue clock at approval: time spent awaiting operator
             # approval is not executor queue time, so it must not count toward
             # queue_timeout (a task approved after the timeout window would otherwise
@@ -4713,8 +4726,25 @@ class Service:
         return stored
 
     def _authorization_digest(self, installation_id, config=None):
+        """Authorization hash. Profile-derived pi also covers the credential identity
+        the next launch will bind. The launch overlay itself stays out of the hash,
+        so binding at start does not ask again."""
         from .connector import authorization_digest
-        return authorization_digest(config if config is not None else self._config_for_digest(), installation_id)
+        explicit = config is not None
+        config = config if explicit else self._config_for_digest()
+        base = authorization_digest(config, installation_id)
+        inst = next((i for i in config.get("installations", [])
+                     if isinstance(i, dict) and i.get("id") == installation_id), None)
+        if not inst or not self._profile_derived_pi(inst):
+            return base
+        profile = global_profile(config if explicit else self.config)
+        ref = profile.get("credential_ref")
+        env_name = profile.get("credential_env")
+        binding = {
+            "credential_ref": ref if isinstance(ref, str) else "",
+            "credential_env": env_name if isinstance(env_name, str) else "",
+        }
+        return digest({"authorization": base, "pi_binding": binding})
 
     def _captured_authorization_digest(self, inst):
         host = self.execution.hosts.get(inst.get("host_id"), {})
@@ -4746,22 +4776,27 @@ class Service:
         except Fault:
             probe = {}
         manifest = probe.get("manifest") if isinstance(probe, dict) else None
+        truncated = False
         if host.get("transport") == "connector" and isinstance(manifest, dict):
             command = list(manifest.get("command") or [])
             cwd = manifest.get("cwd")
             roots = list(manifest.get("allowed_roots") or [])
             credential_ids = list(manifest.get("credential_ids") or [])
+            truncated = manifest.get("truncated") is True
         else:
             command = list(inst.get("argv") or []) + list(inst.get("extra_argv") or [])
             cwd = inst.get("cwd")
             roots = list(host.get("allowed_roots") or [])
             credential_ids = sorted(str(v) for v in (inst.get("secret_refs") or {}).values())
         from .consent import CONSENT_KEY
-        return {"host_id": inst.get("host_id"), "host_name": host.get("name") or inst.get("host_id"),
-                "command": command, "cwd": cwd, "allowed_roots": roots,
-                "supervision": None if not isinstance(probe, dict) else probe.get("supervision"),
-                "process_group_consent": host.get(CONSENT_KEY),
-                "credential_ids": credential_ids}
+        preview = {"host_id": inst.get("host_id"), "host_name": host.get("name") or inst.get("host_id"),
+                   "command": command, "cwd": cwd, "allowed_roots": roots,
+                   "supervision": None if not isinstance(probe, dict) else probe.get("supervision"),
+                   "process_group_consent": host.get(CONSENT_KEY),
+                   "credential_ids": credential_ids}
+        if truncated:
+            preview["truncated"] = True
+        return preview
 
     def list_executors(self):
         """Stored inventory only. No probe, PATH scan, argv, env, endpoint or credential id."""
@@ -4795,7 +4830,11 @@ class Service:
                 "availability": availability,
                 "authorization": authorization,
             })
-        return {"installations": rows, "truncated": truncated, "parameters": executor_parameter_schema()}
+        schema = executor_parameter_schema()
+        names = [item["name"] for item in schema]
+        return {"installations": rows, "truncated": truncated, "parameters": schema,
+                "adapters": [{"adapter": name, "parameters": list(names)}
+                             for name in sorted(ADAPTER_CATALOG)]}
 
     def propose_executor(self, bot_id, work_id, body):
         """Route and narrow directly. Execution-widening changes stay a setup request.
@@ -4823,12 +4862,19 @@ class Service:
             host = self.execution.hosts.get(inst["host_id"], {})
         else:
             host = self.execution.hosts.get(body.get("host_id"), {})
+            if host.get("transport") == "local":
+                raise Fault("installation_id_required", 400)
             if host.get("transport") != "connector":
                 raise Fault("connector_host_required")
             if body.get("adapter") not in ADAPTER_CATALOG:
                 raise Fault("unknown_adapter")
+        if inst is not None and "profile" in body:
+            if installation_id(inst.get("adapter"), inst.get("host_id"), body.get("profile") or None) != inst["id"]:
+                raise Fault("installation_approval_mismatch", 403)
         direct, staged = {}, {}
         local = host.get("transport") == "local"
+        if not local and any(key in body for key in ("enabled", "max_concurrency", "timeout_s", "secret_refs")):
+            raise Fault("unsupported_installation_field", 400)
         if "priority" in body:
             direct["priority"] = body["priority"]
         if "use_when" in body:
@@ -4859,8 +4905,7 @@ class Service:
                 elif type(proposed) is not int:
                     direct["timeout_s"] = proposed
         elif not local:
-            for key in ("enabled", "max_concurrency", "timeout_s", "cwd", "extra_argv", "env",
-                        "profile", "secret_refs"):
+            for key in ("cwd", "extra_argv", "env", "profile"):
                 if key in body:
                     staged[key] = body[key]
         for key in ("cwd", "extra_argv", "env", "profile", "secret_refs"):
@@ -4875,6 +4920,17 @@ class Service:
             direct = {}
         if not direct and not staged:
             raise Fault("empty_executor_proposal", 400)
+        if staged:
+            adapter = (inst or {}).get("adapter") or body.get("adapter")
+            host_id = inst["host_id"] if inst else body.get("host_id")
+            if "env" in staged:
+                validate_profile_env(staged["env"])
+            if "extra_argv" in staged:
+                validate_extra_argv(adapter, staged["extra_argv"])
+            if "secret_refs" in staged:
+                validate_secret_refs(staged["secret_refs"])
+            if staged.get("profile"):
+                installation_id(adapter, host_id, staged["profile"])
         result = {}
         if direct:
             if inst is None:
@@ -5541,14 +5597,11 @@ class Service:
                     and not isinstance(started_at, bool) and not isinstance(ended_at, bool)):
                 stored_receipt["duration"] = ended_at - started_at
                 current["duration"] = stored_receipt["duration"]
-            if current.get("authorization_digest") and "authorization_digest" not in stored_receipt:
-                stored_receipt["authorization_digest"] = current["authorization_digest"]
-            if current.get("policy_digest") and "policy_digest" not in stored_receipt:
-                stored_receipt["policy_digest"] = current["policy_digest"]
-            if current.get("host_id") and "host_id" not in stored_receipt:
-                stored_receipt["host_id"] = current["host_id"]
-            if current.get("installation_id") and "installation_id" not in stored_receipt:
-                stored_receipt["installation_id"] = current["installation_id"]
+            for key in ("host_id", "installation_id", "authorization_digest", "policy_digest"):
+                if current.get(key):
+                    stored_receipt[key] = current[key]
+                else:
+                    stored_receipt.pop(key, None)
             if "device_kb" not in stored_receipt:
                 stored_receipt["device_kb"] = current.get("device_kb")
             current.update(status=adjudicated, receipt=stored_receipt, ended=time.time())

@@ -66,6 +66,7 @@ export interface Task {
     supervision?: string | null;
     process_group_consent?: string | null;
     credential_ids?: string[];
+    truncated?: boolean;
   };
   created?: number;
   route?: unknown;

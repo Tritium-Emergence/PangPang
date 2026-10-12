@@ -75,36 +75,64 @@ def authorization_digest(config, installation_id):
 
 
 def execution_manifest(config, installation_id):
-    """Operator-visible launch facts. Secret values are not included."""
+    """Operator-visible launch facts. Secret values are not included.
+
+    Command and allowed_roots stay bounded. When a bound drops or shortens a
+    value, truncated is set so the card does not present the prefix as complete.
+    """
     installation = next(e for e in config["installations"] if e["id"] == installation_id)
     host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
-    command = [str(x)[:500] for x in list(installation.get("argv") or [])
-               + list(installation.get("extra_argv") or [])][:32]
-    roots = [str(r)[:4096] for r in (host.get("allowed_roots") or []) if isinstance(r, str)][:32]
+    raw_command = [str(x) for x in list(installation.get("argv") or [])
+                   + list(installation.get("extra_argv") or [])]
+    raw_roots = [r for r in (host.get("allowed_roots") or []) if isinstance(r, str)]
+    command = [x[:500] for x in raw_command][:32]
+    roots = [r[:4096] for r in raw_roots][:32]
     refs = installation.get("secret_refs") or {}
     credential_ids = sorted(str(v)[:200] for v in refs.values() if isinstance(v, str))
-    return {"command": command, "cwd": str(installation.get("cwd") or "")[:4096],
-            "allowed_roots": roots, "credential_ids": credential_ids}
+    cwd_raw = installation.get("cwd") or ""
+    truncated = (len(raw_command) > 32 or any(len(x) > 500 for x in raw_command)
+                 or len(raw_roots) > 32 or any(len(r) > 4096 for r in raw_roots)
+                 or len(str(cwd_raw)) > 4096)
+    manifest = {"command": command, "cwd": str(cwd_raw)[:4096],
+                "allowed_roots": roots, "credential_ids": credential_ids}
+    if truncated:
+        manifest["truncated"] = True
+    return manifest
+
+
+def _bounded_report_list(value, key, limit, item_limit):
+    """Copy a reported list, or blank it and ask the caller to mark truncation."""
+    if key not in value:
+        return [], False
+    raw = value.get(key)
+    if (isinstance(raw, list) and len(raw) <= limit
+            and all(isinstance(x, str) and len(x) <= item_limit for x in raw)):
+        return list(raw), False
+    return [], True
 
 
 def sanitize_manifest(value):
     """Keep only the manifest fields a device is allowed to report."""
     if not isinstance(value, dict):
         return None
-    command = value.get("command")
-    if (not isinstance(command, list) or len(command) > 32
-            or not all(isinstance(x, str) and len(x) <= 500 for x in command)):
-        command = []
-    cwd = value.get("cwd") if isinstance(value.get("cwd"), str) and len(value.get("cwd")) <= 4096 else ""
-    roots = value.get("allowed_roots")
-    if (not isinstance(roots, list) or len(roots) > 32
-            or not all(isinstance(x, str) and len(x) <= 4096 for x in roots)):
-        roots = []
-    ids = value.get("credential_ids")
-    if (not isinstance(ids, list) or len(ids) > 32
-            or not all(isinstance(x, str) and len(x) <= 200 for x in ids)):
-        ids = []
-    return {"command": command, "cwd": cwd, "allowed_roots": roots, "credential_ids": list(ids)}
+    truncated = value.get("truncated") is True
+    command, cut = _bounded_report_list(value, "command", 32, 500)
+    truncated = truncated or cut
+    roots, cut = _bounded_report_list(value, "allowed_roots", 32, 4096)
+    truncated = truncated or cut
+    ids, cut = _bounded_report_list(value, "credential_ids", 32, 200)
+    truncated = truncated or cut
+    if "cwd" not in value:
+        cwd = ""
+    elif isinstance(value.get("cwd"), str) and len(value.get("cwd")) <= 4096:
+        cwd = value["cwd"]
+    else:
+        cwd = ""
+        truncated = True
+    result = {"command": command, "cwd": cwd, "allowed_roots": roots, "credential_ids": list(ids)}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 class Connector:

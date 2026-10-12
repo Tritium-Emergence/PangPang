@@ -142,7 +142,14 @@ function TaskCard({task, store}: {task: Task; store: Store}) {
       <p className="mt-1 text-xs text-muted">{t('chat.executorPrefix', {id: task.installation_id || '—'})}</p>
       <RunPreview task={task} />
       <div className="mt-2 flex gap-2">
-        <ActionButton label={t('chat.approve')} run={() => api(`tasks/${task.id}/approve`, {spec_digest: task.spec_digest})} store={store} />
+        {task.installation_authorization === 'required' ? (
+          <>
+            <ActionButton label={t('chat.approveOnce')} run={() => api(`tasks/${task.id}/approve`, {spec_digest: task.spec_digest})} store={store} />
+            <ActionButton label={t('chat.approveAlways')} run={() => api(`tasks/${task.id}/approve`, {spec_digest: task.spec_digest, always: true})} store={store} />
+          </>
+        ) : (
+          <ActionButton label={t('chat.approve')} run={() => api(`tasks/${task.id}/approve`, {spec_digest: task.spec_digest})} store={store} />
+        )}
         <ActionButton label={t('chat.cancel')} ghost run={() => api(`tasks/${task.id}/cancel`, {})} store={store} />
       </div>
     </div>

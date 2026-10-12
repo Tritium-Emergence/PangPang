@@ -382,8 +382,7 @@ class Onboarding:
             candidate["installations"] = [updated if i.get("id") == iid else i
                                           for i in candidate.get("installations", [])]
             self.s.commit_managed_config(candidate, base_revision=proposal.get("base_revision"))
-            from .connector import authorization_digest
-            self.s._put_executor_grant(iid, authorization_digest(candidate, iid), "operator")
+            self.s._put_executor_grant(iid, self.s._authorization_digest(iid, candidate), "operator")
             current_req["status"] = "done"
             self.store.put("setup_request", current_req)
         return {"accepted": True, "installation_id": iid}
@@ -420,6 +419,8 @@ class Onboarding:
                 draft = proposal.get("draft") or {}
                 if "base_revision" in proposal and proposal["base_revision"] != self.s.config_revision:
                     raise Fault("installation_config_changed", 409)
+                if any(key in draft for key in ("enabled", "max_concurrency", "timeout_s", "secret_refs")):
+                    raise Fault("unsupported_installation_field", 400)
                 proposal["endpoint"] = endpoint(str(body.get("endpoint", "")))
                 proposal["endpoint_source"] = "operator"
                 profile = body["profile"] if "profile" in body else draft.get("profile")
@@ -431,13 +432,28 @@ class Onboarding:
                     validate_extra_argv(proposal["adapter"], extra_argv)
                 # Same canonical namespace as LocalSetup, derived by the server.
                 # A model draft is not sent to the device until this operator approval.
-                proposal["installation_id"] = installation_id(proposal["adapter"], req["host_id"], profile)
+                # An existing installation keeps its id. A profile that would rename
+                # it is refused. Omitting profile keeps the profile already stored.
+                locked = proposal.get("installation_id")
+                if locked:
+                    if profile and installation_id(proposal["adapter"], req["host_id"], profile) != locked:
+                        raise Fault("installation_approval_mismatch", 403)
+                    if not profile:
+                        previous_locked = next((i for i in self._config().get("installations", [])
+                                                if i["id"] == locked), {})
+                        if previous_locked.get("profile"):
+                            profile = previous_locked["profile"]
+                    proposal["installation_id"] = locked
+                else:
+                    proposal["installation_id"] = installation_id(proposal["adapter"], req["host_id"], profile)
                 if profile:
                     proposal["profile"] = profile
                 if env:
                     proposal["env"] = dict(env)
                 if extra_argv:
                     proposal["extra_argv"] = list(extra_argv)
+                if draft.get("cwd"):
+                    proposal["cwd"] = draft["cwd"]
                 previous = next((i for i in self._config().get("installations", [])
                                  if i["id"] == proposal["installation_id"]), {})
                 if previous and previous["host_id"] != req["host_id"]:

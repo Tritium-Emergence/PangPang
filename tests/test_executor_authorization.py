@@ -348,6 +348,64 @@ class RunGateTests(unittest.TestCase):
         self.assertEqual(submitted["status"], "awaiting_approval")
         self.assertEqual(host.get(consent.CONSENT_KEY), consent.RISK_VERSION)
 
+    def test_always_on_approve_grants_until_execution_changes(self):
+        self._drop_grant()
+        submitted = self.app.submit_task("bot-main", self._work("always-once"), {
+            "prompt": "go", "installation_id": "codex-local"})
+        task = self.app.store.get("task", submitted["task_id"])
+        self.assertEqual(list(task["run_preview"]["command"]), list(self.app.execution.installations["codex-local"]["argv"]))
+        self.assertEqual(task["run_preview"]["allowed_roots"], [str(self.root)])
+        self.assertNotIn("truncated", task["run_preview"])
+        self.app.approve(task["id"], {"spec_digest": task["spec_digest"], "always": True})
+        grant = self.app.store.get("settings", "executor_grants")["grants"]["codex-local"]
+        self.assertEqual(grant["origin"], "operator")
+        self.assertEqual(grant["digest"], self.app._authorization_digest("codex-local"))
+        nxt = self.app.submit_task("bot-main", self._work("always-next"), {
+            "prompt": "go", "installation_id": "codex-local"})
+        self.assertEqual(nxt["status"], "queued")
+        self.assertNotIn("installation_authorization", self.app.store.get("task", nxt["task_id"]))
+        self.app.cancel(nxt["task_id"])
+        self.app.configure_installation("codex-local", {"extra_argv": ["--strict-config"]})
+        waited = self.app.submit_task("bot-main", self._work("always-argv"), {
+            "prompt": "go", "installation_id": "codex-local"})
+        self.assertEqual(waited["status"], "awaiting_approval")
+
+    def test_once_approval_does_not_write_a_grant(self):
+        self._drop_grant()
+        for extra in ({}, {"always": False}):
+            submitted = self.app.submit_task("bot-main", self._work("once-" + str(bool(extra))), {
+                "prompt": "go", "installation_id": "codex-local"})
+            task = self.app.store.get("task", submitted["task_id"])
+            self.app.approve(task["id"], dict({"spec_digest": task["spec_digest"]}, **extra))
+            self.assertNotIn("codex-local", self.app.store.get("settings", "executor_grants")["grants"])
+            self.app.cancel(task["id"])
+        submitted = self.app.submit_task("bot-main", self._work("bad-always"), {
+            "prompt": "go", "installation_id": "codex-local"})
+        task = self.app.store.get("task", submitted["task_id"])
+        with self.assertRaises(Fault) as ctx:
+            self.app.approve(task["id"], {"spec_digest": task["spec_digest"], "always": "yes"})
+        self.assertEqual(ctx.exception.code, "invalid_task_approval")
+        self.assertEqual(self.app.store.get("task", task["id"])["status"], "awaiting_approval")
+
+    def test_receipt_comparison_facts_come_from_the_task(self):
+        submitted = self.app.submit_task("bot-main", self._work("receipt"), {
+            "prompt": "go", "installation_id": "codex-local"})
+        task = self.app.store.get("task", submitted["task_id"])
+        forged = {
+            "execution_id": task["execution_id"], "spec_digest": task["spec_digest"],
+            "status": "cancelled", "process_tree_confirmed": True, "not_launched": "queued_cancel",
+            "artifacts": [], "host_id": "attacker-host", "installation_id": "attacker-inst",
+            "authorization_digest": "forged-auth", "policy_digest": "forged-policy",
+        }
+        done = self.app.complete_task(task, forged)
+        stored = done["receipt"]
+        self.assertEqual(stored["host_id"], task["host_id"])
+        self.assertEqual(stored["installation_id"], task["installation_id"])
+        self.assertEqual(stored["authorization_digest"], task["authorization_digest"])
+        self.assertNotIn("policy_digest", stored)
+        self.assertEqual(forged["host_id"], "attacker-host")
+        self.assertEqual(forged["policy_digest"], "forged-policy")
+
     def test_cancel_does_not_start_a_process(self):
         self._drop_grant()
         submitted = self.app.submit_task("bot-main", self._work("deny"), {
@@ -406,6 +464,10 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(row["host_id"], "local")
         self.assertEqual(row["authorization"], "always")
         self.assertIn("priority", {item["name"] for item in listed["parameters"]})
+        adapters = {row["adapter"]: row["parameters"] for row in listed["adapters"]}
+        self.assertIn("codex", adapters)
+        self.assertIn("priority", adapters["codex"])
+        self.assertNotIn("--permission-mode", text)
         self.assertFalse(listed["truncated"])
         names = [tool["function"]["name"] for tool in TOOLS]
         self.assertNotIn("approve", names)
@@ -473,6 +535,32 @@ class ToolTests(unittest.TestCase):
             self.app.propose_executor("bot-main", self.work, {
                 "installation_id": "missing", "priority": 1})
 
+    def test_local_proposal_without_installation_is_refused(self):
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work, {
+                "host_id": "local", "adapter": "codex", "cwd": str(self.root)})
+        self.assertEqual(ctx.exception.code, "installation_id_required")
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work, {
+                "host_id": "missing", "adapter": "codex"})
+        self.assertEqual(ctx.exception.code, "connector_host_required")
+
+    def test_invalid_staged_env_does_not_apply_priority(self):
+        before = self.app.execution.installations["codex-local"].get("priority")
+        before_ids = [row["id"] for row in self.app.store.find("setup_request")]
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work, {
+                "installation_id": "codex-local", "priority": 11,
+                "env": {"NOT_A_PROFILE_KEY": "/tmp"}})
+        self.assertEqual(ctx.exception.code, "invalid_installation_env")
+        self.assertEqual(self.app.execution.installations["codex-local"].get("priority"), before)
+        self.assertEqual([row["id"] for row in self.app.store.find("setup_request")], before_ids)
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work, {
+                "installation_id": "codex-local", "priority": 12, "profile": "notes"})
+        self.assertEqual(ctx.exception.code, "installation_approval_mismatch")
+        self.assertEqual(self.app.execution.installations["codex-local"].get("priority"), before)
+
     def test_reprobe_uses_the_stored_installation(self):
         runtime = Runtime(self.app, type("M", (), {"complete": lambda *a, **k: ({"content": "x"}, {})})())
         result = runtime.invoke(
@@ -519,6 +607,142 @@ class ConnectorDigestTests(unittest.TestCase):
         receipt = connector.store.get("local_run", execution_id)["receipt"]
         self.assertEqual(receipt["error"], "local_policy_changed_probe_and_resubmit")
         self.assertEqual(receipt.get("not_launched"), "device_rejected")
+
+
+class PiBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve() / "workspace"
+        self.root.mkdir()
+        self.pi_dir = Path(self.tmp.name).resolve() / "pi-home"
+        cfg = config(self.root)
+        cfg["models"][0]["credential_ref"] = "key-a"
+        cfg["installations"] = [{
+            "id": "inst-local-pi", "host_id": "local", "adapter": "pi",
+            "argv": [sys.executable, "--version"], "cwd": str(self.root),
+            "enabled": True, "prompt_mode": "stdin", "risk": "write",
+            "probe_argv": [sys.executable, "--version"],
+            "extra_env": {"PI_CODING_AGENT_DIR": str(self.pi_dir)},
+            "max_concurrency": 1,
+        }]
+        self.app = Service(cfg, self.root.parent / "data", deployment_level="L0")
+        self.addCleanup(self.app.store.close)
+        self.app.probe("inst-local-pi")
+
+    def _work(self, key):
+        return self.app.send("bot-main", {"text": key, "allow_write": True}, key)["work_id"]
+
+    def _set_profile(self, **fields):
+        candidate, revision = self.app.managed_snapshot()
+        candidate["models"][0].update(fields)
+        self.app.commit_managed_config(candidate, base_revision=revision)
+
+    def test_credential_change_reasks_and_launch_overlay_does_not(self):
+        first = self.app.submit_task("bot-main", self._work("pi-a"), {
+            "prompt": "go", "installation_id": "inst-local-pi"})
+        self.assertEqual(first["status"], "queued")
+        self.app.cancel(first["task_id"])
+        inst = self.app.execution.installations["inst-local-pi"]
+        self.assertTrue(self.app._bind_profile_pi(inst))
+        self.assertEqual(inst["secret_refs"]["OPENAI_API_KEY"], "key-a")
+        bound = self.app.submit_task("bot-main", self._work("pi-bound"), {
+            "prompt": "go", "installation_id": "inst-local-pi"})
+        self.assertEqual(bound["status"], "queued")
+        frozen = self.app.store.get("task", bound["task_id"])
+        self._set_profile(credential_ref="key-b")
+        self.assertEqual(self.app._start_denied(frozen), "installation_not_authorized")
+        waited = self.app.submit_task("bot-main", self._work("pi-b"), {
+            "prompt": "go", "installation_id": "inst-local-pi"})
+        self.assertEqual(waited["status"], "awaiting_approval")
+        task = self.app.store.get("task", waited["task_id"])
+        self.app.approve(task["id"], {"spec_digest": task["spec_digest"], "always": True})
+        granted = self.app.submit_task("bot-main", self._work("pi-granted"), {
+            "prompt": "go", "installation_id": "inst-local-pi"})
+        self.assertEqual(granted["status"], "queued")
+        self.app.cancel(granted["task_id"])
+        self._set_profile(credential_env="OTHER_ENV")
+        changed = self.app.submit_task("bot-main", self._work("pi-env"), {
+            "prompt": "go", "installation_id": "inst-local-pi"})
+        self.assertEqual(changed["status"], "awaiting_approval")
+
+
+class ConnectorProposalTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve() / "workspace"
+        self.root.mkdir()
+        cfg = config(self.root)
+        cfg["hosts"].append({
+            "id": "pc", "name": "PC", "transport": "connector", "os": "Linux",
+            "allowed_roots": ["/work"], "credential_env": "TEST_DEVICE_KEY",
+            "credential_hash": "ab" * 32,
+        })
+        cfg["installations"].append({
+            "id": "codex-work-pc", "host_id": "pc", "adapter": "codex", "profile": "work",
+            "argv": ["codex", "exec", "-"], "cwd": "/work", "enabled": True,
+            "priority": 30, "prompt_mode": "stdin", "risk": "write",
+        })
+        self.app = Service(cfg, self.root.parent / "data", deployment_level="L0")
+        self.addCleanup(self.app.store.close)
+        self.app.store.put("device", {"id": "pc", "revoked": False, "public_key": "k"})
+        self.work = self.app.send("bot-main", {"text": "remote", "allow_write": True}, "remote")["work_id"]
+
+    def test_remote_unsupported_fields_change_nothing(self):
+        before = self.app.execution.installations["codex-work-pc"]["priority"]
+        before_ids = [row["id"] for row in self.app.store.find("setup_request")]
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work, {
+                "installation_id": "codex-work-pc", "priority": 4,
+                "secret_refs": {"CODEX_API_KEY": "cli-ref"}, "enabled": False,
+                "timeout_s": 30, "max_concurrency": 4})
+        self.assertEqual(ctx.exception.code, "unsupported_installation_field")
+        self.assertEqual(self.app.execution.installations["codex-work-pc"]["priority"], before)
+        self.assertEqual([row["id"] for row in self.app.store.find("setup_request")], before_ids)
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work, {
+                "installation_id": "codex-work-pc", "priority": 2, "profile": "other"})
+        self.assertEqual(ctx.exception.code, "installation_approval_mismatch")
+        self.assertEqual(self.app.execution.installations["codex-work-pc"]["priority"], before)
+
+    def test_remote_approval_keeps_the_profiled_id_and_cwd(self):
+        staged = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-work-pc", "cwd": "/work/src",
+            "extra_argv": ["--strict-config"]})
+        self.app.onboarding.approve(staged["staged"]["request_id"], {})
+        command = self.app.store.find("command", action="configure")[0]
+        payload = command["payload"]
+        self.assertEqual(payload["installation_id"], "codex-work-pc")
+        self.assertEqual(payload["profile"], "work")
+        self.assertEqual(payload["cwd"], "/work/src")
+        self.assertEqual(payload["extra_argv"], ["--strict-config"])
+        self.assertNotIn("secret_refs", payload.get("draft") or {})
+
+
+class ManifestTests(unittest.TestCase):
+    def test_oversize_command_and_roots_are_marked_truncated(self):
+        from pangpang.connector import execution_manifest, sanitize_manifest
+        long = "x" * 501
+        manifest = execution_manifest({
+            "installations": [{"id": "i", "host_id": "h", "argv": [long, "echo"],
+                               "extra_argv": [], "cwd": "/w", "secret_refs": {}}],
+            "hosts": [{"id": "h", "allowed_roots": ["/r"] * 33}],
+        }, "i")
+        self.assertIs(manifest["truncated"], True)
+        self.assertEqual(manifest["command"][0], "x" * 500)
+        self.assertEqual(len(manifest["allowed_roots"]), 32)
+        kept = sanitize_manifest(manifest)
+        self.assertIs(kept["truncated"], True)
+        self.assertEqual(kept["command"], manifest["command"])
+        self.assertEqual(kept["allowed_roots"], manifest["allowed_roots"])
+        blanked = sanitize_manifest({
+            "command": ["y"] * 33, "cwd": "/w", "allowed_roots": ["/w"], "credential_ids": []})
+        self.assertIs(blanked["truncated"], True)
+        self.assertEqual(blanked["command"], [])
+        self.assertEqual(blanked["allowed_roots"], ["/w"])
+        plain = sanitize_manifest({"command": ["echo"], "cwd": "/w", "allowed_roots": ["/w"]})
+        self.assertNotIn("truncated", plain)
 
 
 if __name__ == "__main__":

@@ -247,7 +247,7 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
       <p className="text-sm text-muted">{host?.name || req.host_id}</p>
       {req.status === 'needs_approval' ? (
         <>
-          <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli'): t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
+          <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli') : p.action === 'executor_config' ? t('setup.actionExecutorConfig') : t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
           <p className="text-xs">{t('setup.cwdLine', {cwd: p.cwd || t('setup.cwdDefault')})}</p>
           <p className="text-xs">{t('setup.authLine', {auth: p.auth === 'api_key' ? t('setup.authApiKey'): p.auth === 'existing' ? t('setup.authExisting'): p.auth || t('setup.authUnregistered')})}</p>
           {p.draft ? <p className="mt-1 text-xs">{t('setup.draftLine', {draft: JSON.stringify({
