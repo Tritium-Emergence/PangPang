@@ -182,8 +182,8 @@ export function executionFactsFor(
 
 /**
  * Label tone for an executor the control plane would admit (state "ready").
- * "ready" only when that selected installation's execution_verified is true.
- * A version probe (discovered) without that receipt is discovered_not_verified.
+ * "ready" only when that installation is still discovered AND execution_verified.
+ * A version probe without that receipt is discovered_not_verified.
  * Other capabilities, and executors that are not admitted, return null.
  */
 export function executorSetupTone(row: {capability?: string; state?: string; detail?: Record<string, unknown>}): 'ready' | 'discovered_not_verified' | null {
@@ -193,18 +193,20 @@ export function executorSetupTone(row: {capability?: string; state?: string; det
   const facts = Array.isArray(evidence)
     ? asFacts(evidence.find((item) => asFacts(item)?.installation_id === selected?.installation_id))
     : undefined;
-  return facts?.execution_verified === true ? 'ready' : 'discovered_not_verified';
+  return facts?.execution_verified === true && facts?.discovered === true ? 'ready' : 'discovered_not_verified';
 }
 
 /**
- * Per-installation Setup card. execution_verified is the only ready tone.
- * discovered (or a version probe when facts were not projected) is not ready.
+ * Per-installation card. Ready only when a fenced receipt exists and the
+ * executor is currently discovered. A probe row is that current check; without
+ * one, the stored discovered flag is the same fact. A past receipt does not
+ * turn an unavailable or missing probe green.
  */
 export function installationSetupTone(
   facts: ExecutionFacts | undefined,
   probe: {available?: boolean} | undefined,
 ): 'ready' | 'discovered_not_verified' | null {
-  if (facts?.execution_verified === true) return 'ready';
-  const discovered = facts ? facts.discovered === true : probe?.available === true;
-  return discovered ? 'discovered_not_verified' : null;
+  const discovered = probe ? probe.available === true : facts?.discovered === true;
+  if (!discovered) return null;
+  return facts?.execution_verified === true ? 'ready' : 'discovered_not_verified';
 }

@@ -28,6 +28,24 @@ test('a missing receipt on an admitted executor is not ready', () => {
   assert.equal(installationSetupTone(undefined, {available: true}), 'discovered_not_verified');
 });
 
+test('verified but not discovered is not the ready tone', () => {
+  assert.equal(executorSetupTone(admitted(true, false)), 'discovered_not_verified');
+  assert.equal(installationSetupTone(
+    {installation_id: 'codex-local', discovered: false, execution_verified: true},
+    {available: false},
+  ), null);
+  assert.equal(installationSetupTone(
+    {installation_id: 'codex-local', discovered: false, execution_verified: true},
+    undefined,
+  ), null);
+  // The card's probe row is the current check. Unavailable stays unavailable
+  // even if a stored discovered flag and an old receipt are both true.
+  assert.equal(installationSetupTone(
+    {installation_id: 'codex-local', discovered: true, execution_verified: true},
+    {available: false},
+  ), null);
+});
+
 test('blocked and non-executor rows keep their own state label', () => {
   assert.equal(executorSetupTone({capability: 'executor', state: 'blocked', detail: admitted(false).detail}), null);
   assert.equal(executorSetupTone({capability: 'model', state: 'ready'}), null);
