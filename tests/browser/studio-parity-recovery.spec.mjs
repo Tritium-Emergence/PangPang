@@ -316,7 +316,7 @@ test('continue selects owning Bot before installing the exact one-shot target', 
 
 test('setup proposal and device evidence restore cwd, auth, Qwen policy, version and seen time', async ({page}) => {
   await project(page, (s) => {
-    s.setup.requests = [{id: 'setup-test', status: 'needs_approval', host_id: 'local', proposal: {action: 'configure', adapter: 'qwen-claude', cwd: '/allowed/project', auth: 'existing'}}];
+    s.setup.requests = [{id: 'setup-test', status: 'needs_approval', host_id: 'local', proposal: {action: 'configure', adapter: 'legacy-executor', uses_qwen: true, cwd: '/allowed/project', auth: 'existing'}}];
     s.probes = s.installations.map((i) => ({id: i.id, available: true, version: 'CLI 1.2.3'}));
     s.hosts.push({id: 'presence', transport: 'connector', name: '在线设备'}); s.devices.push({id: 'presence', online: true, last_seen: 100});
   });

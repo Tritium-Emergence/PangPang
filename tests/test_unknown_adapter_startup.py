@@ -731,25 +731,47 @@ class ServiceTemplateTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         self.assertEqual(_shipped_hits(root), [])
         planted = self._planted_tree()
-        self.assertEqual(_shipped_hits(planted), ["pangpang/note.txt"])
+        self.assertEqual(_shipped_hits(planted), [
+            "pangpang/note.txt",
+            "pangpang/web/app.js",
+            "tests/test_fixture.py",
+            "web-src/snippet.tsx",
+        ])
 
     def _planted_tree(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
+        name = _removed_adapter_name()
         note = root / "pangpang"
         note.mkdir()
-        (note / "note.txt").write_text("name=qwen-claude\n", encoding="utf-8")
+        (note / "note.txt").write_text("name=" + name + "\n", encoding="utf-8")
         (note / "clean.txt").write_text("codex\n", encoding="utf-8")
+        web = note / "web"
+        web.mkdir()
+        (web / "app.js").write_text("const adapter=" + name.upper() + ";", encoding="utf-8")
+        (web / "app.css").write_text("body{}\n", encoding="utf-8")
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "test_fixture.py").write_text("ADAPTER = " + repr(name.title()) + "\n", encoding="utf-8")
+        source = root / "web-src"
+        source.mkdir()
+        (source / "snippet.tsx").write_text("export const id = " + repr(name) + ";\n", encoding="utf-8")
         (root / "README.md").write_text("coordinator\n", encoding="utf-8")
         return root
 
 
+def _removed_adapter_name():
+    """Retired private adapter name, assembled so this file does not contain it."""
+    return "qwen" + "-claude"
+
+
 def _shipped_hits(root):
-    """Files under the shipped trees that still contain the removed adapter name."""
-    needle = b"qwen-claude"
+    """Shipped trees, built web assets, web source, and tests that still contain the removed adapter name."""
+    needle = _removed_adapter_name().encode("ascii")
     hits = []
-    trees = [root / "pangpang", root / "deploy", root / "config", root / "docs"]
+    trees = [root / "pangpang", root / "deploy", root / "config", root / "docs",
+             root / "tests", root / "web-src"]
     files = []
     for tree in trees:
         if tree.is_dir():
@@ -761,7 +783,7 @@ def _shipped_hits(root):
     for path in files:
         if "__pycache__" in path.parts or path.suffix == ".pyc":
             continue
-        if needle in path.read_bytes():
+        if needle in path.read_bytes().lower():
             hits.append(str(path.relative_to(root)))
     return sorted(hits)
 

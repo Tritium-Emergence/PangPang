@@ -118,13 +118,13 @@ class AdaptersFileUnitTests(unittest.TestCase):
 
     def test_removed_private_default_can_be_registered_from_the_file(self):
         from pangpang.execution import ADAPTER_CATALOG
-        self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
-        row = dict(ROW, binary="qwen-claude", argv=["-p"], concurrency=2, priority=10,
+        self.assertNotIn("legacy-executor", ADAPTER_CATALOG)
+        row = dict(ROW, binary="legacy-executor", argv=["-p"], concurrency=2, priority=10,
                    use_when="迁移后的私人执行器。")
-        path = self.write({"qwen-claude": row})
-        self.assertEqual(adapters_file.merge(path), ["qwen-claude"])
-        self.assertEqual(ADAPTER_CATALOG["qwen-claude"]["argv"], ["-p"])
-        self.assertEqual(ADAPTER_CATALOG["qwen-claude"]["use_when"], "迁移后的私人执行器。")
+        path = self.write({"legacy-executor": row})
+        self.assertEqual(adapters_file.merge(path), ["legacy-executor"])
+        self.assertEqual(ADAPTER_CATALOG["legacy-executor"]["argv"], ["-p"])
+        self.assertEqual(ADAPTER_CATALOG["legacy-executor"]["use_when"], "迁移后的私人执行器。")
 
     def test_conflicting_second_file_refuses(self):
         self.write({"opencode-test": ROW}, name="a.json")

@@ -45,7 +45,7 @@ class EmptyLocalHostDiscoveryTests(unittest.TestCase):
         self.assertEqual(inst["host_id"], "host-local")
         self.assertEqual(inst["adapter"], "claude-code")
         self.assertEqual(inst["argv"][0], sys.executable)
-        self.assertNotIn("inst-local-qwen-claude", self.app.execution.installations)
+        self.assertNotIn("inst-local-legacy-executor", self.app.execution.installations)
         self.assertNotIn("inst-local-codex", self.app.execution.installations)
         self.assertEqual(
             [h["id"] for h in self.app.config["hosts"] if h.get("transport") == "local"],

@@ -76,7 +76,7 @@ class RouteDefaultTests(unittest.TestCase):
         system = projection(self.app, turn)[0]['content']
         self.assertIn('installation_id', system)
         self.assertIn('is not read by the system', system)
-        self.assertNotIn('qwen-claude', system)
+        self.assertNotIn('legacy-executor', system)
         self.assertNotIn('SAP', system)
         self.assertIn('does not authorize rewriting', system)
 

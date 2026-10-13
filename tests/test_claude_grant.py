@@ -82,7 +82,7 @@ class ClaudeCodeGrantTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("bypassPermissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("Bash", CLAUDE_CODE_ARGV)
-        self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
+        self.assertNotIn("legacy-executor", ADAPTER_CATALOG)
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"],
                          ["exec", "--sandbox", "workspace-write", "-"])
 

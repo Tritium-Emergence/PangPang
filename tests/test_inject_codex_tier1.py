@@ -40,7 +40,7 @@ class CapabilityTests(unittest.TestCase):
                          ["exec", "--sandbox", "workspace-write", "-"])
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox",
                          ADAPTER_CATALOG["codex"]["argv"])
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("qwen-claude")), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("legacy-executor")), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(
             {"interjection_tier": 1, "stdin_protocol": "gemini-stream"}), 3)

@@ -177,8 +177,8 @@ class HistoryTests(unittest.TestCase):
         if self.app.store.history_index_mode() != "fts5_trigram":
             self.skipTest("SQLite without FTS5 trigram")
         sent = self.app.send("bot-main", {"text": "安排"}, "fts")
-        ref = self.add(sent["work_id"], "Qwen-Claude 生成周报")
-        result = history.search(self.app.store, "bot-main", "qwen-claude")
+        ref = self.add(sent["work_id"], "Legacy-Executor 生成周报")
+        result = history.search(self.app.store, "bot-main", "legacy-executor")
         self.assertEqual(result["retrieval"], "fts5_trigram")
         self.assertEqual([h["evidence_ref"] for h in result["hits"]], [ref])
         self.assertTrue(result["exhaustive"])
