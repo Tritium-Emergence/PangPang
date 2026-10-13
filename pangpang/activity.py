@@ -230,6 +230,7 @@ def _secret_segment(seg):
 
 
 def _stays_in_cwd(cwd, parts):
+    """False when any existing component is a symlink, even inside cwd."""
     try:
         base = Path(cwd).resolve()
     except OSError:
@@ -241,13 +242,7 @@ def _stays_in_cwd(cwd, parts):
             st = os.lstat(current)
         except OSError:
             break
-        if not statmod.S_ISLNK(st.st_mode):
-            continue
-        try:
-            current = Path(os.path.realpath(current))
-        except OSError:
-            return False
-        if not _is_inside(current, base):
+        if statmod.S_ISLNK(st.st_mode):
             return False
     try:
         final = current.resolve(strict=False)

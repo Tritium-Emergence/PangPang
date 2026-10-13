@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from test_bot_runtime import call, config
-from pangpang.activity import activity_projection
+from pangpang.activity import activity_projection, sanitize_rel_path
 from pangpang.http import serve
 from pangpang.planner_prompt import PLANNER_SYSTEM
 from pangpang.runtime import Runtime
@@ -126,8 +126,8 @@ class TaskActivityTests(unittest.TestCase):
 
     def test_prompt_keeps_direct_answer_rules_and_names_activity(self):
         self.assertIn("neither an addition nor a correction", PLANNER_SYSTEM)
-        self.assertIn("target.activity", PLANNER_SYSTEM)
-        self.assertIn("dependencies[].activity", PLANNER_SYSTEM)
+        self.assertIn("dependencies[].target.activity", PLANNER_SYSTEM)
+        self.assertNotIn("dependencies[].activity", PLANNER_SYSTEM)
         self.assertIn("When this turn dispatches or continues a Work, your first line states whether you read it as an addition, a correction, or a new matter", PLANNER_SYSTEM)
         self.assertIn("When no work is dispatched, answer directly without any classification or context-state preamble.", PLANNER_SYSTEM)
         self.assertFalse(any("一" <= ch <= "鿿" for ch in PLANNER_SYSTEM))
@@ -274,6 +274,24 @@ class TaskActivityTests(unittest.TestCase):
         activity = self._project(log)
         self.assertEqual(activity["recent"], [{"tool": "execute"}, {"tool": "read", "path": "src/ok.py"}])
         self.assertNotIn(secret, json.dumps(activity))
+
+    def test_symlink_inside_cwd_is_rejected(self):
+        real = self.root / "real"
+        real.mkdir()
+        (real / "file.txt").write_text("x", encoding="utf-8")
+        (self.root / "alias").symlink_to(real, target_is_directory=True)
+        self.assertIsNone(sanitize_rel_path("alias/file.txt", str(self.root)))
+
+        recent = self._project(_line(_claude("Read", "alias/file.txt")), directory=self.root / "in-cwd-link")
+        self.assertEqual(recent["recent"], [{"tool": "read"}])
+        self.assertNotIn("alias/file.txt", json.dumps(recent["recent"]))
+
+        exec_id = "exec-" + "b" * 32
+        Path(runner.execution_output_dir(self.root, exec_id)).mkdir(parents=True)
+        task = self._task(execution_id=exec_id, required_outputs=["alias/file.txt"])
+        shown = activity_projection(task, now=1_000_100, local=True, roots=[str(self.root)], cwd=str(self.root))
+        self.assertEqual(shown["present_outputs"], [{"path": "<redacted-path>", "present": False}])
+        self.assertNotIn("alias/file.txt", json.dumps(shown["present_outputs"]))
 
     def test_symlink_log_is_not_followed(self):
         folder = self.root / "link-log"
