@@ -55,11 +55,11 @@ test('mobile: chat usable, no overflow, sidebar is a working drawer', async ({pa
 // Phone, foldable, tablet, and desktop widths. Touch is emulated on the coarse set.
 const COARSE_SIZES = [[320, 568], [360, 800], [390, 844], [430, 932], [600, 960], [768, 1024], [915, 412], [1024, 768]];
 const FINE_SIZES = [[1280, 800], [1920, 1080]];
-const LONG = '测'.repeat(80) + '\n' + ('readable words '.repeat(40));
+const LONG = '测'.repeat(80) + '\n' + ('readable words '.repeat(40)) + '\n```\nconst n = 1;\n```\n';
 
 async function assertChatLayout(page, width, height, {coarse}) {
   await page.setViewportSize({width, height});
-  const report = await page.evaluate(() => {
+  const report = await page.evaluate((short) => {
     const input = document.querySelector('#message').getBoundingClientRect();
     const send = document.querySelector('#send').getBoundingClientRect();
     const body = document.querySelector('#messages .body');
@@ -83,6 +83,14 @@ async function assertChatLayout(page, width, height, {coarse}) {
     }
     const fonts = [{id: '#message', fs: parseFloat(getComputedStyle(document.querySelector('#message')).fontSize)}];
     fonts.push({id: '.body', fs: parseFloat(bodyStyle.fontSize)});
+    const pre = document.querySelector('#messages .md-pre');
+    if (!pre) return {missing: '.md-pre'};
+    fonts.push({id: '.md-pre', fs: parseFloat(getComputedStyle(pre).fontSize)});
+    const raw = document.querySelector('#messages .evidence-raw');
+    if (raw) fonts.push({id: '.evidence-raw', fs: parseFloat(getComputedStyle(raw).fontSize)});
+    const name = document.querySelector('#bot-name');
+    const nameBox = name.getBoundingClientRect();
+    const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
     for (const el of document.querySelectorAll('input, textarea, select')) {
       const type = el.getAttribute('type') || '';
       if (['checkbox', 'radio', 'file', 'hidden', 'range'].includes(type)) continue;
@@ -110,8 +118,15 @@ async function assertChatLayout(page, width, height, {coarse}) {
       coarse: matchMedia('(pointer: coarse)').matches,
       targets,
       inputFont: parseFloat(getComputedStyle(document.querySelector('#message')).fontSize),
+      nameWidth: nameBox.width,
+      nameScroll: name.scrollWidth,
+      nameFont: parseFloat(getComputedStyle(name).fontSize),
+      nameText: name.textContent.trim(),
+      composerPad: parseFloat(getComputedStyle(document.querySelector('#composer')).paddingBottom),
+      expectedPad: (short ? 0.375 : 0.75) * root,
     };
-  });
+  }, height <= 500);
+  expect(report.missing, JSON.stringify(report)).toBeFalsy();
   expect(report.sameRow, JSON.stringify({width, height, report})).toBeTruthy();
   expect(report.sendInView, JSON.stringify(report)).toBeTruthy();
   expect(report.overflow).toBeLessThanOrEqual(1);
@@ -122,6 +137,10 @@ async function assertChatLayout(page, width, height, {coarse}) {
   expect(report.lineRatio).toBeLessThanOrEqual(1.8);
   expect(report.coarse).toBe(coarse);
   if (coarse) expect(report.targets, JSON.stringify(report.targets)).toEqual([]);
+  expect(report.nameText.length).toBeGreaterThan(0);
+  expect(report.nameWidth).toBeGreaterThanOrEqual(report.nameFont * 2);
+  expect(report.nameWidth).toBeGreaterThanOrEqual(report.nameScroll - 1);
+  expect(Math.abs(report.composerPad - report.expectedPad)).toBeLessThanOrEqual(1);
   await saveShot(page, width, height);
 }
 
@@ -137,27 +156,30 @@ test.describe('responsive chat, coarse pointer', () => {
   });
 });
 
-test('viewport matrix on a fine pointer keeps one composer row and the measure cap', async ({page}) => {
-  test.setTimeout(90000);
-  await project(page, () => {}, [{id: 'measure-msg', kind: 'assistant', from: 'bot-main', content: LONG}]);
-  await page.setViewportSize({width: 1280, height: 800});
-  await login(page);
-  const safeArea = await page.evaluate(() => {
-    for (const sheet of document.styleSheets) {
-      let rules;
-      try { rules = [...sheet.cssRules]; } catch { continue; }
-      const visit = (list) => {
-        for (const rule of list) {
-          if (rule.cssRules) { if (visit([...rule.cssRules])) return true; }
-          if (String(rule.selectorText || '').includes('composer') && String(rule.style?.paddingBottom || '').includes('safe-area-inset-bottom')) return true;
-        }
-        return false;
-      };
-      if (visit(rules)) return true;
-    }
-    return false;
+test.describe('responsive chat, fine pointer', () => {
+  test.use({hasTouch: false, isMobile: false});
+  test('viewport matrix on a fine pointer keeps one composer row and the measure cap', async ({page}) => {
+    test.setTimeout(90000);
+    await project(page, () => {}, [{id: 'measure-msg', kind: 'assistant', from: 'bot-main', content: LONG}]);
+    await page.setViewportSize({width: 1280, height: 800});
+    await login(page);
+    const safeArea = await page.evaluate(() => {
+      for (const sheet of document.styleSheets) {
+        let rules;
+        try { rules = [...sheet.cssRules]; } catch { continue; }
+        const visit = (list) => {
+          for (const rule of list) {
+            if (rule.cssRules) { if (visit([...rule.cssRules])) return true; }
+            if (String(rule.selectorText || '').includes('composer') && String(rule.style?.paddingBottom || '').includes('safe-area-inset-bottom')) return true;
+          }
+          return false;
+        };
+        if (visit(rules)) return true;
+      }
+      return false;
+    });
+    expect(safeArea).toBeTruthy();
+    for (const [width, height] of FINE_SIZES) await assertChatLayout(page, width, height, {coarse: false});
+    await page.unrouteAll({behavior: 'ignoreErrors'});
   });
-  expect(safeArea).toBeTruthy();
-  for (const [width, height] of FINE_SIZES) await assertChatLayout(page, width, height, {coarse: false});
-  await page.unrouteAll({behavior: 'ignoreErrors'});
 });
