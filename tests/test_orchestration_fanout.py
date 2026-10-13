@@ -6,6 +6,7 @@ of two concurrent independent tasks must not disturb the other; and tasks
 that share a workspace (or one installation at max_concurrency) serialize by
 design instead of deadlocking. These pin control-plane invariants only: the
 A→B→C ordering itself is a planner decision and is not covered here."""
+import json
 import sys
 import tempfile
 import time
@@ -13,6 +14,8 @@ import unittest
 from pathlib import Path
 
 from test_bot_runtime import config
+from pangpang.planner_prompt import PLANNER_SYSTEM
+from pangpang.runner import bind_output_dir
 from pangpang.service import Service
 
 
@@ -136,6 +139,72 @@ class OrchestrationFanoutTests(unittest.TestCase):
             echoes = [m for m in self.app.store.find("message", work_id=task["work_id"])
                       if m.get("kind") == "execution_result"]
             self.assertTrue(echoes, "join never echoed back into work " + task["work_id"])
+
+    def test_dependent_task_rendered_prompt_matches_absolute_input_paths(self):
+        """A consumer prompt must allow the absolute Input files paths when they
+        sit outside that task's cwd, and must not tell the executor otherwise."""
+        cfg, dirs = self._triple_cfg()
+        self._boot(cfg)
+        self._argv("inst-a",
+                   "import pathlib; pathlib.Path('research.txt').write_text('RESEARCH'); print('research done')")
+        producer = self._submit("prompt-a", "research", installation_id="inst-a", outputs=["research.txt"])
+        self.assertEqual(self._drain([producer])[0]["status"], "succeeded")
+        art = self.app.store.find("artifact", task_id=producer)[0]
+        producer_prompt = self.app.store.get("task", producer)["prompt"]
+        self.assertNotIn("Input files are absolute, digest-checked paths", producer_prompt)
+
+        consumer = self._submit(
+            "prompt-b", "Read the upstream artifact and continue.",
+            installation_id="inst-b", refs=[art["id"]])
+        task = self.app.store.get("task", consumer)
+        prompt = task["prompt"]
+        path = art["path"]
+        cwd = Path(task["cwd"]).resolve()
+        resolved = Path(path).resolve()
+        self.assertEqual(cwd, dirs["b"].resolve())
+        self.assertTrue(resolved.is_relative_to(dirs["a"].resolve()))
+        self.assertTrue(Path(path).is_absolute())
+        self.assertNotIn(cwd, resolved.parents)
+        self.assertIn(path, prompt)
+        self.assertEqual(task["inputs"], [{
+            "artifact_id": art["id"], "path": path, "digest": art["digest"]}])
+
+        note = (
+            "Input files are absolute, digest-checked paths you are allowed to read "
+            "even when they are outside the working directory. Read each listed path; "
+            "do not refuse a listed path for being outside the working directory, and "
+            "do not look for these inputs only inside the working directory."
+        )
+        self.assertIn(note, prompt)
+        self.assertLess(prompt.index(note), prompt.index("\nInput files: "))
+        start = prompt.index("Input files: ") + len("Input files: ")
+        end = prompt.index("\nDelivery note")
+        self.assertEqual(json.loads(prompt[start:end]), task["inputs"])
+        for phrase in (
+                "must not search outside",
+                "do not look outside",
+                "do not search outside",
+                "not to look outside",
+                "only in its own working directory",
+                "only in its own cwd",
+                "look for these files only",
+                "inputs are inside the working directory",
+                "inputs are inside its working directory",
+                "must not read outside"):
+            self.assertNotIn(phrase, prompt, phrase)
+
+        self.assertNotIn("must not search outside", PLANNER_SYSTEM)
+        self.assertIn(
+            "absolute, digest-checked paths the executor is allowed to read "
+            "even when they are outside the working directory",
+            PLANNER_SYSTEM)
+        self.assertIn("unnamed workspace files only in its own working directory", PLANNER_SYSTEM)
+
+        launched = bind_output_dir(
+            prompt, str(cwd / ".xpp-out" / task["execution_id"]))
+        self.assertIn(note, launched)
+        self.assertIn(path, launched)
+        self.assertNotIn("must not search outside", launched)
 
     def test_three_tasks_queued_at_once_drain_serially_on_one_installation(self):
         self._boot(self._base_cfg())
