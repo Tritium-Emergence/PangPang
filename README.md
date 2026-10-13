@@ -221,19 +221,15 @@ Passing automated tests does not mean every model, CLI, device, disconnect-recov
 
 ## Local-model performance
 
-The default scheduler assumes a model endpoint that profits from concurrency (`model_max_concurrency=4`). If your endpoint is a **single-stream local Qwen** where parallel long contexts reduce wall-clock performance, set the model scheduler to 1:
+After the first start, managed settings in the database are the live configuration. The startup file (`--config`, default `config/runtime.json`; the built-in empty config when that file is absent) is only the seed: the process uses it while `settings/managed` is missing, and the first managed write copies that in-memory config into the data directory. Local-exec consent, local host registration, and saving model settings each perform that write.
 
-```json
-{
-  "scheduler": {
-    "model_max_concurrency": 1,
-    "reserved_user_slots": 0,
-    "main_bot_max_active_turns": 1,
-    "main_bot_reserved_user_slots": 0,
-    "service_bot_max_active_turns": 1
-  }
-}
-```
+On every later start the process loads `settings/managed`. When the startup file sets `turn_budget` or `semantic_gate`, those two values replace the stored ones in memory for that process. That read does not write them back. A replacement is logged as `startup config replaced stored`. Every other key in the file, including `scheduler`, stays in the stored settings, and a differing key is logged as `startup config is not the live settings after the first start`.
+
+With no stored `scheduler` object the process runs four simultaneous model conversations (`model_max_concurrency` 4, `reserved_user_slots` 1). An endpoint that accepts concurrent requests can keep that default. A **single-stream local Qwen**, where parallel long contexts reduce wall-clock performance, should use one conversation.
+
+Set it in the Web UI. Open **Set global chat model** (or **Set up model**), then **Simultaneous model conversations**, an integer from 1 to 16, and save. The save stores `scheduler.model_max_concurrency` on the managed row. A value of 1 also stores `reserved_user_slots` as 0 so the next start accepts the config. A value above 1 keeps the stored `reserved_user_slots` when that integer is already in range, and otherwise stores 1. No other scheduler key is written. Restart the coordinator before the new limit runs. No environment variable sets this limit.
+
+After the managed row exists, `main_bot_max_active_turns`, `main_bot_reserved_user_slots`, and `service_bot_max_active_turns` have no supported change path.
 
 Executor capacity and workspace claims are a separate resource domain and must not be coupled back into planner resource locks.
 
