@@ -76,7 +76,6 @@ export interface ActivitySummaryTask {
   required_outputs?: unknown;
   activity?: {
     status?: string;
-    age_s?: number;
     last_log_at?: number | null;
     observation_capped?: string;
     recent?: {tool?: string; path?: string}[];
@@ -93,7 +92,7 @@ function clockHMS(unix: number): string {
 }
 
 // Absolute queue or start clock, last log time, latest step, and required files
-// already present. age_s stays on the planner packet and is not rendered here.
+// already present. The snapshot activity has no age_s; that field stays on the planner packet.
 // starting uses its own clock — started is recorded before the process is running.
 export function activitySummary(task: ActivitySummaryTask | null | undefined, tr: Tr): string | null {
   const activity = task?.activity;

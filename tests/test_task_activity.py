@@ -521,6 +521,10 @@ class TaskActivityTests(unittest.TestCase):
 
         with patch("pangpang.activity.os.lstat", spy_lstat), patch("pangpang.activity.runner.read_tail_bounded", spy_tail):
             packet = self._packet(sent["turn_id"])
+            packet_activity = next(dep["target"]["activity"] for dep in packet["dependencies"]
+                                   if dep.get("target", {}).get("task_id") == task["id"])
+            self.assertIn("age_s", packet_activity)
+            self.assertIsInstance(packet_activity["age_s"], int)
             self.assertTrue(any(dep.get("target", {}).get("activity", {}).get("recent") for dep in packet["dependencies"]))
             token = "s" * 32
             server = serve(self.app, token, port=0)
@@ -551,6 +555,7 @@ class TaskActivityTests(unittest.TestCase):
         self.assertEqual(errors, [])
         local = next(row for row in snapshot["tasks"] if row["id"] == task["id"])
         self.assertIn("activity", local)
+        self.assertNotIn("age_s", local["activity"])
         self.assertIn("src/live.py", json.dumps(local["activity"]))
         succeeded = next(row for row in snapshot["tasks"] if row["status"] == "succeeded")
         unknown = next(row for row in snapshot["tasks"] if row["status"] == "unknown")
@@ -559,6 +564,7 @@ class TaskActivityTests(unittest.TestCase):
         for status in ("queued", "starting", "cancel_requested"):
             row = next(item for item in snapshot["tasks"] if item["id"] == "task-snap-" + status)
             self.assertEqual(row["activity"]["status"], status)
+            self.assertNotIn("age_s", row["activity"])
         self.assertNotIn("activity", next(item for item in snapshot["tasks"] if item["id"] == "task-snap-awaiting_approval"))
         remote = next(row for row in snapshot["tasks"] if row["host_id"] == "connector-1")
         self.assertNotIn("activity", remote)

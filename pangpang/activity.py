@@ -105,7 +105,11 @@ def attach_dependency_activity(service, dependencies, *, now=None):
 
 
 def annotate_snapshot_tasks(service, tasks, *, now=None):
-    """Attach activity on active local task rows. Other rows are left untouched."""
+    """Attach activity on active local task rows. Other rows are left untouched.
+
+    age_s is omitted. It is only true at this instant, and the card uses the
+    stored created or started clock instead. The planner packet keeps age_s.
+    """
     chosen = []
     for task in tasks or []:
         if task.get("status") not in _ACTIVE:
@@ -118,7 +122,9 @@ def annotate_snapshot_tasks(service, tasks, *, now=None):
         return tasks
     moment = time.time() if now is None else now
     for task in chosen:
-        task["activity"] = _project_task(service, task, now=moment)
+        activity = _project_task(service, task, now=moment)
+        activity.pop("age_s", None)
+        task["activity"] = activity
     return tasks
 
 

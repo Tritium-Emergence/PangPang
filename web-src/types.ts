@@ -73,7 +73,6 @@ export interface Task {
   required_outputs?: string[];
   activity?: {
     status?: string;
-    age_s?: number;
     last_log_at?: number | null;
     observation_capped?: 'maybe' | 'no';
     recent?: {tool: string; path?: string}[];
