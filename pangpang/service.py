@@ -55,6 +55,20 @@ def _bing_real_url(href):
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+_ROUTE_RANK = {"deterministic": 0, "confident": 0, "default_continue": 1, "fallback": 2}
+
+
+def weakest_route_quality(*qualities):
+    """The least trusted route quality. Unknown labels rank with fallback.
+
+    None and empty values are ignored. No qualities returns None.
+    """
+    present = [q for q in qualities if isinstance(q, str) and q]
+    if not present:
+        return None
+    return max(present, key=lambda q: _ROUTE_RANK.get(q, 2))
+
+
 EXECUTION_ACTIVE = {"starting", "running", "cancel_requested", "unknown"}
 TURN_PRIORITY = {"user": 0, "execution_result": 1, "setup_result": 1, "result": 1,
                  "peer_result": 1, "handoff": 2, "peer": 2, "routine": 3}
@@ -1210,14 +1224,12 @@ class Service:
                      else mode)
         msg_ids = [m["id"] for m in inbox]
         priority = min(self._message_priority(m) for m in inbox)
-        # A coalesced turn inherits the WEAKEST user-route quality in its inbox.
-        # Otherwise a later confident message could accidentally upgrade an earlier
-        # fallback message and unlock consequential tools for the combined turn.
-        route_rank = {"deterministic": 0, "confident": 0, "default_continue": 1, "fallback": 2}
+        # A coalesced turn keeps the weakest user-route quality. The inbox only
+        # holds messages that have not been consumed yet, so a queued turn's stored
+        # quality is merged in below and is never replaced by a stronger one.
         user_route_qualities = [m.get("route_quality", "deterministic") for m in inbox
                                 if m.get("kind") == "user" and m.get("from") == "user"]
-        turn_route_quality = (max(user_route_qualities, key=lambda q: route_rank.get(q, 2))
-                              if user_route_qualities else None)
+        turn_route_quality = weakest_route_quality(*user_route_qualities) if user_route_qualities else None
         # reply obligations this turn will owe (peer requests requiring a response)
         reply_ids = []
         for m in inbox:
@@ -1269,7 +1281,7 @@ class Service:
                 if trigger.get("route_source"):
                     queued["route_source"] = trigger["route_source"]
                 if turn_route_quality:
-                    queued["route_quality"] = turn_route_quality
+                    queued["route_quality"] = weakest_route_quality(queued.get("route_quality"), turn_route_quality)
             turn = self.store.put("turn", queued)
         else:
             # New model turn: charge the accounted root's model-turn budget (hard
