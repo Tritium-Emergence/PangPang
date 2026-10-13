@@ -69,6 +69,67 @@ export function mergeRefreshScope(pending: 'all' | 'messages', eventType: string
 
 export const PER_PAGE = 10;
 
+export interface ActivitySummaryTask {
+  status?: string;
+  created?: number;
+  started?: number;
+  required_outputs?: unknown;
+  activity?: {
+    status?: string;
+    last_log_at?: number | null;
+    observation_capped?: string;
+    recent?: {tool?: string; path?: string}[];
+    present_outputs?: {path?: string; present?: boolean}[];
+  } | null;
+}
+
+type Tr = (key: string, vars?: Record<string, unknown>) => string;
+
+function clockHMS(unix: number): string {
+  const d = new Date(unix * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// Absolute queue or start clock, last log time, latest step, and required files
+// already present. The snapshot activity has no age_s; that field stays on the planner packet.
+// starting uses its own clock — started is recorded before the process is running.
+export function activitySummary(task: ActivitySummaryTask | null | undefined, tr: Tr): string | null {
+  const activity = task?.activity;
+  if (!activity) return null;
+  const status = String(activity.status || task?.status || '');
+  const anchor = status === 'queued' ? task?.created
+    : (status === 'starting' || status === 'running') ? task?.started
+    : undefined;
+  const clock = typeof anchor === 'number' && anchor > 0 ? clockHMS(anchor) : '';
+  const parts: string[] = [];
+  if (clock && status === 'queued') parts.push(tr('workpane.activityQueued', {time: clock}));
+  else if (clock && status === 'starting') parts.push(tr('workpane.activityStarting', {time: clock}));
+  else if (clock && status === 'running') parts.push(tr('workpane.activityRunning', {time: clock}));
+  if (typeof activity.last_log_at === 'number' && activity.last_log_at > 0) {
+    parts.push(tr('workpane.activityLastLog', {time: clockHMS(activity.last_log_at)}));
+  }
+  const recent = Array.isArray(activity.recent) ? activity.recent : [];
+  const step = recent.length ? recent[recent.length - 1] : null;
+  if (step && typeof step.tool === 'string' && step.tool) {
+    parts.push(tr('workpane.activityRecent', {step: step.path ? `${step.tool} ${step.path}` : step.tool}));
+  }
+  const declared = task?.required_outputs;
+  const undeclared = !Array.isArray(declared) || declared.length === 0;
+  const outputs = Array.isArray(activity.present_outputs) ? activity.present_outputs : [];
+  if (undeclared) parts.push(tr('workpane.activityUndeclared'));
+  else {
+    const files = outputs.filter((item) => item && item.present && item.path).map((item) => item.path);
+    if (files.length) parts.push(tr('workpane.activityPresent', {files: files.join(', ')}));
+  }
+  if (activity.observation_capped === 'maybe') parts.push(tr('workpane.activityCapped'));
+  const observed = (typeof activity.last_log_at === 'number' && activity.last_log_at > 0)
+    || recent.some((item) => item && item.tool)
+    || outputs.some((item) => item && item.present);
+  if (!observed) parts.push(tr('workpane.activityNone'));
+  return parts.join(' · ');
+}
+
 // Pure pagination math: clamp the requested page into range and compute the
 // slice bounds. usePager() consumes this so the grid window + clamp are tested once,
 // independent of the React scroll-anchor effect.

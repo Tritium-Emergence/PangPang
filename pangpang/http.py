@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit, quote
 
 from .store import Fault, encode, uid
 from .execution import artifact_bytes
+from .activity import annotate_snapshot_tasks
 from .attention import project
 from .logs import get_logger
 
@@ -257,6 +258,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         notifications_complete=unread_cursor is None)
                     for w in work:
                         w["attention"] = states.get(w["id"], "settled" if complete else "unknown")
+                    annotate_snapshot_tasks(service, tasks)
                     self.respond({"setup": service.onboarding.status(), "bots": service.store.find("bot"),
                                   "work": work,
                                   "tasks": tasks,

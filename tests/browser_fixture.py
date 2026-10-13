@@ -2,7 +2,7 @@
 deterministic LLM/CLI discovery. Never used by the product entrypoint.
 
 Usage: python tests/browser_fixture.py [scenario] [port]
-  scenario = onboarding (default) | studio | correction | catalog-window
+  scenario = onboarding (default) | studio | correction | catalog-window | activity
   port = listen port (default 8799)
 
 `onboarding` is unchanged from the original single-fixture file so
@@ -325,6 +325,47 @@ def run_correction():
     serve(app, TOKEN, port=PORT).serve_forever()
 
 
+def run_activity():
+    """Task cards with computed activity. No runtime loop, so seeded rows stay put."""
+    root = Path(tempfile.mkdtemp(prefix="pangpang-activity-"))
+    workspace = root / "workspace"
+    workspace.mkdir()
+    cfg = config(workspace)
+    app = Service(cfg, root / "data")
+    app.probe("codex-local")
+    wid = uid("work")
+    app.store.put("work", {"id": wid, "owner_bot_id": "bot-main", "goal": "查看运行中的任务",
+        "status": "active", "parent_work_id": None, "reply_to": None, "mode": "deliver_to_user",
+        "depth": 0, "refs": [], "grant_write": True, "constraints": [], "handoff": None,
+        "kind": "conversation", "created": time.time(), "checkpoint": {}})
+
+    def put_task(status, prompt, *, started=None):
+        task = {"id": uid("task"), "status": status, "host_id": "local", "installation_id": "codex-local",
+                "workspace_key": ["host-local", ["activity"]], "access_mode": "write", "resource_keys": [],
+                "execution_id": uid("exec"), "spec_digest": "activity", "created": time.time() - 30,
+                "owner_bot_id": "bot-main", "work_id": wid, "cwd": str(workspace),
+                "prompt": prompt, "inputs": [], "outputs": ["notes.txt"], "required_outputs": []}
+        if started is not None:
+            task["started"] = started
+        return app.store.put("task", task)
+
+    put_task("starting", "启动中的任务", started=time.time() - 4)
+    running = put_task("running", "正在读取的任务", started=time.time() - 20)
+    host = app.execution.hosts["local"]
+    run_dir = Path(app.execution.directory(host, running["execution_id"]))
+    run_dir.mkdir(parents=True)
+    line = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "src/a.py"}}]}}) + "\n"
+    (run_dir / "output.log").write_text(line, encoding="utf-8")
+    capped = put_task("running", "日志已很长的任务", started=time.time() - 12)
+    cap_dir = Path(app.execution.directory(host, capped["execution_id"]))
+    cap_dir.mkdir(parents=True)
+    cap_log = cap_dir / "output.log"
+    cap_log.write_text("{}\n", encoding="utf-8")
+    os.truncate(cap_log, 4 * 1024 * 1024)
+    serve(app, TOKEN, port=PORT).serve_forever()
+
+
 def run_catalog_window():
     """One configured profile whose stored window is 32K. No seeded turns."""
     root = Path(tempfile.mkdtemp(prefix="pangpang-catalog-window-"))
@@ -343,5 +384,7 @@ elif SCENARIO == "correction":
     run_correction()
 elif SCENARIO == "catalog-window":
     run_catalog_window()
+elif SCENARIO == "activity":
+    run_activity()
 else:
     run_onboarding()

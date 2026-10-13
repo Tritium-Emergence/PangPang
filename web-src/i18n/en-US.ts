@@ -143,6 +143,24 @@ export default {
 
     recoveryConfirmStopped: 'Release the working directory after confirming that the executor process has stopped?',
 
+    activityQueued: 'queued at {{time}}',
+
+    activityStarting: 'starting at {{time}}',
+
+    activityRunning: 'started at {{time}}',
+
+    activityLastLog: 'last log {{time}}',
+
+    activityRecent: 'latest step {{step}}',
+
+    activityPresent: 'present {{files}}',
+
+    activityUndeclared: 'no required files declared',
+
+    activityCapped: 'log may have reached its cap',
+
+    activityNone: 'no observable activity yet',
+
   },
 
   setup: {

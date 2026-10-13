@@ -12,11 +12,13 @@ export default defineConfig({
     {command: 'python tests/browser_fixture.py onboarding 8799', url: 'http://127.0.0.1:8799/', timeout: 60000, reuseExistingServer: false, env},
     {command: 'python tests/browser_fixture.py studio 8798', url: 'http://127.0.0.1:8798/', timeout: 60000, reuseExistingServer: false, env},
     {command: 'python tests/browser_fixture.py correction 8797', url: 'http://127.0.0.1:8797/', timeout: 60000, reuseExistingServer: false, env},
+    {command: 'python tests/browser_fixture.py activity 8796', url: 'http://127.0.0.1:8796/', timeout: 60000, reuseExistingServer: false, env},
   ],
   projects: [
     {name: 'onboarding', testMatch: /onboarding\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8799'}},
     {name: 'studio', testMatch: /studio-.*\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8798'}},
     {name: 'correction', testMatch: /correction-.*\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8797'}},
+    {name: 'activity', testMatch: /activity\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8796'}},
 ...(process.env.P21_WEBKIT ? [{name: 'webkit-mobile', testMatch: /studio-(?:mobile|parity-(?:mobile|boundaries))\.spec\.mjs/, use: {...base, browserName: 'webkit', isMobile: true, hasTouch: true, baseURL: 'http://127.0.0.1:8798'}}]: []),
   ],
 });

@@ -5,7 +5,7 @@ import type {Routine, Task, Work, Artifact} from '../types';
 import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
-import {pageWindow} from '../pure';
+import {activitySummary, pageWindow} from '../pure';
 import {attentionLabel, taskLabel, exchangeLabel, dateTime, scheduleText, friendlyError, fileSize, checkpointView} from '../display';
 import {MediaPreview} from './MediaPreview';
 import {Facts, Created, Value} from './Facts';
@@ -300,6 +300,7 @@ function WorkDetail({work, store, onClose}: {work: Work; store: Store; onClose: 
 
 function TaskPanel({t, store}: {t: Task; store: Store}) {
   const {t: tr} = useTranslation();
+  const activity = activitySummary(t, tr);
   return (
     <div className="panel task rounded-xl border border-line bg-raised p-4" data-status={t.status}>
       <div className="flex items-center justify-between">
@@ -308,6 +309,7 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
       </div>
       <p className="mt-1 line-clamp-2 text-sm">{(t.prompt || '').slice(0, 160)}</p>
       <Created at={t.created} />
+      {activity ? <p className="mt-1 text-xs text-muted" data-activity-status={t.status}>{activity}</p> : null}
       <details className="mt-2"><summary className="cursor-pointer text-xs text-brand">{tr('workpane.viewTaskAndLogs')}</summary><Value value={{id: t.id, route: t.route, inputs: t.inputs, outputs: t.outputs, receipt: t.receipt, error: t.error}} /></details>
       {t.status === 'unknown' ? <p className="mt-1 text-xs text-warn">{tr('workpane.workspaceIsolatedFull')}</p>: null}
       {t.error ? <p className="mt-1 text-xs text-warn">{t.error}</p>: null}

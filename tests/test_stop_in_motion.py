@@ -53,6 +53,9 @@ class StopInMotionTests(unittest.TestCase):
         messages = projection(self.app, self.app.store.get("turn", stop["turn_id"]))
         dep = next(d for d in packet_of(messages)["dependencies"] if d["status"] == "pending")
         self.assertEqual(dep["id"], task["dependency_id"])
+        activity = dep["target"].pop("activity")
+        self.assertEqual(activity["status"], "queued")
+        self.assertIn("age_s", activity)
         self.assertEqual(dep["target"], {"task_id": task["task_id"], "status": "queued",
                                          "installation_id": "codex-local", "request": "删除草稿箱里的所有文章",
                                          "interjection_tier": 1})

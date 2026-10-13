@@ -69,6 +69,15 @@ export interface Task {
     truncated?: boolean;
   };
   created?: number;
+  started?: number;
+  required_outputs?: string[];
+  activity?: {
+    status?: string;
+    last_log_at?: number | null;
+    observation_capped?: 'maybe' | 'no';
+    recent?: {tool: string; path?: string}[];
+    present_outputs?: {path: string; present: boolean}[];
+  };
   route?: unknown;
   inputs?: unknown;
   outputs?: unknown;
