@@ -130,6 +130,20 @@ export function activitySummary(task: ActivitySummaryTask | null | undefined, tr
   return parts.join(' · ');
 }
 
+// Text the operator typed when manually resolving a task. A system termination
+// proof is a different field and is not this statement.
+export function operatorStatement(task: {operator_evidence?: unknown; receipt?: unknown} | null | undefined): string | null {
+  if (!task || typeof task !== 'object') return null;
+  const receipt = task.receipt;
+  const fromReceipt = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+    ? (receipt as {operator_evidence?: unknown}).operator_evidence
+    : undefined;
+  const nested = typeof fromReceipt === 'string' ? fromReceipt.trim() : '';
+  const direct = typeof task.operator_evidence === 'string' ? task.operator_evidence.trim() : '';
+  const text = nested || direct;
+  return text || null;
+}
+
 // Pure pagination math: clamp the requested page into range and compute the
 // slice bounds. usePager() consumes this so the grid window + clamp are tested once,
 // independent of the React scroll-anchor effect.

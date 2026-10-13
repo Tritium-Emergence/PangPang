@@ -5,7 +5,7 @@ import type {Routine, Task, Work, Artifact} from '../types';
 import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
-import {activitySummary, pageWindow} from '../pure';
+import {activitySummary, operatorStatement, pageWindow} from '../pure';
 import {attentionLabel, taskLabel, exchangeLabel, dateTime, scheduleText, friendlyError, fileSize, checkpointView} from '../display';
 import {MediaPreview} from './MediaPreview';
 import {Facts, Created, Value} from './Facts';
@@ -301,6 +301,7 @@ function WorkDetail({work, store, onClose}: {work: Work; store: Store; onClose: 
 function TaskPanel({t, store}: {t: Task; store: Store}) {
   const {t: tr} = useTranslation();
   const activity = activitySummary(t, tr);
+  const note = operatorStatement(t);
   return (
     <div className="panel task rounded-xl border border-line bg-raised p-4" data-status={t.status}>
       <div className="flex items-center justify-between">
@@ -310,6 +311,7 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
       <p className="mt-1 line-clamp-2 text-sm">{(t.prompt || '').slice(0, 160)}</p>
       <Created at={t.created} />
       {activity ? <p className="mt-1 text-xs text-muted" data-activity-status={t.status}>{activity}</p> : null}
+      {note ? <p className="mt-1 text-xs" data-testid="operator-resolve-note"><span className="font-medium text-warn">{tr('workpane.operatorResolveNoteLabel')}</span><span className="mt-0.5 block whitespace-pre-wrap text-muted">{note}</span></p> : null}
       <details className="mt-2"><summary className="cursor-pointer text-xs text-brand">{tr('workpane.viewTaskAndLogs')}</summary><Value value={{id: t.id, route: t.route, inputs: t.inputs, outputs: t.outputs, receipt: t.receipt, error: t.error}} /></details>
       {t.status === 'unknown' ? <p className="mt-1 text-xs text-warn">{tr('workpane.workspaceIsolatedFull')}</p>: null}
       {t.error ? <p className="mt-1 text-xs text-warn">{t.error}</p>: null}
@@ -393,7 +395,7 @@ function Act({label, run, store, ghost}: {label: string; run: () => Promise<unkn
 export function RecoveryActions({task, store}: {task: Task; store: Store}) {
   const {t: tr} = useTranslation();
   return <div className="mt-2 flex flex-wrap gap-2">{(['confirmed_never_started', 'confirmed_stopped'] as const).map((resolution) => <Act key={resolution} ghost label={resolution === 'confirmed_never_started' ? tr('workpane.confirmNeverStarted'): tr('workpane.confirmStopped')} store={store} run={async () => {
-    const evidence = prompt(tr('workpane.recoveryEvidencePrompt'))?.trim();
+    const evidence = prompt(tr('workpane.recoveryEvidencePrompt', {label: tr('workpane.operatorResolveNoteLabel')}))?.trim();
     if (!evidence || !confirm(resolution === 'confirmed_never_started' ? tr('workpane.recoveryConfirmNeverStarted'): tr('workpane.recoveryConfirmStopped'))) return;
     await api(`tasks/${task.id}/resolve`, {resolution, evidence});
   }} />)}</div>;
