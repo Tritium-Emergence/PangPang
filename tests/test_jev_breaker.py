@@ -195,8 +195,12 @@ class JevBreakerTests(unittest.TestCase):
 
     def test_keyless_local_model_is_ready_not_a_missing_key(self):
         from pangpang.__main__ import render_self_check
-        self.key.stop()
-        try:
+        # self.key.stop() restores a pre-existing TYPESAFE_API_KEY, so the router
+        # would be jev. Drop the key for this assertion only; the patch restores it.
+        env = os.environ.copy()
+        env.pop("TYPESAFE_API_KEY", None)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(os.environ.get("TYPESAFE_API_KEY"))
             self.assertEqual(self.app.continuation_router(), "local_model")
             row = self._semantic_gate_row()
             self.assertEqual((row["state"], row["reason"]), ("ready", "continuation_local_model"))
@@ -226,8 +230,6 @@ class JevBreakerTests(unittest.TestCase):
             self.assertEqual(self.app.continuation_router(), "off")
             self.assertEqual(bare["state"], "unconfigured")
             self.assertNotEqual(bare["reason"], "continuation_local_model")
-        finally:
-            self.key.start()
 
 
 if __name__ == "__main__":
