@@ -3508,10 +3508,12 @@ class Service:
                     "provider": "tavily" if os.environ.get("TAVILY_API_KEY") else "bing+duckduckgo",
                     "operator_action_code": None, "operator_action": None, "restart_required": False, "detail": {}})
 
-        # semantic_gate / continuation routing (optional). "ready" must mean actually
-        # enabled under the current config AND the local prerequisite (key) is met — a
-        # key present while every usage path is off is NOT ready, it is simply not in
-        # use (would otherwise render as "enabled" in the UI).
+        # semantic_gate / continuation routing (optional). "ready" means a path that
+        # is actually in use can run: Jev when its key is present, or the operator's
+        # model when that model is the continuation router. A key present while every
+        # usage path is off is NOT ready. Enforce without a key stays blocked. Keyless
+        # continuation on a configured local model is ready and does not ask for
+        # TYPESAFE_API_KEY.
         gate = self.semantic_gate
         has_key = bool(os.environ.get("TYPESAFE_API_KEY"))
         enabled = (gate.mode in {"shadow", "enforce"} or self.task_result_gate.mode in {"shadow", "enforce"}
@@ -3528,11 +3530,13 @@ class Service:
             sg = {"state": "blocked", "reason": "gate_key_missing_enforce",
                   "operator_action_code": "set_coordinator_env", "operator_action": self._env_action("TYPESAFE_API_KEY"),
                   "restart_required": True, "detail": {"env_var": "TYPESAFE_API_KEY"}}
+        elif self.continuation_router() == "local_model":
+            sg = {"state": "ready", "reason": "continuation_local_model",
+                  "operator_action_code": None, "operator_action": None, "restart_required": False}
         else:
-            # Enabled (shadow and/or continuation) but no key, non-enforce. The reason
-            # must name the path that actually wants the key: continuation routing when
-            # it is the enabled path, otherwise a shadow gate (semantic/task-result) —
-            # never falsely attribute a shadow-only gap to continuation.
+            # Shadow (or continuation with no usable local model) and no key,
+            # non-enforce. Name the path that still wants the key. Do not call a
+            # shadow-only gap a continuation miss.
             sg = {"state": "unconfigured",
                   "reason": "continuation_key_missing" if gate.continuation_routing else "gate_key_missing_optional",
                   "operator_action_code": "set_coordinator_env", "operator_action": self._env_action("TYPESAFE_API_KEY"),

@@ -193,12 +193,41 @@ class JevBreakerTests(unittest.TestCase):
             finally:
                 app.store.close()
 
-    def test_self_check_keyless_stays_unconfigured(self):
+    def test_keyless_local_model_is_ready_not_a_missing_key(self):
+        from pangpang.__main__ import render_self_check
         self.key.stop()
-        row = self._semantic_gate_row()
-        self.assertEqual(row["state"], "unconfigured")
-        self.assertEqual(row["reason"], "continuation_key_missing")
-        self.key.start()
+        try:
+            self.assertEqual(self.app.continuation_router(), "local_model")
+            row = self._semantic_gate_row()
+            self.assertEqual((row["state"], row["reason"]), ("ready", "continuation_local_model"))
+            self.assertIsNone(row["operator_action_code"])
+            self.assertIsNone(row["operator_action"])
+            self.assertNotIn("TYPESAFE_API_KEY", json.dumps(row))
+            diag = self.app.diagnostics()
+            listed = next(item for item in diag["effective_capabilities"]
+                          if item["capability"] == "semantic_gate")
+            self.assertEqual((listed["state"], listed["reason"]), ("ready", "continuation_local_model"))
+            self.assertEqual(listed["detail"]["continuation_router"], "local_model")
+            self.assertEqual(diag["capabilities"]["continuation_router"], "local_model")
+            text, _code = render_self_check(self.app)
+            line = next(item for item in text.splitlines() if item.startswith("semantic_gate\t"))
+            _name, state, reason, action = line.split("\t", 3)
+            self.assertEqual((state, reason, action), ("ready", "continuation_local_model", "-"))
+
+            self.app.semantic_gate.mode = "enforce"
+            blocked = self._semantic_gate_row()
+            self.assertEqual((blocked["state"], blocked["reason"]), ("blocked", "gate_key_missing_enforce"))
+            self.app.semantic_gate.mode = "off"
+
+            for profile in self.app.profiles.values():
+                profile["endpoint"] = ""
+                profile["model"] = ""
+            bare = self._semantic_gate_row()
+            self.assertEqual(self.app.continuation_router(), "off")
+            self.assertEqual(bare["state"], "unconfigured")
+            self.assertNotEqual(bare["reason"], "continuation_local_model")
+        finally:
+            self.key.start()
 
 
 if __name__ == "__main__":
