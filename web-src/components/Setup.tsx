@@ -6,6 +6,7 @@ import type {Capability, SetupRequest} from '../types';
 import {api} from '../api';
 import {sealCredential, type SecretTarget} from '../crypto';
 import {capabilityLabel, capabilityStateLabel, friendlyError, DEFAULT_OUTPUT_TOKENS} from '../display';
+import {executorSetupTone} from '../pure';
 
 // Conversational-setup surface. Mirrors setup.js: the model settings dialog, the
 // pending setup-request panel (approve + sealed-secret), and credential sealing. RCB:
@@ -174,9 +175,16 @@ function CapabilityList({rows}: {rows: Capability[]}) {
         {rows.map((row) => {
           const action = actionText(row);
           const label = capabilityLabel[row.capability] ? t(capabilityLabel[row.capability]): row.capability;
-          const state = capabilityStateLabel[row.state] ? t(capabilityStateLabel[row.state]): row.state;
-          // Dot color maps the raw state code (SIS: judgment is server-side; this is
-          // presentation). ready -> good; blocked/unconfigured -> warn; else muted.
+          // Admission state stays on data-state. The ready word is execution_verified
+          // on the selected executor; discovery alone is not that receipt.
+          const tone = executorSetupTone(row);
+          const stateKey = tone === 'discovered_not_verified'
+            ? 'capabilityState.discoveredNotVerified'
+            : capabilityStateLabel[row.state];
+          const state = stateKey ? t(stateKey): row.state;
+          // Dot color maps the raw state code (judgment is server-side; this is
+          // presentation). ready -> good, unless execution is not verified.
+          // blocked/unconfigured -> warn; else muted.
           // A problem state (has an action) shows the action inline so touch/keyboard
           // users can discover the fix; a healthy pill stays compact (title only).
           // Jev/semantic check is optional. unconfigured must not look like a fault.
@@ -186,6 +194,7 @@ function CapabilityList({rows}: {rows: Capability[]}) {
           return (
             <li
               key={row.capability} data-capability={row.capability} data-state={row.state}
+              data-execution-verified={tone === null ? undefined : tone === 'ready' ? 'true' : 'false'}
               className="cap-pill inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-xs"
               title={action || row.reason || undefined}
             >

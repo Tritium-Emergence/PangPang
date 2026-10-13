@@ -152,3 +152,59 @@ export function pageWindow(total: number, requestedPage: number, perPage: number
   const pg = Math.min(Math.max(requestedPage, 0), pages - 1);
   return {pg, pages, start: pg * perPage, end: pg * perPage + perPage};
 }
+
+export interface ExecutionFacts {
+  installation_id?: string;
+  discovered?: boolean;
+  execution_verified?: boolean;
+}
+
+function asFacts(value: unknown): ExecutionFacts | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  return value as ExecutionFacts;
+}
+
+/** Stored execution facts for one installation, from the executor capability row. */
+export function executionFactsFor(
+  capabilities: Array<{capability?: string; detail?: Record<string, unknown>}> | undefined,
+  installationId: string,
+): ExecutionFacts | undefined {
+  for (const row of capabilities || []) {
+    if (row.capability !== 'executor') continue;
+    const evidence = row.detail?.executor_evidence;
+    if (!Array.isArray(evidence)) continue;
+    const hit = evidence.find((item) => asFacts(item)?.installation_id === installationId);
+    const facts = asFacts(hit);
+    if (facts) return facts;
+  }
+  return undefined;
+}
+
+/**
+ * Label tone for an executor the control plane would admit (state "ready").
+ * "ready" only when that selected installation's execution_verified is true.
+ * A version probe (discovered) without that receipt is discovered_not_verified.
+ * Other capabilities, and executors that are not admitted, return null.
+ */
+export function executorSetupTone(row: {capability?: string; state?: string; detail?: Record<string, unknown>}): 'ready' | 'discovered_not_verified' | null {
+  if (row.capability !== 'executor' || row.state !== 'ready') return null;
+  const selected = asFacts(row.detail?.selected);
+  const evidence = row.detail?.executor_evidence;
+  const facts = Array.isArray(evidence)
+    ? asFacts(evidence.find((item) => asFacts(item)?.installation_id === selected?.installation_id))
+    : undefined;
+  return facts?.execution_verified === true ? 'ready' : 'discovered_not_verified';
+}
+
+/**
+ * Per-installation Setup card. execution_verified is the only ready tone.
+ * discovered (or a version probe when facts were not projected) is not ready.
+ */
+export function installationSetupTone(
+  facts: ExecutionFacts | undefined,
+  probe: {available?: boolean} | undefined,
+): 'ready' | 'discovered_not_verified' | null {
+  if (facts?.execution_verified === true) return 'ready';
+  const discovered = facts ? facts.discovered === true : probe?.available === true;
+  return discovered ? 'discovered_not_verified' : null;
+}

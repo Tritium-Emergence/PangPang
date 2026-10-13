@@ -5,6 +5,7 @@ import type {Store} from '../store';
 import {api} from '../api';
 import {SettingsDialog} from './Setup';
 import {clock, dateTime} from '../display';
+import {executionFactsFor, installationSetupTone} from '../pure';
 
 // Hosts view (#hosts-view): devices + their executors, the global-model settings
 // entry, and device pairing. Reads server truth (hosts/devices/installations/probes);
@@ -68,11 +69,22 @@ export function HostsView({store}: {store: Store}) {
               <div className="exec-grid mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
                 {insts.length ? insts.map((e) => {
                   const probe = (snap.probes || []).find((p) => p.id === e.id);
+                  const facts = executionFactsFor(snap.setup.capabilities, e.id as string);
+                  const tone = installationSetupTone(facts, probe);
+                  const version = String(probe?.version || t('hosts.versionUnregistered'));
+                  const statusText = tone === 'ready'
+                    ? t('hosts.readyVerified', {version})
+                    : tone === 'discovered_not_verified'
+                      ? t('hosts.discoveredNotVerified', {version})
+                      : probe
+                        ? t('hosts.unavailable', {reason: String(probe.reason || '').slice(0, 60)})
+                        : t('hosts.notProbed');
+                  const statusClass = tone === 'ready' ? 'text-good' : probe && tone !== 'discovered_not_verified' ? 'text-warn' : 'text-muted';
                   return (
                     <div key={e.id as string} className="panel rounded-lg border border-line p-3">
                       <h4 className="text-sm font-medium">{e.id as string}</h4>
-                      <p className={`text-xs ${probe?.available ? 'text-good': probe ? 'text-warn': 'text-muted'}`}>
-                        {probe ? (probe.available ? t('hosts.probed', {version: String(probe.version || t('hosts.versionUnregistered'))}): t('hosts.unavailable', {reason: String(probe.reason || '').slice(0, 60)})): t('hosts.notProbed')}
+                      <p className={`text-xs ${statusClass}`} data-execution-verified={tone === 'ready' ? 'true' : tone === 'discovered_not_verified' ? 'false' : undefined}>
+                        {statusText}
                       </p>
                       <button className="mt-1 text-xs text-brand" onClick={async () => { try { await api(`installations/${e.id}/probe`, {}); await store.refresh(); } catch (err: any) { store.setNotice(err?.message); } }}>{t('hosts.probeInstall')}</button>
                     </div>

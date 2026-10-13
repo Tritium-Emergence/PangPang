@@ -5,7 +5,7 @@ export default {
   task: {queued: '排队中', pending: '待执行', running: '执行中', starting: '启动中', awaiting_approval: '待批准', unknown: '状态未知', cancel_requested: '正在取消', succeeded: '执行成功', failed: '执行失败', cancelled: '已取消', blocked: '受阻'},
   exchange: {pending: '等待回应', responded: '已回应', failed: '失败', cancelled: '已取消'},
   capability: {model: '对话模型', executor: '执行器', device: '设备', web_search: '联网搜索', semantic_gate: '语义校验'},
-  capabilityState: {ready: '就绪', unconfigured: '未配置', blocked: '受阻', unknown: '状态未知'},
+  capabilityState: {ready: '就绪', discoveredNotVerified: '已发现，未验证', unconfigured: '未配置', blocked: '受阻', unknown: '状态未知'},
   capabilityAction: {
     restart_coordinator: '受管配置已在服务外被修改，重启协调器以加载最新配置。',
     configure_model: '在 Web「设置模型」中配置端点与模型名（密钥不经过聊天或模型）。',
@@ -160,6 +160,7 @@ export default {
     osUnregistered: '操作系统未登记', asOf: '截至 {{time}}',
     revokeConfirm: '撤销这台设备的云端接入？不会强制停止已运行任务。', revokeFailed: '撤销失败',
     revokeDevice: '撤销设备连接', probed: '已探测 · {{version}}', versionUnregistered: '版本未登记',
+    discoveredNotVerified: '已发现，未验证 · {{version}}', readyVerified: '就绪 · {{version}}',
     unavailable: '不可用 · {{reason}}', notProbed: '未探测', probeInstall: '探测安装',
     noExecutors: '尚未登记执行器', pairDialogTitle: '连接一台电脑',
     unregisteredExecutors: '已探测未注册', registerExecutor: '注册执行器', registerPending: '注册请求待批准',
