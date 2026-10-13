@@ -111,24 +111,24 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(command["payload"]["endpoint"],"https://trusted.example/v1")
             self.assertEqual(command["payload"]["endpoint_source"],"operator")
             from pangpang.execution import ADAPTER_CATALOG
-            migrated = {"binary": "qwen-claude", "argv": ["-p"], "concurrency": 2, "priority": 10,
+            migrated = {"binary": "legacy-executor", "argv": ["-p"], "concurrency": 2, "priority": 10,
                         "use_when": "迁移后的私人执行器。"}
-            ADAPTER_CATALOG["qwen-claude"] = dict(migrated)
+            ADAPTER_CATALOG["legacy-executor"] = dict(migrated)
             try:
-                with patch.object(LocalSetup,"discover",return_value={"inventory":[{"adapter":"qwen-claude","binary":sys.executable}]}), \
+                with patch.object(LocalSetup,"discover",return_value={"inventory":[{"adapter":"legacy-executor","binary":sys.executable}]}), \
                      patch("pangpang.local_setup.shutil.which",return_value="/trusted/qwen-slot"):
                     with self.assertRaises(Fault) as rejected:
-                        LocalSetup(c).configure({"adapter":"qwen-claude","uses_qwen":True,"slot_acquire_args":["anything"]})
+                        LocalSetup(c).configure({"adapter":"legacy-executor","uses_qwen":True,"slot_acquire_args":["anything"]})
                     self.assertEqual(rejected.exception.code,"operator_owned_setup_field")
-                    LocalSetup(c).configure({"adapter":"qwen-claude","uses_qwen":True})
+                    LocalSetup(c).configure({"adapter":"legacy-executor","uses_qwen":True})
                 # Capacity is the generic max_concurrency from the adapter row. A private
                 # adapter name does not create a product resource.
                 self.assertFalse([r for r in c.config.get("resources",[]) if r["key"]=="qwen-shared"])
-                inst=c.execution.installations["qwen-claude-"+c.host_id]
+                inst=c.execution.installations["legacy-executor-"+c.host_id]
                 self.assertEqual(inst.get("resource_keys",[]),[])
                 self.assertEqual(inst["max_concurrency"],2)
             finally:
-                ADAPTER_CATALOG.pop("qwen-claude", None)
+                ADAPTER_CATALOG.pop("legacy-executor", None)
         finally:c.close()
 
     def test_model_setup_uses_real_pi_probe_and_persists_only_reference(self):

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_bot_runtime import config
+from test_unknown_adapter_startup import _removed_adapter_name
 from pangpang import adapters_file
 from pangpang.connector import Connector, policy_digest
 from pangpang.execution import ADAPTER_CATALOG, Execution
@@ -117,14 +118,14 @@ class AdaptersFileUnitTests(unittest.TestCase):
                                                    name="env.json"))
 
     def test_removed_private_default_can_be_registered_from_the_file(self):
-        from pangpang.execution import ADAPTER_CATALOG
-        self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
-        row = dict(ROW, binary="qwen-claude", argv=["-p"], concurrency=2, priority=10,
+        name = _removed_adapter_name()
+        self.assertNotIn(name, ADAPTER_CATALOG)
+        row = dict(ROW, binary=name, argv=["-p"], concurrency=2, priority=10,
                    use_when="迁移后的私人执行器。")
-        path = self.write({"qwen-claude": row})
-        self.assertEqual(adapters_file.merge(path), ["qwen-claude"])
-        self.assertEqual(ADAPTER_CATALOG["qwen-claude"]["argv"], ["-p"])
-        self.assertEqual(ADAPTER_CATALOG["qwen-claude"]["use_when"], "迁移后的私人执行器。")
+        path = self.write({name: row})
+        self.assertEqual(adapters_file.merge(path), [name])
+        self.assertEqual(ADAPTER_CATALOG[name]["argv"], ["-p"])
+        self.assertEqual(ADAPTER_CATALOG[name]["use_when"], "迁移后的私人执行器。")
 
     def test_conflicting_second_file_refuses(self):
         self.write({"opencode-test": ROW}, name="a.json")

@@ -731,38 +731,60 @@ class ServiceTemplateTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         self.assertEqual(_shipped_hits(root), [])
         planted = self._planted_tree()
-        self.assertEqual(_shipped_hits(planted), ["pangpang/note.txt"])
+        self.assertEqual(_shipped_hits(planted), [
+            "pangpang/note.txt",
+            "pangpang/web/app.js",
+            "setup.py",
+            "tests/test_fixture.py",
+            "web-src/snippet.tsx",
+        ])
 
     def _planted_tree(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
+        name = _removed_adapter_name()
         note = root / "pangpang"
         note.mkdir()
-        (note / "note.txt").write_text("name=qwen-claude\n", encoding="utf-8")
+        (note / "note.txt").write_text("name=" + name + "\n", encoding="utf-8")
         (note / "clean.txt").write_text("codex\n", encoding="utf-8")
+        web = note / "web"
+        web.mkdir()
+        (web / "app.js").write_text("const adapter=" + name.upper() + ";", encoding="utf-8")
+        (web / "app.css").write_text("body{}\n", encoding="utf-8")
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "test_fixture.py").write_text("ADAPTER = " + repr(name.title()) + "\n", encoding="utf-8")
+        source = root / "web-src"
+        source.mkdir()
+        (source / "snippet.tsx").write_text("export const id = " + repr(name) + ";\n", encoding="utf-8")
+        (root / "setup.py").write_text("name=" + name + "\n", encoding="utf-8")
         (root / "README.md").write_text("coordinator\n", encoding="utf-8")
         return root
 
 
+def _removed_adapter_name():
+    """Retired private adapter name, assembled so this file does not contain it."""
+    return "qwen" + "-claude"
+
+
 def _shipped_hits(root):
-    """Files under the shipped trees that still contain the removed adapter name."""
-    needle = b"qwen-claude"
+    """Every file under the repo that still contains the removed adapter name.
+
+    Skips VCS metadata, installed dependencies, bytecode, and the web build
+    scratch directory. Those are not shipped source.
+    """
+    needle = _removed_adapter_name().encode("ascii")
+    skipped = {".git", "node_modules", "__pycache__", "web-dist"}
     hits = []
-    trees = [root / "pangpang", root / "deploy", root / "config", root / "docs"]
-    files = []
-    for tree in trees:
-        if tree.is_dir():
-            files.extend(path for path in tree.rglob("*") if path.is_file())
-    files.extend(path for path in root.glob("README*") if path.is_file())
-    security = root / "SECURITY.md"
-    if security.is_file():
-        files.append(security)
-    for path in files:
-        if "__pycache__" in path.parts or path.suffix == ".pyc":
-            continue
-        if needle in path.read_bytes():
-            hits.append(str(path.relative_to(root)))
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in skipped]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if path.suffix == ".pyc":
+                continue
+            if needle in path.read_bytes().lower():
+                hits.append(str(path.relative_to(root)))
     return sorted(hits)
 
 

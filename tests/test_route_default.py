@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from test_bot_runtime import config
+from test_unknown_adapter_startup import _removed_adapter_name
 from pangpang.service import Service
 from pangpang.store import Fault
 
@@ -76,7 +77,7 @@ class RouteDefaultTests(unittest.TestCase):
         system = projection(self.app, turn)[0]['content']
         self.assertIn('installation_id', system)
         self.assertIn('is not read by the system', system)
-        self.assertNotIn('qwen-claude', system)
+        self.assertNotIn(_removed_adapter_name(), system)
         self.assertNotIn('SAP', system)
         self.assertIn('does not authorize rewriting', system)
 

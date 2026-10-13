@@ -313,7 +313,7 @@ class OnboardingProfileTests(unittest.TestCase):
         self.assertEqual(custom["status"], "needs_approval")
         with self.assertRaises(Fault) as ctx:
             self.app.onboarding.request(
-                "bot-main", work["work_id"], {"host_id": host_id, "action": "configure", "adapter": "qwen-claude"})
+                "bot-main", work["work_id"], {"host_id": host_id, "action": "configure", "adapter": "legacy-executor"})
         self.assertEqual(ctx.exception.code, "adapter_required")
 
     def test_approve_rejects_bad_profile_and_env(self):

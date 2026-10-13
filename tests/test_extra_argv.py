@@ -17,7 +17,7 @@ from pangpang.vault import Vault
 
 class ValidateExtraArgvTests(unittest.TestCase):
     def test_valid_rows(self):
-        validate_extra_argv("qwen-claude", ["--max-turns", "10"])
+        validate_extra_argv("legacy-executor", ["--max-turns", "10"])
         validate_extra_argv("codex", ["--strict-config", "-c", "model=qwen"])
         validate_extra_argv("codex", [])
         validate_extra_argv(None, ["--anything"])
@@ -29,7 +29,7 @@ class ValidateExtraArgvTests(unittest.TestCase):
         for value in bad:
             with self.subTest(value=str(value)[:40]):
                 with self.assertRaises(Fault) as ctx:
-                    validate_extra_argv("qwen-claude", value)
+                    validate_extra_argv("legacy-executor", value)
                 self.assertEqual(ctx.exception.code, "invalid_extra_argv")
 
     def test_permission_disabling_flags_rejected(self):
@@ -37,7 +37,7 @@ class ValidateExtraArgvTests(unittest.TestCase):
                      "--full-auto", "--approve-for-me", "--bypass-sandbox", "--skip-permissions"):
             with self.subTest(item=item):
                 with self.assertRaises(Fault) as ctx:
-                    validate_extra_argv("qwen-claude", [item])
+                    validate_extra_argv("legacy-executor", [item])
                 self.assertEqual(ctx.exception.code, "invalid_extra_argv")
 
     def test_codex_exec_only_flags_rejected_not_dropped(self):
@@ -49,7 +49,7 @@ class ValidateExtraArgvTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "invalid_extra_argv")
                 self.assertIn("exec-only", ctx.exception.advice)
         validate_extra_argv("codex", ["--enable", "feature", "--strict-config"])
-        validate_extra_argv("qwen-claude", ["--skip-git-repo-check"])
+        validate_extra_argv("legacy-executor", ["--skip-git-repo-check"])
 
     def test_codex_sandbox_bypass_and_listen_rejected(self):
         for items in (["--sandbox", "danger-full-access"], ["--sandbox=danger-full-access"],
@@ -69,7 +69,7 @@ class ValidateExtraArgvTests(unittest.TestCase):
                 self.assertIn("bare token", ctx.exception.advice)
         validate_extra_argv("codex", ["-c", "model_reasoning_effort=high"])
         validate_extra_argv("codex", ["--enable", "feature", "--config", "a=b"])
-        validate_extra_argv("qwen-claude", ["login"])
+        validate_extra_argv("legacy-executor", ["login"])
 
     def test_codex_dropped_tokens_rejected_not_silent(self):
         for items in (["-"], ["--foo={prompt}"], ["{prompt}"], ["-", "--strict-config"]):
@@ -79,7 +79,7 @@ class ValidateExtraArgvTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "invalid_extra_argv")
                 self.assertIn("dropped", ctx.exception.advice)
         validate_extra_argv("codex", ["-c", "model={prompt}"])
-        validate_extra_argv("qwen-claude", ["-", "--user={prompt}"])
+        validate_extra_argv("legacy-executor", ["-", "--user={prompt}"])
 
 
 class ExecutionExtraArgvTests(unittest.TestCase):

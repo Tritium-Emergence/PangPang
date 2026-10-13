@@ -155,7 +155,7 @@ class WorkContinuityV3Tests(unittest.TestCase):
     def test_default_continue_route_does_not_gate_task_behind_approval(self):
         # A trusted CURRENT continuation (Jev ran, kept CURRENT, only switch
         # confidence was mid) must NOT force approval — a user's own follow-up
-        # task ("用 qwen-claude 去查一下" mid-thread) should run directly. Only a
+        # task ("用 legacy-executor 去查一下" mid-thread) should run directly. Only a
         # real `fallback` (untrusted attribution) gates. grant_write stays True.
         self.app.probe("codex-local")
         body = {"text": "执行修改", "stream_id": "tab-dc"}

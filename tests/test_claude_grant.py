@@ -18,6 +18,7 @@ from pangpang.local_setup import LocalSetup
 from pangpang.service import Service
 from pangpang.store import Store
 from test_bot_runtime import config
+from test_unknown_adapter_startup import _removed_adapter_name
 
 
 # The narrow grant. Print mode stays; permission is not skipped.
@@ -82,7 +83,7 @@ class ClaudeCodeGrantTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("bypassPermissions", CLAUDE_CODE_ARGV)
         self.assertNotIn("Bash", CLAUDE_CODE_ARGV)
-        self.assertNotIn("qwen-claude", ADAPTER_CATALOG)
+        self.assertNotIn(_removed_adapter_name(), ADAPTER_CATALOG)
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"],
                          ["exec", "--sandbox", "workspace-write", "-"])
 

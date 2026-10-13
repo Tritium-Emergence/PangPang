@@ -67,7 +67,7 @@ class Issue147TierRoutingTests(unittest.TestCase):
             ("inst-claude", "claude-code", 1),
             ("inst-codex", "codex", 1),
             ("inst-gemini", "gemini", 2),
-            ("inst-qwen", "qwen-claude", 3),
+            ("inst-qwen", "legacy-executor", 3),
             ("inst-pi", "pi", 3),
             ("inst-acp", "acp", 3),
 )
