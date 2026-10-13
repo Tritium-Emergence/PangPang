@@ -2,8 +2,19 @@
 // stay the primary surface and reachable, and the sidebar is a real drawer (hidden by
 // default, opened via the header toggle, closes on selection). Chromium cannot prove
 // iOS safe-area insets — that needs real-device verification, out of scope here.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {test, expect} from '@playwright/test';
 import {login} from './_studio.mjs';
+import {project} from './_parity.mjs';
+
+const SHOTS = path.join(os.tmpdir(), 'responsive-shots');
+fs.mkdirSync(SHOTS, {recursive: true});
+
+async function saveShot(page, width, height) {
+  await page.screenshot({path: path.join(SHOTS, `responsive_${width}x${height}.png`)});
+}
 
 test('mobile: chat usable, no overflow, sidebar is a working drawer', async ({page}) => {
   await page.setViewportSize({width: 390, height: 844});
@@ -41,47 +52,150 @@ test('mobile: chat usable, no overflow, sidebar is a working drawer', async ({pa
   expect(csp).toEqual([]); // no CSP violations (no inline style/script)
 });
 
-// Narrow widths keep #message and #send on one row (input fills leftover width, send
-// stays on the right). At a wide viewport the same controls stay stacked.
-async function composerBoxes(page) {
-  return page.evaluate(() => {
+// Phone, foldable, tablet, and desktop widths. Touch is emulated on the coarse set.
+const COARSE_SIZES = [[320, 568], [360, 800], [390, 844], [430, 932], [600, 960], [768, 1024], [915, 412], [1024, 768]];
+const FINE_SIZES = [[1280, 800], [1920, 1080]];
+const LONG = '测'.repeat(80) + '\n' + ('readable words '.repeat(40)) + '\n```\nconst n = 1;\n```\n';
+
+async function assertChatLayout(page, width, height, {coarse}) {
+  await page.setViewportSize({width, height});
+  const report = await page.evaluate((short) => {
     const input = document.querySelector('#message').getBoundingClientRect();
     const send = document.querySelector('#send').getBoundingClientRect();
-    return {
-      input: {top: input.top, right: input.right, bottom: input.bottom, width: input.width},
-      send: {top: send.top, left: send.left, right: send.right, bottom: send.bottom, width: send.width},
-      innerWidth: window.innerWidth,
-      innerHeight: window.innerHeight,
-    };
-  });
-}
-
-test('composer row: input and send share one line at phone width, stacked when wide', async ({page}) => {
-  await page.setViewportSize({width: 390, height: 844});
-  await login(page);
-  for (const width of [390, 320, 640]) {
-    await page.setViewportSize({width, height: 844});
-    const box = await composerBoxes(page);
-    expect(box.input.top).toBeLessThan(box.send.bottom);
-    expect(box.send.top).toBeLessThan(box.input.bottom);
-    expect(box.send.left).toBeGreaterThanOrEqual(box.input.right - 1);
-    expect(box.input.width).toBeGreaterThan(box.send.width);
-    expect(box.send.right).toBeLessThanOrEqual(box.innerWidth + 1);
-    expect(box.send.bottom).toBeLessThanOrEqual(box.innerHeight + 1);
-  }
-  await page.setViewportSize({width: 1280, height: 800});
-  const wide = await composerBoxes(page);
-  expect(wide.send.top).toBeGreaterThanOrEqual(wide.input.bottom - 1);
-
-  const safeArea = await page.evaluate(() => {
-    for (const sheet of document.styleSheets) {
-      let rules;
-      try { rules = [...sheet.cssRules]; } catch { continue; }
-      for (const rule of rules) {
-        if (rule.selectorText === '.composer-root' && String(rule.style.paddingBottom).includes('safe-area-inset-bottom')) return true;
+    const body = document.querySelector('#messages .body');
+    const bodyStyle = getComputedStyle(body);
+    const probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font:' + bodyStyle.font;
+    probe.textContent = '0'.repeat(75);
+    document.body.appendChild(probe);
+    const capCh = probe.getBoundingClientRect().width;
+    probe.textContent = '测'.repeat(45);
+    const capCjk = probe.getBoundingClientRect().width;
+    probe.remove();
+    let maxLine = 0;
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (!String(node.textContent).trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      for (const rect of range.getClientRects()) maxLine = Math.max(maxLine, rect.width);
+    }
+    const fonts = [{id: '#message', fs: parseFloat(getComputedStyle(document.querySelector('#message')).fontSize)}];
+    fonts.push({id: '.body', fs: parseFloat(bodyStyle.fontSize)});
+    const pre = document.querySelector('#messages .md-pre');
+    if (!pre) return {missing: '.md-pre'};
+    fonts.push({id: '.md-pre', fs: parseFloat(getComputedStyle(pre).fontSize)});
+    const raw = document.querySelector('#messages .evidence-raw');
+    if (raw) fonts.push({id: '.evidence-raw', fs: parseFloat(getComputedStyle(raw).fontSize)});
+    const name = document.querySelector('#bot-name');
+    const nameBox = name.getBoundingClientRect();
+    const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const activity = document.querySelector('#activity');
+    const activityBox = activity.getBoundingClientRect();
+    const pill = document.querySelector('#attention-pill');
+    const pillBox = pill ? pill.getBoundingClientRect() : null;
+    for (const el of document.querySelectorAll('input, textarea, select')) {
+      const type = el.getAttribute('type') || '';
+      if (['checkbox', 'radio', 'file', 'hidden', 'range'].includes(type)) continue;
+      const box = el.getBoundingClientRect();
+      if (box.width < 1 || box.height < 1) continue;
+      fonts.push({id: el.id || el.tagName, fs: parseFloat(getComputedStyle(el).fontSize)});
+    }
+    const targets = [];
+    if (matchMedia('(pointer: coarse)').matches) {
+      for (const sel of ['#send', '#refresh', '#lang-toggle', '#upload', '#attach', '#nav-toggle', '#attention-pill']) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const box = el.getBoundingClientRect();
+        if (box.width < 1 || box.height < 1) continue;
+        if (box.width < 44 || box.height < 44) targets.push({sel, w: box.width, h: box.height});
       }
     }
-    return false;
+    return {
+      sameRow: input.top < send.bottom - 1 && send.top < input.bottom - 1 && send.left >= input.right - 1 && input.width > send.width,
+      sendInView: send.right <= innerWidth + 1 && send.bottom <= innerHeight + 1,
+      overflow: document.documentElement.scrollWidth - innerWidth,
+      fonts,
+      maxLine, capCh, capCjk,
+      lineRatio: parseFloat(bodyStyle.lineHeight) / parseFloat(bodyStyle.fontSize),
+      coarse: matchMedia('(pointer: coarse)').matches,
+      targets,
+      inputFont: parseFloat(getComputedStyle(document.querySelector('#message')).fontSize),
+      nameWidth: nameBox.width,
+      nameScroll: name.scrollWidth,
+      nameFont: parseFloat(getComputedStyle(name).fontSize),
+      nameText: name.textContent.trim(),
+      activityText: activity.textContent.trim(),
+      activityWidth: activityBox.width,
+      pillText: pill ? pill.innerText.trim() : '',
+      pillWidth: pillBox ? pillBox.width : 0,
+      pillHeight: pillBox ? pillBox.height : 0,
+      composerPad: parseFloat(getComputedStyle(document.querySelector('#composer')).paddingBottom),
+      expectedPad: (short ? 0.375 : 0.75) * root,
+    };
+  }, height <= 500);
+  expect(report.missing, JSON.stringify(report)).toBeFalsy();
+  expect(report.sameRow, JSON.stringify({width, height, report})).toBeTruthy();
+  expect(report.sendInView, JSON.stringify(report)).toBeTruthy();
+  expect(report.overflow).toBeLessThanOrEqual(1);
+  for (const font of report.fonts) expect(font.fs, font.id + ' at ' + width).toBeGreaterThanOrEqual(16);
+  expect(report.maxLine).toBeLessThanOrEqual(report.capCh + 2);
+  expect(report.maxLine).toBeLessThanOrEqual(report.capCjk + 2);
+  expect(report.lineRatio).toBeGreaterThanOrEqual(1.5);
+  expect(report.lineRatio).toBeLessThanOrEqual(1.8);
+  expect(report.coarse).toBe(coarse);
+  if (coarse) expect(report.targets, JSON.stringify(report.targets)).toEqual([]);
+  expect(report.nameText.length).toBeGreaterThan(0);
+  expect(report.nameWidth).toBeGreaterThanOrEqual(report.nameFont * 2);
+  expect(report.nameWidth).toBeGreaterThanOrEqual(report.nameScroll - 1);
+  if ((width === 320 && height === 568) || (width === 390 && height === 844)) {
+    expect(report.activityText.length, 'activity at ' + width).toBeGreaterThan(0);
+    expect(report.activityWidth, 'activity width at ' + width).toBeGreaterThan(8);
+    expect(report.pillText, 'pending count at ' + width).toMatch(/\d/);
+    expect(report.pillWidth, 'pending width at ' + width).toBeGreaterThanOrEqual(44);
+    expect(report.pillHeight, 'pending height at ' + width).toBeGreaterThanOrEqual(44);
+  }
+  expect(Math.abs(report.composerPad - report.expectedPad)).toBeLessThanOrEqual(1);
+  await saveShot(page, width, height);
+}
+
+test.describe('responsive chat, coarse pointer', () => {
+  test.use({hasTouch: true, isMobile: true, viewport: {width: 390, height: 844}});
+  test('viewport matrix keeps one composer row, readable type, and 44px targets', async ({page}) => {
+    test.setTimeout(120000);
+    await project(page, () => {}, [{id: 'measure-msg', kind: 'assistant', from: 'bot-main', content: LONG}]);
+    await page.setViewportSize({width: 390, height: 844});
+    await login(page);
+    for (const [width, height] of COARSE_SIZES) await assertChatLayout(page, width, height, {coarse: true});
+    await page.unrouteAll({behavior: 'ignoreErrors'});
   });
-  expect(safeArea).toBeTruthy();
+});
+
+test.describe('responsive chat, fine pointer', () => {
+  test.use({hasTouch: false, isMobile: false});
+  test('viewport matrix on a fine pointer keeps one composer row and the measure cap', async ({page}) => {
+    test.setTimeout(90000);
+    await project(page, () => {}, [{id: 'measure-msg', kind: 'assistant', from: 'bot-main', content: LONG}]);
+    await page.setViewportSize({width: 1280, height: 800});
+    await login(page);
+    const safeArea = await page.evaluate(() => {
+      for (const sheet of document.styleSheets) {
+        let rules;
+        try { rules = [...sheet.cssRules]; } catch { continue; }
+        const visit = (list) => {
+          for (const rule of list) {
+            if (rule.cssRules) { if (visit([...rule.cssRules])) return true; }
+            if (String(rule.selectorText || '').includes('composer') && String(rule.style?.paddingBottom || '').includes('safe-area-inset-bottom')) return true;
+          }
+          return false;
+        };
+        if (visit(rules)) return true;
+      }
+      return false;
+    });
+    expect(safeArea).toBeTruthy();
+    for (const [width, height] of FINE_SIZES) await assertChatLayout(page, width, height, {coarse: false});
+    await page.unrouteAll({behavior: 'ignoreErrors'});
+  });
 });

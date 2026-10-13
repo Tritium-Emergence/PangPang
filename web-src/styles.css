@@ -18,8 +18,11 @@
 
 * { box-sizing: border-box; }
 html, body, #app, #root { height: 100%; margin: 0; }
+html { font-size: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 1rem;
+  line-height: 1.65;
   color: var(--ink);
   background: var(--surface);
   -webkit-font-smoothing: antialiased;
@@ -27,16 +30,28 @@ body {
 /* CSP style-src 'self' forbids inline style={} — these are the former inline styles,
    now in the external stylesheet (served from /app.css). */
 .shell-root { height: 100dvh; }
-.composer-root { padding-bottom: calc(0.75rem + env(safe-area-inset-bottom)); }
-#messages, #work-view, #hosts-view { min-height: 0; }
-#composer, .shell-root main > header { flex-shrink: 0; }
+.shell-root main { container-type: inline-size; container-name: pane; }
+#composer.composer-root { padding-bottom: calc(0.75rem + env(safe-area-inset-bottom)); }
+#messages, #work-view, #hosts-view { min-height: 0; min-width: 0; }
+#composer, .shell-root main > header { flex-shrink: 0; min-width: 0; }
+#messages { container-type: inline-size; container-name: transcript; }
+#composer { container-type: inline-size; container-name: composer; }
+#work-view { container-type: inline-size; container-name: work; }
 #setup-panel, #capability-list, #notice { flex-shrink: 0; max-height: 25dvh; overflow-y: auto; }
-/* iOS: hide scrollbars but keep scrollability (mobile). */
-@media (max-width: 639px) {
+/* Touch screens keep the scrollable surface but drop the scrollbar chrome. */
+@media (hover: none) {
   .scroll-none { scrollbar-width: none; }
   .scroll-none::-webkit-scrollbar { display: none; }
 }
 input, textarea, select { background: var(--raised); }
+textarea,
+select,
+textarea.text-sm,
+select.text-sm,
+input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]) {
+  font-size: 1rem;
+  line-height: 1.5;
+}
 pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .modal, dialog[open] { max-width: 95vw; max-height: 90dvh; overflow-y: auto; }
 .modal { width: min(720px, 95vw); }
@@ -47,7 +62,7 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .file-browser { min-height: 220px; max-height: min(60vh,480px); overflow-y: auto; }
 .browse-head { position: sticky; top: 0; background: var(--raised); gap: 8px; }
 .browse-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.browse-size { flex: none; color: var(--muted); font-size: 12px; }
+.browse-size { flex: none; color: var(--muted); font-size: 0.875rem; }
 .browse-item.picked { background: #e4efed; box-shadow: inset 3px 0 var(--brand); }
 .dropping { outline: 2px dashed var(--brand); outline-offset: -4px; }
 /* Capability pills: a tiny state dot carries the status color so the row reads at a
@@ -59,7 +74,7 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .cap-pill[data-state="blocked"], .cap-pill[data-state="unconfigured"] { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
 .chip-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 5px; }
 .media-preview { margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; max-width: 100%; }
-.media-img, .media-video { display: block; width: auto; max-width: 100%; max-height: 420px; object-fit: contain; background: var(--soft); }
+.media-img, .media-video { display: block; width: auto; max-width: 100%; max-height: min(26rem, 50dvh); object-fit: contain; background: var(--soft); }
 .media-audio { width: 100%; }
 .media-cap { padding: 6px 10px; background: var(--soft); }
 .artifact-card .media-img, .artifact-card .media-video { max-height: 220px; }
@@ -73,44 +88,104 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .md-table th { background: var(--soft); }
 .md-h, .md-p, .md-list, .md-quote, .md-pre { margin: 6px 0; }
 .md-hr { border-top: 1px solid var(--line); margin: 12px 0; }
-@media (max-width: 639px) {
-  #work-view > .grid { grid-template-columns: minmax(0,1fr); }
-  #messages, #composer, #work-view, #hosts-view { padding-left: 12px; padding-right: 12px; }
+/* Message field and send control share one row at every pane width. */
+#composer .compose-row {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: flex-end;
+  min-width: 0;
+  max-width: 100%;
+}
+#composer .compose-row > #message {
+  flex: 1 1 0%;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+#composer .compose-row > .compose-bottom {
+  flex: 0 0 auto;
+  margin-top: 0;
+  margin-left: 0.5rem;
+}
+#composer #send { white-space: nowrap; }
+
+/* Gutters and bubble padding track the pane, not a viewport cutoff. */
+#messages,
+#composer,
+#work-view,
+#hosts-view {
+  padding-left: clamp(0.75rem, 1.6cqi, 1.25rem);
+  padding-right: clamp(0.75rem, 1.6cqi, 1.25rem);
+}
+#messages .body,
+#messages .bubble.tcard,
+#messages .bubble.warning {
+  max-width: min(100%, 72ch, 42em);
+  padding-left: clamp(0.75rem, 1.2cqi, 1rem);
+  padding-right: clamp(0.75rem, 1.2cqi, 1rem);
+}
+#messages .bubble.thinking,
+#messages [data-testid="stream-preview"] {
+  max-width: min(100%, 72ch, 42em);
+}
+#messages .body,
+#messages .md-p,
+#messages .md-list,
+#messages .md-pre,
+#messages .evidence-raw,
+#messages .bubble .text-sm,
+#messages .text-sm {
+  font-size: 1rem;
+  font-size: clamp(1rem, 0.96rem + 0.3cqi, 1.125rem);
+  line-height: 1.7;
+}
+/* Secondary composer chrome drops out when the composer itself is narrow. */
+@container composer (max-width: 36rem) {
+  #composer .compose-hint { display: none; }
   #composer .compose-options { flex-wrap: wrap; }
-  #composer .compose-hint { display: none; }
   #composer .compose-files { margin-left: 0; flex-wrap: wrap; }
-  #message { font-size: 16px; }
-  .body, .msg-media, .tcard, .warning { max-width: 100%; }
-  .media-img, .media-video { max-height: 280px; }
-  .pager { gap: 8px; font-size: 12px; flex-wrap: wrap; }
-  #activity { max-width: 40%; }
 }
-/* Narrow viewports: message field and send control share one row. Wide layout stays stacked. */
-@media (max-width: 640px) {
-  #composer .compose-row {
-    display: flex;
-    flex-flow: row nowrap;
-    align-items: flex-end;
+#attention-pill { flex: none; }
+@container pane (max-width: 28rem) {
+  .shell-root main > header { column-gap: 0.5rem; }
+  .shell-root main > header > .min-w-0 {
+    flex: 1 1 auto;
+    min-width: 2.5rem;
+    overflow: hidden;
+  }
+  #activity {
+    flex: 0 1 6rem;
     min-width: 0;
+    max-width: 28%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  #composer .compose-row > #message {
-    flex: 1 1 0%;
-    width: auto;
-    min-width: 0;
-    max-width: 100%;
-  }
-  #composer .compose-row > .compose-bottom {
-    flex: 0 0 auto;
-    margin-top: 0;
-    margin-left: 8px;
-  }
-  #composer #send { white-space: nowrap; }
 }
-/* Landscape and a reduced visual viewport must still expose the send control. */
+@container pane (max-width: 22rem) {
+  #attention-pill .attention-label { display: none; }
+}
+@container work (max-width: 40rem) {
+  #work-view > .grid { grid-template-columns: minmax(0, 1fr); }
+  #work-view .pager { flex-wrap: wrap; gap: 0.5rem; }
+}
+
+@media (pointer: coarse) {
+  button, .nav, .bot-item {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]),
+  select {
+    min-height: 44px;
+  }
+}
+
+/* A short visual viewport (landscape phone, soft keyboard) still shows send. */
 @media (max-height: 500px) {
-  .shell-root main > header { padding-top: 6px; padding-bottom: 6px; }
+  .shell-root main > header { padding-top: 0.375rem; padding-bottom: 0.375rem; }
   #setup-panel, #capability-list, #notice { max-height: 15dvh; }
-  #composer { padding-top: 6px; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
+  #composer.composer-root { padding-top: 0.375rem; padding-bottom: calc(0.375rem + env(safe-area-inset-bottom)); }
   #composer .compose-hint { display: none; }
-  #message { height: 56px; }
+  #message { height: 3.5rem; }
 }

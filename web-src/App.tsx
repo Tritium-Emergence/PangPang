@@ -36,7 +36,10 @@ function PendingPill({snap, open}: {snap: Snapshot; open: () => void}) {
   const {t} = useTranslation();
   const n = Number(snap.attention_summary?.needs_attention ?? 0) + Number(snap.attention_summary?.blocked ?? 0);
   if (!n) return null;
-  return <button id="attention-pill" className="shrink-0 rounded-full border border-warn/40 bg-warn/5 px-2 py-0.5 text-xs text-warn lg:hidden" onClick={open}>{t('header.pending', {n})}</button>;
+  const count = String(n);
+  const pending = t('header.pending', {n});
+  const word = pending.slice(0, pending.lastIndexOf(count)).trim();
+  return <button id="attention-pill" className="shrink-0 rounded-full border border-warn/40 bg-warn/5 px-2 py-0.5 text-xs text-warn lg:hidden" aria-label={pending} onClick={open}><span className="attention-label">{word} </span><span className="attention-count">{count}</span></button>;
 }
 
 // Language toggle. Presentation only — flips the i18next locale (persisted to
