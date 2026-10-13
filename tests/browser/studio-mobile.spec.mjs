@@ -91,6 +91,10 @@ async function assertChatLayout(page, width, height, {coarse}) {
     const name = document.querySelector('#bot-name');
     const nameBox = name.getBoundingClientRect();
     const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const activity = document.querySelector('#activity');
+    const activityBox = activity.getBoundingClientRect();
+    const pill = document.querySelector('#attention-pill');
+    const pillBox = pill ? pill.getBoundingClientRect() : null;
     for (const el of document.querySelectorAll('input, textarea, select')) {
       const type = el.getAttribute('type') || '';
       if (['checkbox', 'radio', 'file', 'hidden', 'range'].includes(type)) continue;
@@ -100,7 +104,7 @@ async function assertChatLayout(page, width, height, {coarse}) {
     }
     const targets = [];
     if (matchMedia('(pointer: coarse)').matches) {
-      for (const sel of ['#send', '#refresh', '#lang-toggle', '#upload', '#attach', '#nav-toggle']) {
+      for (const sel of ['#send', '#refresh', '#lang-toggle', '#upload', '#attach', '#nav-toggle', '#attention-pill']) {
         const el = document.querySelector(sel);
         if (!el) continue;
         const box = el.getBoundingClientRect();
@@ -122,6 +126,11 @@ async function assertChatLayout(page, width, height, {coarse}) {
       nameScroll: name.scrollWidth,
       nameFont: parseFloat(getComputedStyle(name).fontSize),
       nameText: name.textContent.trim(),
+      activityText: activity.textContent.trim(),
+      activityWidth: activityBox.width,
+      pillText: pill ? pill.innerText.trim() : '',
+      pillWidth: pillBox ? pillBox.width : 0,
+      pillHeight: pillBox ? pillBox.height : 0,
       composerPad: parseFloat(getComputedStyle(document.querySelector('#composer')).paddingBottom),
       expectedPad: (short ? 0.375 : 0.75) * root,
     };
@@ -140,6 +149,13 @@ async function assertChatLayout(page, width, height, {coarse}) {
   expect(report.nameText.length).toBeGreaterThan(0);
   expect(report.nameWidth).toBeGreaterThanOrEqual(report.nameFont * 2);
   expect(report.nameWidth).toBeGreaterThanOrEqual(report.nameScroll - 1);
+  if ((width === 320 && height === 568) || (width === 390 && height === 844)) {
+    expect(report.activityText.length, 'activity at ' + width).toBeGreaterThan(0);
+    expect(report.activityWidth, 'activity width at ' + width).toBeGreaterThan(8);
+    expect(report.pillText, 'pending count at ' + width).toMatch(/\d/);
+    expect(report.pillWidth, 'pending width at ' + width).toBeGreaterThanOrEqual(44);
+    expect(report.pillHeight, 'pending height at ' + width).toBeGreaterThanOrEqual(44);
+  }
   expect(Math.abs(report.composerPad - report.expectedPad)).toBeLessThanOrEqual(1);
   await saveShot(page, width, height);
 }

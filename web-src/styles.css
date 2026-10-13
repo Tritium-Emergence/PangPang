@@ -145,15 +145,15 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   #composer .compose-options { flex-wrap: wrap; }
   #composer .compose-files { margin-left: 0; flex-wrap: wrap; }
 }
+#attention-pill { flex: none; }
 @container pane (max-width: 28rem) {
   .shell-root main > header { column-gap: 0.5rem; }
   .shell-root main > header > .min-w-0 {
     flex: 1 1 auto;
-    min-width: 4.5rem;
+    min-width: 2.5rem;
     overflow: hidden;
   }
-  #activity,
-  #attention-pill {
+  #activity {
     flex: 0 1 6rem;
     min-width: 0;
     max-width: 28%;
@@ -161,6 +161,9 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+}
+@container pane (max-width: 22rem) {
+  #attention-pill .attention-label { display: none; }
 }
 @container work (max-width: 40rem) {
   #work-view > .grid { grid-template-columns: minmax(0, 1fr); }
