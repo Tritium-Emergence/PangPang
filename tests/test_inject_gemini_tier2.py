@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_bot_runtime import config
+from test_unknown_adapter_startup import _removed_adapter_name
 from pangpang import runner
 from pangpang.execution import ADAPTER_CATALOG, CLI_SESSION_RESUME, interjection_tier_of
 from pangpang.runtime import TOOLS, Runtime
@@ -55,7 +56,7 @@ class CapabilityTests(unittest.TestCase):
             {"interjection_tier": 2, "resume_protocol": CLI_SESSION_RESUME}), 2)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["claude-code"]), 1)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["codex"]), 1)
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("legacy-executor")), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get(_removed_adapter_name())), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
 
     def test_session_argv_is_one_derived_id_and_never_both_flags(self):

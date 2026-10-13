@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from pangpang.onboarding import empty_config
 from pangpang.service import Service
+from test_unknown_adapter_startup import _removed_adapter_name
 
 
 class EmptyLocalHostDiscoveryTests(unittest.TestCase):
@@ -45,7 +46,7 @@ class EmptyLocalHostDiscoveryTests(unittest.TestCase):
         self.assertEqual(inst["host_id"], "host-local")
         self.assertEqual(inst["adapter"], "claude-code")
         self.assertEqual(inst["argv"][0], sys.executable)
-        self.assertNotIn("inst-local-legacy-executor", self.app.execution.installations)
+        self.assertNotIn("inst-local-" + _removed_adapter_name(), self.app.execution.installations)
         self.assertNotIn("inst-local-codex", self.app.execution.installations)
         self.assertEqual(
             [h["id"] for h in self.app.config["hosts"] if h.get("transport") == "local"],

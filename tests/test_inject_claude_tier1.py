@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_bot_runtime import config
+from test_unknown_adapter_startup import _removed_adapter_name
 from pangpang import runner
 from pangpang.execution import ADAPTER_CATALOG, interjection_tier_of
 from pangpang.runtime import TOOLS, Runtime
@@ -40,7 +41,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(ADAPTER_CATALOG["codex"]["stdin_protocol"], "codex-app-server")
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"],
                          ["exec", "--sandbox", "workspace-write", "-"])
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("legacy-executor")), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get(_removed_adapter_name())), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["claude-code"]), 1)
         self.assertEqual(ADAPTER_CATALOG["claude-code"]["stdin_protocol"], "claude-stream-json")

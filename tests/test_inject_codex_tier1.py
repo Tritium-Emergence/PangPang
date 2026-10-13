@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_bot_runtime import config
+from test_unknown_adapter_startup import _removed_adapter_name
 from pangpang import runner
 from pangpang.execution import ADAPTER_CATALOG, CODEX_APP_SERVER, interjection_tier_of
 from pangpang.runtime import TOOLS
@@ -40,7 +41,7 @@ class CapabilityTests(unittest.TestCase):
                          ["exec", "--sandbox", "workspace-write", "-"])
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox",
                          ADAPTER_CATALOG["codex"]["argv"])
-        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get("legacy-executor")), 3)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG.get(_removed_adapter_name())), 3)
         self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["pi"]), 3)
         self.assertEqual(interjection_tier_of(
             {"interjection_tier": 1, "stdin_protocol": "gemini-stream"}), 3)
