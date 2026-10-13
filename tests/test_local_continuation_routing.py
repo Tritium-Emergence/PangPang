@@ -381,6 +381,93 @@ class LocalRoutingTests(unittest.TestCase):
         self.assertGreaterEqual(p50, 20)
         self.assertLess(p95, 500)
 
+    def test_continuation_router_matches_the_classifier_that_runs(self):
+        # No key, and the test profile has an endpoint and model name.
+        self.assertEqual(self.app.continuation_router(), "local_model")
+        caps = self.app.diagnostics()["capabilities"]
+        self.assertEqual(caps["continuation_router"], "local_model")
+        self.assertTrue(caps["continuation_routing"])
+        detail = next(row for row in self.app.diagnostics()["effective_capabilities"]
+                      if row["capability"] == "semantic_gate")["detail"]
+        self.assertEqual(detail["continuation_router"], "local_model")
+        self.assertIn("configured local model", "\n".join(self.app.capability_warnings()))
+        work = self._seed("写周报", "router-local")
+        fake, calls = self._fake_pi('{"choice": "CURRENT"}')
+        with fake:
+            routing = self._resolve("继续", hint=work)
+        self.assertEqual(calls, [next(iter(self.app.profiles.values()))])
+        self.assertEqual(routing["route_source"], "local_model")
+        self.assertEqual(self.app.continuation_router(), "local_model")
+
+        # A key selects Jev even when a local model is also configured.
+        os.environ["TYPESAFE_API_KEY"] = "k"
+        try:
+            self.assertEqual(self.app.continuation_router(), "jev")
+            self.assertEqual(self.app.diagnostics()["capabilities"]["continuation_router"], "jev")
+            self.assertTrue(self.app.capabilities()["continuation_routing"])
+            self.assertNotIn("configured local model", "\n".join(self.app.capability_warnings()))
+            with fake, patch.object(
+                    self.app.semantic_gate, "classify_continuation",
+                    return_value={"choice": "CONTINUE_CURRENT", "confidence": 0.9}):
+                routed = self._resolve("继续核对", hint=work)
+            self.assertEqual(routed["route_source"], "jev")
+            self.assertEqual(calls, [next(iter(self.app.profiles.values()))])
+        finally:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+
+        # The switch off stays off with a key and a local model.
+        self.app.semantic_gate.continuation_routing = False
+        os.environ["TYPESAFE_API_KEY"] = "k"
+        try:
+            self.assertEqual(self.app.continuation_router(), "off")
+            self.assertFalse(self.app.capabilities()["continuation_routing"])
+            with fake, patch.object(
+                    self.app.semantic_gate, "classify_continuation",
+                    return_value={"choice": "CONTINUE_CURRENT", "confidence": 0.9}) as jev:
+                parked = self._resolve("继续", hint=work)
+            self.assertEqual(jev.call_count, 0)
+            self.assertEqual(parked["route_source"], "unconfigured_new")
+        finally:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            self.app.semantic_gate.continuation_routing = True
+        self.assertEqual(len(calls), 1)
+
+        # A key with no Jev object stays on the local model. The key alone does
+        # not select Jev; resolve_continuation only calls Jev when the gate object
+        # is present and continuation_configured.
+        saved_gate = self.app.semantic_gate
+        self.app.semantic_gate = None
+        os.environ["TYPESAFE_API_KEY"] = "k"
+        try:
+            self.assertEqual(self.app.continuation_router(), "local_model")
+        finally:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            self.app.semantic_gate = saved_gate
+
+        # No configured local model: the field is off, and the real call does not
+        # report route_source=local_model.
+        for profile in self.app.profiles.values():
+            profile["endpoint"] = ""
+            profile["model"] = ""
+        self.assertEqual(self.app.continuation_router(), "off")
+        self.assertFalse(self.app.capabilities()["continuation_routing"])
+        self.assertEqual(self.app.diagnostics()["capabilities"]["continuation_router"], "off")
+        warnings = "\n".join(self.app.capability_warnings())
+        self.assertNotIn("configured local model", warnings)
+        self.assertIn("continuation routing is off", warnings)
+        bare = self._resolve("继续", hint=work)
+        self.assertEqual(bare["route_source"], "unconfigured_new")
+        self.assertEqual(self.app.continuation_router(), "off")
+
+        # No profile at all is off, even with a key and no Jev object.
+        self.app.profiles = {}
+        self.app.semantic_gate = None
+        os.environ["TYPESAFE_API_KEY"] = "k"
+        try:
+            self.assertEqual(self.app.continuation_router(), "off")
+        finally:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+
 
 if __name__ == "__main__":
     unittest.main()

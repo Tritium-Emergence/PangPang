@@ -627,8 +627,10 @@ class CapabilityTests(ServiceCase):
             self.app.semantic_gate.mode = "enforce"
             caps = self.app.diagnostics()["capabilities"]
             # web_search is keyless since 1.0 (Bing/DuckDuckGo chain): always on.
-            self.assertEqual((caps["web_search"], caps["semantic_gate_key"], caps["continuation_routing"]),
-                             (True, False, False))
+            # A configured local model still routes continuation when the Jev key is absent.
+            self.assertEqual((caps["web_search"], caps["semantic_gate_key"], caps["continuation_routing"],
+                              caps["continuation_router"]),
+                             (True, False, True, "local_model"))
             text = "\n".join(self.app.capability_warnings())
             self.assertIn("mode=enforce without TYPESAFE_API_KEY", text)
             self.assertIn("configured local model", text)
@@ -636,6 +638,8 @@ class CapabilityTests(ServiceCase):
             self.app.semantic_gate.continuation_routing = False
             quiet = "\n".join(self.app.capability_warnings())
             self.assertNotIn("configured local model", quiet)
+            self.assertEqual(self.app.capabilities()["continuation_router"], "off")
+            self.assertFalse(self.app.capabilities()["continuation_routing"])
             self.assertIn("mode=enforce without TYPESAFE_API_KEY", quiet)
             env["TYPESAFE_API_KEY"] = "k"
             self.assertNotIn("mode=enforce without TYPESAFE_API_KEY",

@@ -154,7 +154,7 @@ TYPESAFE_API_KEY
 
 `semantic_gate` 与 `turn_budget` 是启动文件在 `settings/managed` 已存在之后仍会读进本进程的键。把上面的对象放在启动文件里，下次启动会用它替换内存中的 `semantic_gate`；这次替换不写回数据库。其余配置以第 1 节的 managed settings 为准。
 
-没有 `TYPESAFE_API_KEY` 且 `continuation_routing` 仍为 true（默认）时，普通 Web `work_hint_id` 由 operator 自己配置的模型在本地路由（`route_source=local_model`），不新增出站。本地路由失败、没有可路由的既有 Work，或 `continuation_routing=false` 时，系统确定性 NEW（`route_source=unconfigured_new`）。这不算 outage，也不会触发 fallback approval。若确实需要不经模型的确定性续接，应由受信内部/兼容入口使用显式 `work_id`。
+没有 `TYPESAFE_API_KEY` 且 `continuation_routing` 仍为 true（默认）时，普通 Web `work_hint_id` 由 operator 自己配置的模型在本地路由（`route_source=local_model`），不新增出站。diagnostics 的 `continuation_router` 此时为 `local_model`；没有已配置的本地模型（无 endpoint 或模型名）时为 `off`；有 key 且续接开启时为 `jev`。本地路由失败、没有可路由的既有 Work，或 `continuation_router=off` 时，系统确定性 NEW（`route_source=unconfigured_new`）。这不算 outage，也不会触发 fallback approval。若确实需要不经模型的确定性续接，应由受信内部/兼容入口使用显式 `work_id`。
 
 只有 key 已配置、但 Jev 请求失败/timeout/circuit breaker open 时，才产生 `fallback` weak route。
 
@@ -458,10 +458,10 @@ retry 是 durable requeue：等待期间释放 model worker，不用 `sleep` 占
 2. `stream_id` 是否稳定在当前 tab × bot；
 3. `last_seen_event_id` 是否指向用户实际看见的最后 conversational message；
 4. hint 是否仍属于该 Bot、状态是否 eligible；
-5. `continuation_routing` 是否开启；
-6. 如果配置了 Jev，查看 `route_source / route_quality`。
+5. diagnostics 的 `continuation_router` 是 `jev`、`local_model` 还是 `off`；
+6. 查看 `route_source / route_quality`。
 
-continuation classifier 未配置时，普通 Web hint 只代表 UI focus，系统确定性创建 NEW Work；这不是 provider failure。显式受信内部/兼容 work_id 仍可确定性续接。
+`continuation_router=off` 时，普通 Web hint 只代表 UI focus，系统确定性创建 NEW Work；这不是 provider failure。显式受信内部/兼容 work_id 仍可确定性续接。
 
 ### 症状 B：明显换话题却还留在 CURRENT
 
@@ -577,7 +577,7 @@ curl -s \
 - oldest age；
 - draining；
 - deadline / backlog 异常；
-- `capabilities`：web_search / Jev key / continuation routing / gate 模式是否真的可用（启动时同样会对每项“已配置但用不了”的能力打一行 `capability:` warning）；
+- `capabilities`：web_search / Jev key / `continuation_router`（`jev`、`local_model` 或 `off`，与实际选用的 classifier 一致）/ gate 模式是否真的可用（启动时同样会对每项“已配置但用不了”的能力打一行 `capability:` warning）；
 - `config_stale`：DB 中的 `settings/managed` 不是本进程发布的版本（服务运行中被改过库）。此时 API 配置写入会以 `state_conflict` 失败而不是覆盖；重启服务加载新配置；
 - `work_routing_constraints`：带 `required_host_id` / `required_installation_id` 的未结束 Work。此前，聊天里“提到”某个主机或执行器 ID（包括“不要再用 X”）会把 Work 钉在 X 上；这些字段没有来源记录，所以**不会自动清理**。确认某个 Work 是误钉后，停服务再按 ID 精确清除：
 

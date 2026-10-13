@@ -546,10 +546,10 @@ class SemanticGate:
 
     @property
     def continuation_configured(self):
-        """True when continuation routing is enabled AND a key is present. Lets the
-        caller tell 'deliberately-off / no-key' (fresh Work, explicit route_source)
-        apart from 'configured but Jev failed'
-        (fallback, weak route)."""
+        """True when the Jev classifier is the one selected: routing is enabled and
+        TYPESAFE_API_KEY is set. False is the keyless path (local model when one is
+        configured, otherwise no classifier) or the switch being off. It does not
+        mean continuation routing itself is off."""
         return bool(self.continuation_routing and os.environ.get("TYPESAFE_API_KEY"))
 
     @property

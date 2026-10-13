@@ -1721,6 +1721,31 @@ class Service:
             return True
         return bool(cfg.get("continuation_routing", True))
 
+    def _continuation_profile(self):
+        """Profile the keyless continuation call looks up. None when no profile exists."""
+        return (self.profiles.get(str(self.config.get("default_model", "default")))
+                or next(iter(self.profiles.values()), None))
+
+    def continuation_router(self):
+        """Classifier resolve_continuation selects: jev, local_model, or off.
+
+        This is the router, not one message's route_source. A local failure, an
+        open breaker, or a message with nothing to attach still yields
+        route_source unconfigured_new or degraded_new while the router stays
+        local_model or jev. A profile with no endpoint or model name is rejected
+        by credentials before a worker starts, so route_source stays
+        unconfigured_new and the router is off.
+        """
+        if not self._continuation_routing_enabled():
+            return "off"
+        gate = getattr(self, "semantic_gate", None)
+        if gate is not None and getattr(gate, "continuation_configured", False):
+            return "jev"
+        profile = self._continuation_profile()
+        if profile and profile.get("endpoint") and profile.get("model"):
+            return "local_model"
+        return "off"
+
     def _user_correction_work(self, bot_id, body):
         """User-named destination for an append-only routing correction.
 
@@ -1936,8 +1961,7 @@ class Service:
         from .pi_runtime import PiModel
         if time.monotonic() < getattr(self, "_local_routing_open_until", 0.0):
             return None
-        profile = self.profiles.get(str(self.config.get("default_model", "default"))) \
-            or next(iter(self.profiles.values()), None)
+        profile = self._continuation_profile()
         if profile is None:
             return None
         slots = []
@@ -3244,24 +3268,35 @@ class Service:
 
     def capabilities(self):
         """Which optional capabilities are actually usable (H). Booleans and
-        configured modes only; never key material."""
+        configured modes only; never key material.
+
+        continuation_router is the classifier resolve_continuation selects
+        (jev, local_model, or off). continuation_routing is true only when that
+        router is not off, so a missing Jev key does not report routing as off
+        while the local model is the router.
+        """
         gate = self.semantic_gate
         key = bool(os.environ.get("TYPESAFE_API_KEY"))
+        router = self.continuation_router()
         # web_search is always available: Tavily when its key is set, otherwise the
         # keyless Bing/DuckDuckGo chain (see web_search's provider docstring).
         return {"web_search": True,
                 "semantic_gate_key": key,
                 "semantic_gate_mode": gate.mode,
-                "continuation_routing": gate.continuation_configured,
+                "continuation_routing": router != "off",
+                "continuation_router": router,
                 "task_result_gate_mode": self.task_result_gate.mode}
 
     def capability_warnings(self):
         """Startup self-check: one line per capability that is configured but
         cannot work, so a missing key is never a silent degradation (H)."""
         caps, out = self.capabilities(), []
+        if caps["continuation_router"] == "local_model":
+            out.append("TYPESAFE_API_KEY not set: continuation routing uses the configured local model; a local failure starts a fresh Work unless the user continues one explicitly")
+        elif (caps["continuation_router"] == "off" and not caps["semantic_gate_key"]
+              and self._continuation_routing_enabled()):
+            out.append("TYPESAFE_API_KEY not set and no local model is configured: continuation routing is off")
         if not caps["semantic_gate_key"]:
-            if self.semantic_gate.continuation_routing:
-                out.append("TYPESAFE_API_KEY not set: continuation routing uses the configured local model; a local failure starts a fresh Work unless the user continues one explicitly")
             if caps["semantic_gate_mode"] == "enforce":
                 out.append("semantic gate mode=enforce without TYPESAFE_API_KEY: every guarded tool call is refused as gate_unavailable")
             if caps["task_result_gate_mode"] == "enforce":
@@ -3504,7 +3539,9 @@ class Service:
                   "restart_required": True, "detail": {"env_var": "TYPESAFE_API_KEY"}}
         out.append({"capability": "semantic_gate", "provider": "typesafe",
                     "detail": {"mode": gate.mode, "task_result_gate_mode": self.task_result_gate.mode,
-                               "continuation_routing": gate.continuation_routing, **sg.pop("detail", {})}, **sg})
+                               "continuation_routing": gate.continuation_routing,
+                               "continuation_router": self.continuation_router(),
+                               **sg.pop("detail", {})}, **sg})
         return out
 
     def _routing_constrained_work(self, sample=20):
