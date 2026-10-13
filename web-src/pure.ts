@@ -71,6 +71,8 @@ export const PER_PAGE = 10;
 
 export interface ActivitySummaryTask {
   status?: string;
+  created?: number;
+  started?: number;
   required_outputs?: unknown;
   activity?: {
     status?: string;
@@ -90,17 +92,21 @@ function clockHMS(unix: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// Duration, last log time, latest step, and required files already present.
-// starting stays "starting" — started is recorded before the process is running.
+// Absolute queue or start clock, last log time, latest step, and required files
+// already present. age_s stays on the planner packet and is not rendered here.
+// starting uses its own clock — started is recorded before the process is running.
 export function activitySummary(task: ActivitySummaryTask | null | undefined, tr: Tr): string | null {
   const activity = task?.activity;
   if (!activity) return null;
   const status = String(activity.status || task?.status || '');
-  const age = typeof activity.age_s === 'number' ? activity.age_s : 0;
+  const anchor = status === 'queued' ? task?.created
+    : (status === 'starting' || status === 'running') ? task?.started
+    : undefined;
+  const clock = typeof anchor === 'number' && anchor > 0 ? clockHMS(anchor) : '';
   const parts: string[] = [];
-  if (status === 'queued') parts.push(tr('workpane.activityQueued', {age}));
-  else if (status === 'starting') parts.push(tr('workpane.activityStarting', {age}));
-  else if (status === 'running') parts.push(tr('workpane.activityRunning', {age}));
+  if (clock && status === 'queued') parts.push(tr('workpane.activityQueued', {time: clock}));
+  else if (clock && status === 'starting') parts.push(tr('workpane.activityStarting', {time: clock}));
+  else if (clock && status === 'running') parts.push(tr('workpane.activityRunning', {time: clock}));
   if (typeof activity.last_log_at === 'number' && activity.last_log_at > 0) {
     parts.push(tr('workpane.activityLastLog', {time: clockHMS(activity.last_log_at)}));
   }

@@ -59,14 +59,16 @@ _ROUTE_RANK = {"deterministic": 0, "confident": 0, "default_continue": 1, "fallb
 
 
 def weakest_route_quality(*qualities):
-    """The least trusted route quality. Unknown labels rank with fallback.
+    """The least trusted route quality.
 
-    None and empty values are ignored. No qualities returns None.
+    None and empty values are ignored. A label outside the known set becomes
+    fallback before ranking, so the result is a label the runtime gate checks.
+    No qualities returns None.
     """
-    present = [q for q in qualities if isinstance(q, str) and q]
+    present = [q if q in _ROUTE_RANK else "fallback" for q in qualities if isinstance(q, str) and q]
     if not present:
         return None
-    return max(present, key=lambda q: _ROUTE_RANK.get(q, 2))
+    return max(present, key=lambda q: _ROUTE_RANK[q])
 
 
 EXECUTION_ACTIVE = {"starting", "running", "cancel_requested", "unknown"}

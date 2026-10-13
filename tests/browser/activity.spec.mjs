@@ -6,14 +6,18 @@ test('task cards show live activity by status', async ({page}) => {
   await gotoWork(page);
   const starting = page.locator('[data-activity-status="starting"]');
   await expect(starting).toBeVisible();
-  await expect(starting).toContainText('启动中');
+  await expect(starting).toContainText('启动于');
+  await expect(starting).toContainText(/\d{2}:\d{2}:\d{2}/);
   await expect(starting).not.toContainText('已运行');
+  await expect(starting).not.toContainText('排队于');
   await expect(starting).toContainText('暂无可观测活动');
   await expect(starting).toContainText('未声明必需文件');
 
   const reading = page.locator('[data-activity-status="running"]', {hasText: 'src/a.py'});
   await expect(reading).toBeVisible();
-  await expect(reading).toContainText('已运行');
+  await expect(reading).toContainText('开始于');
+  await expect(reading).not.toContainText('已运行');
+  await expect(reading).not.toContainText('启动于');
   await expect(reading).toContainText(/\d{2}:\d{2}:\d{2}/);
   await expect(reading).toContainText('未声明必需文件');
   await expect(reading).not.toContainText('尚未产出');

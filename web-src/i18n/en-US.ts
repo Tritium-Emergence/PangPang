@@ -143,11 +143,11 @@ export default {
 
     recoveryConfirmStopped: 'Release the working directory after confirming that the executor process has stopped?',
 
-    activityQueued: 'queued {{age}}s',
+    activityQueued: 'queued at {{time}}',
 
-    activityStarting: 'starting {{age}}s',
+    activityStarting: 'starting at {{time}}',
 
-    activityRunning: 'running {{age}}s',
+    activityRunning: 'started at {{time}}',
 
     activityLastLog: 'last log {{time}}',
 

@@ -69,6 +69,7 @@ export interface Task {
     truncated?: boolean;
   };
   created?: number;
+  started?: number;
   required_outputs?: string[];
   activity?: {
     status?: string;

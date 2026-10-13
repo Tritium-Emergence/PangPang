@@ -743,6 +743,8 @@ class TaskActivityTests(unittest.TestCase):
     def test_queued_merge_keeps_weakest_route_quality(self):
         self.assertEqual(weakest_route_quality("fallback", "deterministic"), "fallback")
         self.assertEqual(weakest_route_quality("deterministic", "fallback"), "fallback")
+        self.assertEqual(weakest_route_quality("unexpected", "fallback"), "fallback")
+        self.assertEqual(weakest_route_quality("unexpected", "deterministic"), "fallback")
         first = self.app.send("bot-main", {"text": "先"}, "weak-a", routing={
             "route_quality": "fallback", "route_source": "fallback"})
         second = self.app.send("bot-main", {"text": "后"}, "weak-b", routing={
