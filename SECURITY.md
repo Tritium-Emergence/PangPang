@@ -147,7 +147,7 @@ Connector receipt 说明“受信设备如此报告”，不是独立证明设�
 | 组件 | 端点 | 默认状态 | 触发条件 | 发送内容 |
 |---|---|---|---|---|
 | 模型推理 | 31 个 provider 的默认 `baseUrl` 见 `pangpang/model_catalog.json`，operator 可覆盖 | 未配置模型前完全关闭 | 每次模型调用 | 会话 state、prompt、工具结果（按 provider 协议） |
-| Semantic gate / continuation routing | `https://api.typesafe.ai/v1/systemone`，可用 `PANGPANG_SEMANTIC_GATE_URL` 覆盖 | `mode=off`；continuation routing 默认 ON，无 `TYPESAFE_API_KEY` 时由 operator 自己配置的模型在本地路由（不新增出站），再失败则确定性降级为新 Work | gate 判定 / sticky-tab 续接 | 结构化 `state` + 固定 `questions`，不含 secret |
+| Semantic gate / continuation routing | `https://api.typesafe.ai/v1/systemone`，可用 `PANGPANG_SEMANTIC_GATE_URL` 覆盖 | `mode=off`；continuation routing 默认 ON。有 `TYPESAFE_API_KEY` 且续接开启时 classifier 为 Jev；无 key 且已配置本地模型时由该模型在本地路由（不新增出站，`continuation_router=local_model`）；无 key 且无本地模型，或续接关闭时为 `off`，确定性新 Work | gate 判定 / sticky-tab 续接 | 结构化 `state` + 固定 `questions`，不含 secret |
 | Web search | 有 `TAVILY_API_KEY` 时优先 `https://api.tavily.com/search`；无 key 或失败时走 `https://cn.bing.com/search`、`https://html.duckduckgo.com/html/`（互为 failback） | **默认开启**（无 key 链仅发送查询词）；`PANGPANG_SEARCH_PROVIDER=off` 可整体关闭出站 | bot 显式调用搜索工具 | 查询词（URL 编码 query string，不含会话上下文） |
 | pi 二进制获取 | `https://github.com/earendil-works/pi/releases/download/v1.0.3/...` | **平台 wheel 与带 `runtime/SHIPPED.json` 的 Release 不下载**（二进制已在包内，启动只核对 SHA256；不符则拒绝启动，不替换）。源码检出且没有该标记时，首次登记本机执行器且 PATH 无已知 CLI、或 connector discover 时，仍可能一次性下载 | 一次性下载 | 无（纯下载）；archive 与 binary SHA256 双固定。没有自动更新 |
 | Bun 运行时获取 | `https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/...` | **用户安装与启动不下载**。仅维护者在构建机准备带 runtime 的发行包时下载 | 构建期 | zip SHA256 对照官方 SHASUMS256.txt，解出的 `bun`/`bun.exe` 再对照源码钉。pip 与 npm 都没有 postinstall 下载 |
