@@ -223,19 +223,15 @@ PangPang 能操作真实文件和真实机器。因此，比起展示“完全�
 
 ## 本地模型 / 高性能配置
 
-默认 Scheduler 面向“可并发模型 endpoint”（`model_max_concurrency=4`）。如果你的 endpoint 实际是一条**单流本地 Qwen**，不要让四个长上下文同时打进同一个 GPU 服务，推荐显式配置：
+首次启动之后，数据库里的 managed settings 才是生效配置。启动文件（`--config`，默认 `config/runtime.json`；文件不存在时用内置空配置）只作种子：在还没有 `settings/managed` 时，进程使用这份文件，第一次写入 managed settings 时把当时的内存配置复制进数据目录。本地执行同意、本机 host 登记、以及保存模型设置都会产生这次写入。
 
-```json
-{
-  "scheduler": {
-    "model_max_concurrency": 1,
-    "reserved_user_slots": 0,
-    "main_bot_max_active_turns": 1,
-    "main_bot_reserved_user_slots": 0,
-    "service_bot_max_active_turns": 1
-  }
-}
-```
+之后每次启动都加载 `settings/managed`。启动文件若写了 `turn_budget` 或 `semantic_gate`，这两个值会替换本进程内存中的对应项；这次读取不写回数据库。发生替换时日志为 `startup config replaced stored`。文件里的其他键，包括 `scheduler`，仍留在已存储的设置里；这些键与库不一致时，日志为 `startup config is not the live settings after the first start`。
+
+没有已存储的 `scheduler` 对象时，进程同时进行 4 路模型对话（`model_max_concurrency` 为 4，`reserved_user_slots` 为 1）。能接受并发请求的 endpoint 保持默认即可。**单流本地 Qwen** 在多路长上下文下会变慢，应使用 1 路对话。
+
+在 Web 里设置：打开 **设置全局对话模型**（或 **设置模型**），把 **同时进行的模型对话数** 填为 1–16 的整数后保存。保存会把 `scheduler.model_max_concurrency` 写入 managed 行。值为 1 时同时把 `reserved_user_slots` 记为 0，这样下次启动能通过校验。大于 1 时，若已存储的 `reserved_user_slots` 仍在合法范围内则保留，否则记为 1。不改其他 scheduler 键。重启协调器后新上限才生效。没有环境变量可以设置这个上限。
+
+managed 行存在之后，`main_bot_max_active_turns`、`main_bot_reserved_user_slots` 和 `service_bot_max_active_turns` 没有受支持的修改路径。
 
 Executor 的 `max_concurrency`、workspace RW claim 和本地资源锁是另一套容量域，模型容量不能重新耦合到执行器资源锁。
 

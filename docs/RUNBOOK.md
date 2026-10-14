@@ -1,45 +1,27 @@
 # PangPang — 部署、运行与恢复 Runbook
 
-日期：2026-09-24  
+日期：2026-10-13  
 适用：当前 main
 
-## 1. 部署前先决定模型形态
+## 1. 配置以数据库为准
 
-### A. Cloud/API 模型 endpoint
+首次启动之前，若数据目录里还没有 `settings/managed`，启动文件（`--config`，默认 `config/runtime.json`；文件不存在时用内置空配置）就是本次进程的配置。第一次写入 managed settings 时，当时的内存配置被复制进数据库。本地执行同意、本机 host 登记、以及保存模型设置都会产生这次写入。
 
-如果 endpoint 本身支持并发，默认 Scheduler 可直接使用：
+该行一旦存在，数据库里的 managed settings 就是生效配置。之后每次启动都加载这一行。启动文件里的 `turn_budget` 和 `semantic_gate` 仍会盖到本进程内存中的对应值上（文件没写这两个键则沿用库里的值）；这次覆盖不写回数据库，日志为 `startup config replaced stored`。文件里的其他键，包括 `scheduler`，留在已存储的设置里；这些键与库不一致时，日志为 `startup config is not the live settings after the first start`。
 
-```json
-{
-  "scheduler": {
-    "model_max_concurrency": 4,
-    "reserved_user_slots": 1,
-    "main_bot_max_active_turns": 2,
-    "main_bot_reserved_user_slots": 1,
-    "service_bot_max_active_turns": 1
-  }
-}
-```
+### 模型并发
 
-### B. 单流本地 Qwen
+没有已存储的 `scheduler` 对象时，默认同时进行 4 路模型对话（`model_max_concurrency` 为 4，`reserved_user_slots` 为 1）。能接受并发请求的 Cloud/API endpoint 保持默认即可。
 
-如果实际是单 GPU/单服务、长上下文 single-stream 最快，推荐：
+单 GPU / 单服务、长上下文 single-stream 更快的本地 Qwen，应使用 1 路对话，避免多个大上下文同时 prefill、争用 KV。在 Web 里打开 **设置全局对话模型**（或 **设置模型**），把 **同时进行的模型对话数** 设为 1–16 的整数后验证并保存。保存写入 managed settings 的 `scheduler.model_max_concurrency`。值为 1 时同时把 `reserved_user_slots` 记为 0，这样下次启动能通过校验；大于 1 时，若已存储的 `reserved_user_slots` 仍在合法范围内则保留，否则记为 1。不改其他 scheduler 键。当前进程仍用旧上限，重启协调器后新上限才生效。没有环境变量可以设置这个上限。
 
-```json
-{
-  "scheduler": {
-    "model_max_concurrency": 1,
-    "reserved_user_slots": 0,
-    "main_bot_max_active_turns": 1,
-    "main_bot_reserved_user_slots": 0,
-    "service_bot_max_active_turns": 1
-  }
-}
-```
+managed 行存在之后，`main_bot_max_active_turns`、`main_bot_reserved_user_slots` 和 `service_bot_max_active_turns` 没有受支持的修改路径。
 
-不要为了“逻辑并发”制造多个大上下文 prefill / KV 争用。
+Executor 的 `max_concurrency`、workspace RW claim 和本地资源锁是另一套容量域，不能重新耦合到模型调度。
 
 ## 2. Coordinator 首次启动
+
+生效配置见第 1 节：`settings/managed` 写入之后以数据库为准，启动文件只作种子。
 
 要求：
 
@@ -169,6 +151,8 @@ TYPESAFE_API_KEY
   }
 }
 ```
+
+`semantic_gate` 与 `turn_budget` 是启动文件在 `settings/managed` 已存在之后仍会读进本进程的键。把上面的对象放在启动文件里，下次启动会用它替换内存中的 `semantic_gate`；这次替换不写回数据库。其余配置以第 1 节的 managed settings 为准。
 
 没有 `TYPESAFE_API_KEY` 且 `continuation_routing` 仍为 true（默认）时，普通 Web `work_hint_id` 由 operator 自己配置的模型在本地路由（`route_source=local_model`），不新增出站。本地路由失败、没有可路由的既有 Work，或 `continuation_routing=false` 时，系统确定性 NEW（`route_source=unconfigured_new`）。这不算 outage，也不会触发 fallback approval。若确实需要不经模型的确定性续接，应由受信内部/兼容入口使用显式 `work_id`。
 
