@@ -82,6 +82,7 @@ export interface Task {
   inputs?: unknown;
   outputs?: unknown;
   receipt?: unknown;
+  operator_evidence?: string;
   error?: string;
 }
 

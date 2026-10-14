@@ -137,7 +137,9 @@ export default {
 
     confirmNeverStarted: 'Confirm never started', confirmStopped: 'Confirm stopped',
 
-    recoveryEvidencePrompt: 'Provide verification evidence (at least 10 characters).',
+    operatorResolveNoteLabel: 'Audit record: an operator-written human statement. The system did not verify this text.',
+
+    recoveryEvidencePrompt: '{{label}} At least 10 characters.',
 
     recoveryConfirmNeverStarted: 'Release the working directory after confirming that the task never started?',
 
