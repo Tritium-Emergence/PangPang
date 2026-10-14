@@ -1418,6 +1418,10 @@ class SshRetireGateTests(unittest.TestCase):
         self.app.store.put("task", task)
         proved = self.app.installation_execution_facts("codex-local")
         self.assertTrue(proved["execution_verified"])
+        verified_executor = next(row for row in self.app.effective_capabilities() if row["capability"] == "executor")
+        self.assertTrue(any(row["installation_id"] == "codex-local" and row["discovered"]
+                            and row["execution_verified"]
+                            for row in verified_executor["detail"]["executor_evidence"]))
         task["receipt"] = dict(proved_receipt, not_launched="runner_prelaunch")
         self.app.store.put("task", task)
         self.assertFalse(self.app.installation_execution_facts("codex-local")["execution_verified"])

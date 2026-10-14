@@ -152,3 +152,61 @@ export function pageWindow(total: number, requestedPage: number, perPage: number
   const pg = Math.min(Math.max(requestedPage, 0), pages - 1);
   return {pg, pages, start: pg * perPage, end: pg * perPage + perPage};
 }
+
+export interface ExecutionFacts {
+  installation_id?: string;
+  discovered?: boolean;
+  execution_verified?: boolean;
+}
+
+function asFacts(value: unknown): ExecutionFacts | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  return value as ExecutionFacts;
+}
+
+/** Stored execution facts for one installation, from the executor capability row. */
+export function executionFactsFor(
+  capabilities: Array<{capability?: string; detail?: Record<string, unknown>}> | undefined,
+  installationId: string,
+): ExecutionFacts | undefined {
+  for (const row of capabilities || []) {
+    if (row.capability !== 'executor') continue;
+    const evidence = row.detail?.executor_evidence;
+    if (!Array.isArray(evidence)) continue;
+    const hit = evidence.find((item) => asFacts(item)?.installation_id === installationId);
+    const facts = asFacts(hit);
+    if (facts) return facts;
+  }
+  return undefined;
+}
+
+/**
+ * Label tone for an executor the control plane would admit (state "ready").
+ * "ready" only when that installation is still discovered AND execution_verified.
+ * A version probe without that receipt is discovered_not_verified.
+ * Other capabilities, and executors that are not admitted, return null.
+ */
+export function executorSetupTone(row: {capability?: string; state?: string; detail?: Record<string, unknown>}): 'ready' | 'discovered_not_verified' | null {
+  if (row.capability !== 'executor' || row.state !== 'ready') return null;
+  const selected = asFacts(row.detail?.selected);
+  const evidence = row.detail?.executor_evidence;
+  const facts = Array.isArray(evidence)
+    ? asFacts(evidence.find((item) => asFacts(item)?.installation_id === selected?.installation_id))
+    : undefined;
+  return facts?.execution_verified === true && facts?.discovered === true ? 'ready' : 'discovered_not_verified';
+}
+
+/**
+ * Per-installation card. Ready only when a fenced receipt exists and the
+ * executor is currently discovered. A probe row is that current check; without
+ * one, the stored discovered flag is the same fact. A past receipt does not
+ * turn an unavailable or missing probe green.
+ */
+export function installationSetupTone(
+  facts: ExecutionFacts | undefined,
+  probe: {available?: boolean} | undefined,
+): 'ready' | 'discovered_not_verified' | null {
+  const discovered = probe ? probe.available === true : facts?.discovered === true;
+  if (!discovered) return null;
+  return facts?.execution_verified === true ? 'ready' : 'discovered_not_verified';
+}

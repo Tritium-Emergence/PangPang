@@ -5,7 +5,7 @@ export default {
   task: {queued: 'Queued', pending: 'Pending', running: 'Running', starting: 'Starting', awaiting_approval: 'Awaiting approval', unknown: 'Unknown', cancel_requested: 'Cancelling', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled', blocked: 'Blocked'},
   exchange: {pending: 'Awaiting reply', responded: 'Replied', failed: 'Failed', cancelled: 'Cancelled'},
   capability: {model: 'Chat model', executor: 'Executor', device: 'Device', web_search: 'Web search', semantic_gate: 'Semantic check'},
-  capabilityState: {ready: 'Ready', unconfigured: 'Not configured', blocked: 'Blocked', unknown: 'Unknown'},
+  capabilityState: {ready: 'Ready', discoveredNotVerified: 'discovered, not verified', unconfigured: 'Not configured', blocked: 'Blocked', unknown: 'Unknown'},
   capabilityAction: {
     restart_coordinator: 'Managed config changed outside the service; restart the coordinator to load the latest config.',
     configure_model: 'Set the endpoint and model name under Settings → Model (keys never pass through chat or the model).',
@@ -260,6 +260,7 @@ export default {
     revokeConfirm: "Revoke this device's cloud access? Running tasks will not be force-stopped.", revokeFailed: 'Revoke failed',
 
     revokeDevice: 'Revoke device access', probed: 'Detected · {{version}}', versionUnregistered: 'Version not registered',
+    discoveredNotVerified: 'discovered, not verified · {{version}}', readyVerified: 'Ready · {{version}}',
 
     unavailable: 'Unavailable · {{reason}}', notProbed: 'Not checked', probeInstall: 'Check installation',
 

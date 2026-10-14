@@ -13,6 +13,7 @@ PangPang 能调用真实模型、真实 CLI、真实文件和真实电脑，因�
 - `web_search` 默认出站。无 key 时查询词发往 Bing / DuckDuckGo；有 `TAVILY_API_KEY` 时优先 Tavily。`PANGPANG_SEARCH_PROVIDER=off` 才关闭。见下方出站清单。
 - unknown 不是“人在聊天里说已经停了”就能收口的状态。模型或操作者的口头陈述不是 OS 内核证据。unknown 只在确认的终态回执或已记录的 operator resolution 之后收口，且不因此自动重跑可能有副作用的任务。
 - 没有自动业务验收引擎。文件存在、摘要相符、模型说完成，都不是业务正确。
+- Setup 里执行器显示 “ready”（就绪）只在 `execution_verified` 为真时出现，即已有围栏成功的执行回执。只完成 version probe（`discovered`）时显示 “discovered, not verified”（已发现，未验证）。这不表示 CLI 已登录、可以写文件或可以执行 Bash。
 
 ### 模型不是 authority
 

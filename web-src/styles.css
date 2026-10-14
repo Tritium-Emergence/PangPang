@@ -69,6 +69,7 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
    glance without a wall of text. Color maps the raw state via data-state (SIS). */
 .cap-dot { background: var(--muted); }
 .cap-pill[data-state="ready"] .cap-dot { background: var(--good); }
+.cap-pill[data-execution-verified="false"] .cap-dot { background: var(--muted); }
 .cap-pill[data-state="blocked"] .cap-dot,
 .cap-pill[data-state="unconfigured"] .cap-dot { background: var(--warn); }
 .cap-pill[data-state="blocked"], .cap-pill[data-state="unconfigured"] { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
