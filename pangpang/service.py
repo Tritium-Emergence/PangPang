@@ -495,10 +495,12 @@ class Service:
             normalize_profile(profile)
         merge_custom_adapters(self.data / "adapters.json")
         # A stored document may name an adapter the catalog no longer has.
-        # The file passed on a first start is still rejected.
+        # The file passed on a first start is still rejected. Rows a device
+        # declared after operator approval are known without joining the
+        # built-in catalog, so this process does not execute their argv.
         self.execution = Execution(self.config, self.data,
                                    tolerate_unknown_adapters=self.config_revision != 0,
-                                   declared_adapters=_declared_from_store(self.store, self.config))
+                                   declared_adapters=self._startup_declared())
         self.execution.deployment_level = self.deployment_level
         self.onboarding = Onboarding(self)
         profile = global_profile(self.config)
@@ -3239,6 +3241,20 @@ class Service:
             self.store.after_commit("managed_config", publish)
         return row
 
+    def _startup_declared(self):
+        """Routing projection from device sync, overlaid with approved rows.
+
+        A hand-placed adapters.json arrives as the sync projection. An approved
+        declare arrives as a store row and must be visible before the next sync.
+        Names from either source stay; this does not drop one to keep the other.
+        """
+        declared = _declared_from_store(self.store, self.config)
+        for host_id, rows in self.declared_map().items():
+            merged = dict(declared.get(host_id) or {})
+            merged.update(rows)
+            declared[host_id] = merged
+        return declared
+
     def _execution_for_candidate(self, candidate):
         """Validate a managed-config candidate. See execution_for_stored_candidate."""
         return execution_for_stored_candidate(candidate, self.config, self.data,
@@ -4699,6 +4715,34 @@ class Service:
     # operator authorization, so this needs no in-app approval — but a model can
     # never reach it.
 
+    def declared_map(self):
+        """Host -> custom rows the operator approved and the device reported.
+
+        These rows are not copied into the built-in catalog. Connector launches
+        keep using the device's own argv.
+        """
+        found = {}
+        for row in self._all("declared_adapters"):
+            host_id, rows = row.get("id"), row.get("rows")
+            if isinstance(host_id, str) and isinstance(rows, dict):
+                found[host_id] = rows
+        return found
+
+    def declared_row(self, host_id, adapter):
+        row = (self.declared_map().get(host_id) or {}).get(adapter)
+        return row if isinstance(row, dict) else None
+
+    def adapter_known(self, host_id, adapter):
+        if self.execution.knows_adapter(adapter, host_id):
+            return True
+        return self.declared_row(host_id, adapter) is not None
+
+    def _catalog_defaults(self, e):
+        row = ADAPTER_CATALOG.get(e.get("adapter"))
+        if row:
+            return row
+        return self.declared_row(e.get("host_id"), e.get("adapter")) or {}
+
     def _route_priority(self, e):
         """Effective routing priority: operator's explicit installation.priority wins;
         otherwise what the host's connector declared for that adapter; otherwise
@@ -4710,15 +4754,16 @@ class Service:
         p = declared.get("priority")
         if p is not None:
             return int(p)
-        return int(ADAPTER_CATALOG.get(e.get("adapter"), {}).get("priority", 100))
+        p = self._catalog_defaults(e).get("priority")
+        return int(p) if p is not None else 100
 
     def _use_when(self, e):
         """Effective routing hint: operator's explicit installation.use_when wins;
-        otherwise what the host's connector declared; otherwise the catalog default.
-        Symmetric with _route_priority."""
+        otherwise what the host's connector declared; otherwise the catalog or
+        approved row. Symmetric with _route_priority."""
         return (e.get("use_when")
                 or (self.execution.host_declared(e.get("host_id"), e.get("adapter")) or {}).get("use_when")
-                or ADAPTER_CATALOG.get(e.get("adapter"), {}).get("use_when"))
+                or self._catalog_defaults(e).get("use_when"))
 
     def _stamp_workspace_key(self, inst):
         """Cache an installation's canonical workspace at register/config time (NOT in
@@ -4740,13 +4785,13 @@ class Service:
         changed = False
         for e in candidate.get("installations", []):
             # Leave a stored row whose adapter is unknown to its host untouched.
-            if not self.execution.knows_adapter(e.get("adapter"), e.get("host_id")):
+            if not self.adapter_known(e.get("host_id"), e.get("adapter")):
                 continue
             if not e.get("workspace_key") or e.get("workspace_cwd") != e.get("cwd", ""):
                 self._stamp_workspace_key(e)
                 changed = True
-        if changed and any(isinstance(e, dict) and not self.execution.knows_adapter(
-                e.get("adapter"), e.get("host_id")) for e in candidate.get("installations", [])):
+        if changed and any(isinstance(e, dict) and not self.adapter_known(e.get("host_id"), e.get("adapter"))
+                           for e in candidate.get("installations", [])):
             changed = False
         if changed:
             self.commit_managed_config(candidate)
@@ -4782,8 +4827,7 @@ class Service:
             iid = inst.get("id")
             if not isinstance(iid, str) or not iid:
                 continue
-            if iid in self.execution.unknown_adapters or not self.execution.knows_adapter(
-                    inst.get("adapter"), inst.get("host_id")):
+            if iid in self.execution.unknown_adapters or not self.adapter_known(inst.get("host_id"), inst.get("adapter")):
                 continue
             host = self.execution.hosts.get(inst.get("host_id"), {})
             if host.get("transport") == "connector":
@@ -4919,8 +4963,7 @@ class Service:
         return self._authorization_digest(inst["id"])
 
     def _grant_matches(self, inst):
-        if inst["id"] in self.execution.unknown_adapters or not self.execution.knows_adapter(
-                inst.get("adapter"), inst.get("host_id")):
+        if inst["id"] in self.execution.unknown_adapters or not self.adapter_known(inst.get("host_id"), inst.get("adapter")):
             return False
         live = self._captured_authorization_digest(inst)
         if not live:
@@ -5000,6 +5043,8 @@ class Service:
         adapters = set(ADAPTER_CATALOG)
         for declared in self.execution.declared_adapters.values():
             adapters.update(declared)
+        for host_rows in self.declared_map().values():
+            adapters.update(name for name in host_rows if isinstance(name, str))
         return {"installations": rows, "truncated": truncated, "parameters": schema,
                 "adapters": [{"adapter": name, "parameters": list(names)}
                              for name in sorted(adapters)]}
@@ -5026,8 +5071,7 @@ class Service:
             inst = self.execution.installations.get(body["installation_id"])
             if not inst:
                 raise Fault("installation_not_found", 404)
-            if inst["id"] in self.execution.unknown_adapters or not self.execution.knows_adapter(
-                    inst.get("adapter"), inst.get("host_id")):
+            if inst["id"] in self.execution.unknown_adapters or not self.adapter_known(inst.get("host_id"), inst.get("adapter")):
                 raise Fault("unknown_adapter")
             host = self.execution.hosts.get(inst["host_id"], {})
         else:
@@ -5036,7 +5080,7 @@ class Service:
                 raise Fault("connector_host_required")
             # A new installation may target an adapter the host declares even
             # when the cloud catalog never heard of it.
-            if not self.execution.knows_adapter(body.get("adapter"), body.get("host_id")):
+            if not self.adapter_known(body.get("host_id"), body.get("adapter")):
                 raise Fault("unknown_adapter")
         if inst is not None and "profile" in body:
             if installation_id(inst.get("adapter"), inst.get("host_id"), body.get("profile") or None) != inst["id"]:
@@ -5203,7 +5247,8 @@ class Service:
             candidate.setdefault("installations", []).extend(installations)
         # Validate by constructing an Execution over the candidate config; if any
         # generated record is malformed this raises before anything is staged.
-        self.commit_managed_config(candidate, Execution(candidate, self.data))
+        self.commit_managed_config(candidate, Execution(candidate, self.data,
+                                                        declared_adapters=self.execution.declared_adapters))
         for inst in installations:
             try:
                 self.probe(inst["id"])

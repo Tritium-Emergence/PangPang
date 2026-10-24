@@ -86,7 +86,8 @@ class Broker:
             except Fault as error:
                 if error.status != 404:
                     raise
-            durable = {"start", "cancel", "resolve_run", "configure", "credential_install", "credential_delete"}
+            durable = {"start", "cancel", "resolve_run", "configure", "credential_install",
+                       "credential_delete", "declare_adapter"}
             return self.store.put("command", {"id": identity, "host_id": host_id, "action": action,
                 "payload": payload, "status": "pending", "created": time.time(),
                 "expires": None if action in durable else time.time() + 120})
@@ -287,15 +288,26 @@ class Broker:
                 result = report["result"]
                 if not isinstance(result, dict):
                     raise Fault("invalid_command_report", 400)
-                if cmd["status"] == "done" and cmd.get("result") != result:
+                # discover and declare_adapter persist the checked projection.
+                # Comparing that projection keeps a lost ack from looking like a
+                # different result when the device repeats the raw report.
+                bounded = cmd["action"] in {"discover", "declare_adapter"}
+                if bounded and cmd["status"] == "done":
+                    projected = self.service.onboarding.report(cmd, result, apply=False)
+                    if cmd.get("result") != projected:
+                        raise Fault("command_result_conflict")
+                elif not bounded and cmd["status"] == "done" and cmd.get("result") != result:
                     # A superseded pending start may still have a late report only
                     # if the device had actually received it, which contradicts
                     # pending state and must be quarantined rather than overwritten.
                     raise Fault("command_result_conflict")
                 if cmd["status"] != "done":
+                    if bounded:
+                        result = self.service.onboarding.report(cmd, result, apply=True)
                     cmd.update(status="done", result=result)
                     self.store.put("command", cmd)
-                    self.service.onboarding.report(cmd, result)
+                    if not bounded:
+                        self.service.onboarding.report(cmd, result)
                     if cmd["action"] in {"start", "cancel", "resolve_run"} and result.get("error"):
                         rows = self.store.find("task", execution_id=cmd["payload"]["execution_id"], limit=1)
                         if rows and rows[0]["status"] not in TERMINAL:

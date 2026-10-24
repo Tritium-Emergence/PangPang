@@ -386,13 +386,15 @@ class Connector:
         try:
             if command.get("expires") and command["expires"] < time.time():
                 raise Fault("command_expired")
-            if action in {"discover", "configure", "credential_install", "credential_delete"}:
+            if action in {"discover", "configure", "credential_install", "credential_delete", "declare_adapter"}:
                 from .local_setup import LocalSetup
                 setup = LocalSetup(self)
                 if action == "discover":
                     result = setup.discover()
                 elif action == "configure":
                     result = setup.configure(body)
+                elif action == "declare_adapter":
+                    result = setup.declare_adapter(body)
                 else:
                     result = setup.credential(body, delete=action == "credential_delete")
             elif action == "start":
@@ -498,8 +500,9 @@ class Connector:
                 raise Fault("device_action_rejected")
         except Exception as error:
             result = {"error": error.code if isinstance(error, Fault) else "local_operation_failed"}
-            if (action in {"discover", "configure", "credential_install", "credential_delete"}
-                    and isinstance(error, Fault) and error.code == "invalid_adapter"
+            if (action in {"discover", "configure", "credential_install", "credential_delete", "declare_adapter"}
+                    and isinstance(error, Fault)
+                    and error.code in {"invalid_adapter", "invalid_adapter_declaration", "adapter_declaration_conflict"}
                     and isinstance(error.advice, str)):
                 folded = " ".join(error.advice.split())[:500]
                 if folded:

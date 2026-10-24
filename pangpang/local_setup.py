@@ -38,7 +38,8 @@ class LocalSetup:
         # Anyone who already has qwen/claude/codex never downloads it.
         if pinned_absent and not items and fetch_pinned_pi():
             items, _pinned_absent = inventory()
-        return {"inventory": items}
+        from .adapters_file import declared_rows
+        return {"inventory": items, "declared_adapters": declared_rows(self.c.data / "adapters.json")}
 
     def save(self, candidate):
         """Durable write first, then publish (G): validate by building the
@@ -123,6 +124,17 @@ class LocalSetup:
             reason = error.code if isinstance(error, Fault) else "probe_failed"
             probed = {"available": False, "reason": reason}
         return self.info(identity, probe_result=probed)
+
+    def declare_adapter(self, body):
+        """Merge one operator-approved row into this device's adapters file.
+
+        The row is stored as approved. This does not launch the binary and does
+        not rewrite argv.
+        """
+        self.idle()
+        from .adapters_file import declared_rows, write_merged_row
+        write_merged_row(self.c.data / "adapters.json", body.get("adapter"), body.get("row"))
+        return {"declared_adapters": declared_rows(self.c.data / "adapters.json")}
 
     def credential(self, body, delete=False):
         self.idle()

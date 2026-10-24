@@ -675,8 +675,10 @@ def execution_for_stored_candidate(candidate, stored_config, data, declared_adap
 
     Unknown-adapter rows identical to that document stay in the file and out of
     routing. A new or different unknown-adapter row is rejected with advice.
-    Direct Execution() still rejects every unknown adapter.
+    Direct Execution() still rejects every unknown adapter. A row the device
+    declared for that host is known and is not an unknown adapter.
     """
+    declared_adapters = declared_adapters or {}
     installations = candidate.get("installations") if isinstance(candidate, dict) else None
     if not isinstance(installations, list):
         return Execution(candidate, data, declared_adapters=declared_adapters)

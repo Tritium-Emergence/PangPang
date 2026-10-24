@@ -250,13 +250,24 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
   const [endpoint, setEndpoint] = useState('');
   const p = (req.proposal || {}) as Record<string, any>;
   const asksEndpoint = p.action === 'configure' || (p.action === 'executor_config' && !p.installation_id);
+  const declaring = p.action === 'declare_adapter';
   const host = store.snapshot!.hosts.find((h) => h.id === req.host_id);
+  const command = Array.isArray(p.command) ? p.command.map(String).join(' ') : '';
   return (
     <div className="mini mt-2 rounded-lg border border-line bg-raised p-3">
       <h3 className="font-medium">{req.status === 'needs_secret' ? t('setup.needsSecretTitle'): req.status === 'configuring' ? t('setup.configuringTitle'): t('setup.confirmSetupTitle')}</h3>
       <p className="text-sm text-muted">{host?.name || req.host_id}</p>
       {req.status === 'needs_approval' ? (
         <>
+          {declaring ? (
+            <>
+              <p className="text-sm">{t('setup.declareAdapterLine', {adapter: p.adapter})}</p>
+              <p className="text-xs text-warn">{t('setup.declareAdapterBoundary')}</p>
+              <p className="text-xs">{t('setup.commandLine', {command})}</p>
+              <pre className="mt-1 overflow-auto text-xs">{JSON.stringify(p.adapter_row, null, 2)}</pre>
+            </>
+          ) : (
+            <>
           <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli') : p.action === 'executor_config' ? t('setup.actionExecutorConfig') : t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
           <p className="text-xs">{t('setup.cwdLine', {cwd: p.cwd || t('setup.cwdDefault')})}</p>
           <p className="text-xs">{t('setup.authLine', {auth: p.auth === 'api_key' ? t('setup.authApiKey'): p.auth === 'existing' ? t('setup.authExisting'): p.auth || t('setup.authUnregistered')})}</p>
@@ -265,7 +276,9 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
             credential_ids: p.draft.secret_refs, command: p.command,
           })})}</p>: null}
           {p.uses_qwen ? <p className="text-xs">{t('setup.sharedQwen')}</p>: null}
-          {asksEndpoint ? (
+            </>
+          )}
+          {asksEndpoint && !declaring ? (
             <>
               <p className="mt-1 text-xs text-warn">{t('setup.securityBoundary')}</p>
               <label className="mt-1 block text-sm">{t('setup.apiEndpointOptional')}<input type="url" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1" /></label>
