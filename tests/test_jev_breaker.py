@@ -115,7 +115,7 @@ class JevBreakerTests(unittest.TestCase):
         self.assertTrue(self.gate.continuation_breaker_open)
         self.assertEqual(opener.calls, 4)
 
-    def test_sparse_451_traffic_reaches_deterministic_after_two_fallbacks(self):
+    def test_sparse_451_traffic_degrades_deterministically_from_the_first_failure(self):
         opener = _Opener([http_error()] * 30)
         qualities = []
         with patch("urllib.request.build_opener", return_value=opener):
@@ -123,9 +123,9 @@ class JevBreakerTests(unittest.TestCase):
                 self.gate._continuation_open_until = time.monotonic() - 1
                 routing = self.app.resolve_continuation("bot-main", {"text": "继续旧项目"})
                 qualities.append(routing["route_quality"])
-        self.assertEqual(qualities, ["fallback", "fallback",
-                                     "deterministic", "deterministic",
-                                     "deterministic", "deterministic"])
+        # A failed classification is an outage, not an attribution dispute:
+        # every message routes as deterministic fresh Work — never gated.
+        self.assertEqual(qualities, ["deterministic"] * 6)
 
     def test_breaker_open_routes_deterministic_fresh_work(self):
         self.gate._continuation_open_until = time.monotonic() + 30
@@ -136,21 +136,27 @@ class JevBreakerTests(unittest.TestCase):
         self.assertEqual(routing["route_source"], "degraded_new")
         self.assertEqual(routing["route_quality"], "deterministic")
 
-    def test_single_failure_before_threshold_keeps_fallback(self):
+    def test_single_failure_before_threshold_degrades_to_deterministic_new_work(self):
         opener = _Opener([http_error()])
         self.assertIsNone(self._drive(opener))
         self.assertFalse(self.gate.continuation_breaker_open)
         with patch("urllib.request.build_opener", return_value=_Opener([http_error()])):
             routing = self.app.resolve_continuation("bot-main", {"text": "继续旧项目"})
-        self.assertEqual(routing["route_quality"], "fallback")
+        # A failure is an outage: degrade to the same deterministic fresh Work
+        # the open breaker uses instead of freezing consequential tools.
+        self.assertEqual(routing["route_source"], "degraded_new")
+        self.assertEqual(routing["route_quality"], "deterministic")
+        self.assertIsNone(routing["work_id"])
 
-    def test_content_error_keeps_weak_fallback_not_degraded(self):
+    def test_content_error_degrades_to_deterministic_new_work(self):
         self.assertIsNone(self._drive(_Opener([ValueError("schema drift")])))
         self.assertFalse(self.gate.continuation_breaker_open)
         with patch("urllib.request.build_opener", return_value=_Opener([ValueError("schema drift")])):
             routing = self.app.resolve_continuation("bot-main", {"text": "继续旧项目"})
-        self.assertEqual(routing["route_quality"], "fallback")
-        self.assertNotEqual(routing.get("route_source"), "degraded_new")
+        # Schema drift is a broken classifier, not an attribution dispute —
+        # the weak `fallback` it used to produce was a permanent freeze.
+        self.assertEqual(routing["route_source"], "degraded_new")
+        self.assertEqual(routing["route_quality"], "deterministic")
 
     def test_breaker_open_does_not_bypass_precommit_judge(self):
         from pangpang.semantic_gate import GateUnavailable

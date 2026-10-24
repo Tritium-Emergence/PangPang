@@ -77,13 +77,16 @@ class WorkContinuityV3Tests(unittest.TestCase):
         # And a consequential tool is NOT gated: the turn carries a trusted route.
         self.assertNotEqual(routing["route_quality"], "fallback")
 
-    def test_gate_failure_falls_back_to_valid_hint_and_invalid_hint_is_not_authority(self):
+    def test_gate_failure_degrades_to_fresh_work_and_invalid_hint_is_not_authority(self):
         first = self.app.send("bot-main", {"text": "阿里股价"}, "fb-a")
         self.app.semantic_gate.classify_continuation = lambda *a, **k: None
         valid = self.app.resolve_continuation("bot-main", {
             "text": "继续", "work_hint_id": first["work_id"], "stream_id": "stream-fb"})
-        self.assertEqual(valid["work_id"], first["work_id"])
-        self.assertEqual(valid["route_quality"], "fallback")
+        # A failed classifier is an outage, not an attribution dispute:
+        # deterministic fresh Work, not a mutation freeze on the hinted Work.
+        self.assertIsNone(valid["work_id"])
+        self.assertEqual(valid["route_source"], "degraded_new")
+        self.assertEqual(valid["route_quality"], "deterministic")
 
         invalid = self.app.resolve_continuation("bot-main", {
             "text": "继续", "work_hint_id": "work-does-not-exist", "stream_id": "stream-fb"})

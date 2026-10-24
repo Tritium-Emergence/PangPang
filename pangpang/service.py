@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ from .execution import (Execution, ADAPTER_CATALOG, artifact_bytes, binary_match
                        validate_extra_argv, validate_staged_executor, write_pi_provider_config,
                        _PI_BASE_URL_ENV)
 from .broker import Broker, global_profile
-from .store import Fault, Store, digest, encode, uid, os_family
+from .store import Fault, Store, digest, encode, uid
 from .vault import secure_directory
 from .logs import get_logger
 from .env_compat import env_value
@@ -157,7 +158,6 @@ ROUTE_ERROR = {
     "connector_offline": "executor_host_offline",
     "installation_disabled": "executor_disabled",
     "control_only_no_local_executor": "requested_executor_not_available",
-    "host_os_unverified": "requested_executor_not_available",
     # SSH is retired as an execution transport. The business code tells the
     # planner the task did not move to local or Connector.
     "ssh_transport_retired": "ssh_executor_retired",
@@ -165,12 +165,6 @@ ROUTE_ERROR = {
     # being guessed. The business code is the existing routing constraint.
     "work_directory_held": "work_routing_constraint",
 }
-
-# An ssh host with an unknown/blank OS is rejected at route/start/config: windows()
-# would silently treat it as POSIX and build the wrong command / path checks. OS is
-# classified by EXACT token via store.os_family — never a prefix, so
-# "linuxXYZ"/"windows-evil" do not pass. connector devices construct commands locally,
-# so they are exempt from the ssh gate.
 
 
 def text(value, limit=16000):
@@ -384,6 +378,21 @@ def next_run(schedule, timezone, after):
 _STARTUP_CONFIG_KEYS = ("turn_budget", "semantic_gate")
 
 
+def _declared_from_store(store, config):
+    """Host-scoped adapter declarations persisted by broker.sync (device facts)."""
+    declared = {}
+    for host in config.get("hosts", []):
+        if host.get("transport") != "connector":
+            continue
+        try:
+            device = store.get("device", host["id"])
+        except Fault:
+            continue
+        if device.get("declared_adapters"):
+            declared[host["id"]] = device["declared_adapters"]
+    return declared
+
+
 def _take_startup_overrides(live, file_config):
     """Copy turn_budget and semantic_gate from the startup config onto live
     settings. Returns (replacements, other_keys_differ). Each replacement is
@@ -488,7 +497,8 @@ class Service:
         # A stored document may name an adapter the catalog no longer has.
         # The file passed on a first start is still rejected.
         self.execution = Execution(self.config, self.data,
-                                   tolerate_unknown_adapters=self.config_revision != 0)
+                                   tolerate_unknown_adapters=self.config_revision != 0,
+                                   declared_adapters=_declared_from_store(self.store, self.config))
         self.execution.deployment_level = self.deployment_level
         self.onboarding = Onboarding(self)
         profile = global_profile(self.config)
@@ -1846,8 +1856,9 @@ class Service:
         # pre-commit tool gate's mode. Switching it off is a deterministic
         # NEW-work mode, not a provider outage, so execution rights on that
         # fresh work are not weakened. No key uses the local model instead of
-        # Jev. Only a configured-but-failing Jev yields the weak `fallback`
-        # route below.
+        # Jev. A configured-but-failing Jev degrades below to the same
+        # deterministic fresh Work as the open breaker; the weak `fallback`
+        # quality remains only for verdicts that contradict the UI hint.
         route_source = "jev"
         if routing_on and gate is not None and getattr(gate, "continuation_configured", False):
             if getattr(gate, "continuation_breaker_open", False):
@@ -1863,10 +1874,14 @@ class Service:
             except Exception:
                 log.exception("continuation resolve failed; using bounded fallback")
             if not verdict:
-                if getattr(gate, "continuation_breaker_open", False):
-                    return dict(base, work_id=None, route_source="degraded_new",
-                                route_quality="deterministic")
-                return base
+                # A failed classification is a provider outage, not an
+                # attribution dispute. Degrade to the same deterministic
+                # fresh Work the open breaker uses: gating consequential
+                # tools on classifier health (the old `fallback` for the
+                # first failures) froze live turns while promising nothing
+                # the downstream approval/auth checks do not enforce.
+                return dict(base, work_id=None, route_source="degraded_new",
+                            route_quality="deterministic")
         elif routing_on:
             # Keyless fallback (1.0): route with the user's own configured model.
             # This branch does not require a SemanticGate object. A missing Jev
@@ -3226,29 +3241,75 @@ class Service:
 
     def _execution_for_candidate(self, candidate):
         """Validate a managed-config candidate. See execution_for_stored_candidate."""
-        return execution_for_stored_candidate(candidate, self.config, self.data)
+        return execution_for_stored_candidate(candidate, self.config, self.data,
+                                              declared_adapters=self.execution.declared_adapters)
+
+    def auto_register_adapters(self, host_id, declared):
+        """Declaration is the operator's human act: they wrote adapters.json on their
+        own machine and the connector reports it, so the cloud registers the row
+        without a second confirmation. The row never carries a command — argv stays
+        device-side — and the first task on it still passes human consent and the
+        supervision admission. Returns the new installation ids."""
+        host = self.execution.hosts.get(host_id, {})
+        if host.get("transport") != "connector" or not declared:
+            return []
+        roots = host.get("allowed_roots") or []
+        if not roots:
+            return []
+        with self.store.atomic():
+            candidate = copy.deepcopy(self.config)
+            rows = candidate.setdefault("installations", [])
+            known = {row.get("id") for row in rows}
+            added = []
+            for name in sorted(declared):
+                iid = installation_id(name, host_id)
+                if iid in known:
+                    continue
+                rows.append({"id": iid, "host_id": host_id, "adapter": name, "cwd": roots[0],
+                             "argv": ["device-owned-command"], "enabled": True, "risk": "write",
+                             "enforces_read_only": False, "resource_keys": [], "prompt_mode": "stdin",
+                             "endpoint": "",
+                             "max_concurrency": min(int(declared[name].get("concurrency", 1)), 16)})
+                known.add(iid)
+                added.append(iid)
+            if not added:
+                return []
+            self.commit_managed_config(candidate)
+        for iid in added:
+            threading.Thread(target=self._auto_probe_installation, args=(iid,), daemon=True,
+                             name="auto-probe-" + iid).start()
+        return added
+
+    def _auto_probe_installation(self, installation_id):
+        """Discovery evidence for an auto-registered row, on the existing device
+        probe command. Runs off the sync thread because broker.request must not
+        wait inside the very sync that would deliver its command. A row that never
+        gets a probe stays not_discovered and is recoverable by an explicit probe."""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                if self.probe(installation_id).get("available"):
+                    return
+            except Exception:
+                pass
+            time.sleep(1.0)
 
     def set_host_execution_level(self, host_id, body):
         """Operator-only: declare the isolation level that governs a CONNECTOR
         device's supervision admission. Server-authored and operator-
         authenticated (http do_POST authenticate(mutation=True)) — a device
-        self-report can never reach here, so a paired device cannot grant itself
-        the L0 cooperative tiers. 'L0' lets the connector's device-proven
-        cooperative labels (linux-cgroup-cooperative, or posix-pgroup-cooperative
-        which the device only reports after its OWN operator records consent) pass
-        route/admission without this coordinator being started --deployment-level
-        L0. 'L1'/'L2' override the inherited level the other way — keeping only
-        strong supervision (windows-job-object) eligible on that device. An explicit
-        null CLEARS the override so the connector again INHERITS the coordinator's
-        --deployment-level. The 'level' key is REQUIRED: an empty or typo'd body must
-        never silently clear a stricter L1/L2 override and drop the device back to the
-        inherited (possibly L0) level — clearing is only ever a deliberate
-        {"level": null} (fail-closed). Not for local/ssh: those stay governed by
-        the coordinator's --deployment-level."""
+        self-report can never reach here. 'L0' (the default stamped at pairing)
+        lets the connector's device-proven cooperative labels
+        (linux-cgroup-cooperative, or posix-pgroup-cooperative which the device
+        only reports after its OWN operator records consent) pass route/admission.
+        'L1'/'L2' tighten the device to strong supervision (windows-job-object)
+        only. The level is always explicit — there is no inherit/clear state.
+        Not for local/ssh: those stay governed by the coordinator's
+        --deployment-level."""
         if "level" not in body:
             raise Fault("execution_level_required", 400)
         level = body["level"]
-        if level not in (None, "L0", "L1", "L2"):
+        if level not in ("L0", "L1", "L2"):
             raise Fault("invalid_execution_level", 400)
         candidate, revision = self.managed_snapshot()
         hosts = candidate.get("hosts", [])
@@ -3259,10 +3320,7 @@ class Service:
             # local/ssh isolation is the coordinator's --deployment-level, not a
             # per-host field; refuse so the two paths never diverge silently.
             raise Fault("execution_level_connector_only", 400)
-        if level is None:
-            target.pop("execution_level", None)
-        else:
-            target["execution_level"] = level
+        target["execution_level"] = level
         self.commit_managed_config(candidate, base_revision=revision)
         return {"host_id": host_id, "execution_level": level}
 
@@ -3362,11 +3420,11 @@ class Service:
             hosts.append(self.execution.hosts.get(host_id) or {})
         if hosts and all(host.get("transport") == "connector" for host in hosts):
             return ("set_host_execution_level",
-                    "这台连接器设备在线且已就绪，但未开启执行等级，所以协作监管档未入选。"
-                    "在云端用已认证的操作员身份为该设备设 execution_level=L0"
-                    "（POST /api/v1/hosts/{host_id}/execution-level，{\"level\":\"L0\"}），"
-                    "只放行这一台设备，不必改动整个云端的部署等级。若该设备用进程组档"
-                    "（posix-pgroup-cooperative，macOS/无 cgroup 的 Linux），先停止该设备上的服务，"
+                    "这台连接器设备在线且已就绪，但它的执行等级不允许协作监管档。"
+                    "新配对的设备默认 execution_level=L0；若被调低过，在云端设备页把该设备设回 "
+                    "execution_level=L0（POST /api/v1/hosts/{host_id}/execution-level，{\"level\":\"L0\"}），"
+                    "只影响这一台设备。若等级已是 L0 仍被拒，说明该设备还没记录进程组同意"
+                    "（posix-pgroup-cooperative，macOS/无 cgroup 的 Linux）：先停止该设备上的服务，"
                     "再在设备本机交互执行 python -m pangpang.consent accept --data <data>，"
                     "输入当前风险版本确认；然后重启服务，并对该主机的执行器重新探测。"
                     "进程组同意不是操作系统隔离。见 SECURITY.md。")
@@ -3775,7 +3833,7 @@ class Service:
         orchestrates, the executor does the heavy history/filesystem digging in its own
         context. Returns the handoff task id, or None if not eligible / not dispatched.
 
-        Deliberately minimal (Occam): ONLY top-level user-query turns, one hop only,
+        Deliberately minimal: ONLY top-level user-query turns, one hop only,
         idempotent per turn. Anything else (peer obligation, delegated child, already
         handed off, semantic-barred) falls through to normal fail settlement + a
         'not finished' UI card. A fresh budget must NEVER mean fresh authority.
@@ -4072,11 +4130,20 @@ class Service:
                 ids = "、".join(sorted(c["installation_id"] for c in matched))
                 return None, {"code": "ambiguous_executor", "advice": (
                     "原目录上有多个权限不同的执行器，不能按优先级挑选：%s。请指定 installation_id。" % ids)}
-        elif len(same_host) == 1:
-            return same_host[0], None
-        elif len(same_host) > 1:
+        elif same_host:
+            scopes = {self._route_scope(self.execution.installations[c["installation_id"]]) for c in same_host}
+            if len(scopes) == 1:
+                # Authority-equivalent installations on the prior host with an
+                # unknown directory: same directory, credentials and rights, so
+                # priority may pick. Refusing here was a dead-end, not safety.
+                same_host.sort(key=lambda c: (
+                    self._route_priority(self.execution.installations[c["installation_id"]]),
+                    c["installation_id"]))
+                if inst_id in by_id and inst_id in {c["installation_id"] for c in same_host}:
+                    return by_id[inst_id], None
+                return same_host[0], None
             return None, {"code": "ambiguous_executor", "advice": (
-                "原目录不明，同设备上有多个执行器，不能按优先级猜测。请指定 installation_id。")}
+                "原目录不明，同设备上有多个权限不同的执行器，不能按优先级猜测。请指定 installation_id。")}
         offline = any(r.get("host_id") == host_id and r.get("reason") == "connector_offline" for r in rejected)
         if offline:
             return None, {"code": "executor_host_offline", "advice": (
@@ -4098,13 +4165,7 @@ class Service:
             # cannot be masked by a later reason.
             if self.control_only and self.execution.hosts.get(e["host_id"], {}).get("transport") == "local":
                 reason = "control_only_no_local_executor"
-            # an ssh host with an unknown/blank OS is rejected — we cannot know
-            # its path case semantics or how to build its remote command (windows()
-            # would silently treat it as POSIX). connector devices build commands
-            # locally, so they are exempt.
             _h = self.execution.hosts.get(e["host_id"], {})
-            if _h.get("transport") == "ssh" and os_family(_h.get("os")) is None:
-                reason = "host_os_unverified"
             if work.get("required_host_id") and e["host_id"] != work["required_host_id"]:
                 reason = "user_host_constraint"
             if work.get("required_installation_id") and e["id"] != work["required_installation_id"]:
@@ -4227,6 +4288,13 @@ class Service:
                     "SSH 执行器已退役，不会改派到本机或 Connector。"
                     "未终结的 SSH 任务不自动重跑，也不复制目录；"
                     "只能用真实终态回执或操作员证据收口。"))
+            if code == "executor_cleanup_unsupported":
+                # the bare code is a dead end — attach the already-computed
+                # remediation so the model (and the UI) can tell the
+                # user exactly where and what to do, not just that cleanup
+                # supervision failed.
+                _, hint = self._supervision_unverified_action(rejected)
+                raise Fault(code, advice=hint)
             raise Fault(code)
         selected = route["selected"]
         e = self.execution.installations[selected["installation_id"]]
@@ -4633,14 +4701,24 @@ class Service:
 
     def _route_priority(self, e):
         """Effective routing priority: operator's explicit installation.priority wins;
-        otherwise the catalog default by adapter; otherwise 100 (lower = preferred)."""
+        otherwise what the host's connector declared for that adapter; otherwise
+        the catalog default by adapter; otherwise 100 (lower = preferred)."""
         p = e.get("priority")
-        return int(p) if p is not None else ADAPTER_CATALOG.get(e.get("adapter"), {}).get("priority", 100)
+        if p is not None:
+            return int(p)
+        declared = self.execution.host_declared(e.get("host_id"), e.get("adapter")) or {}
+        p = declared.get("priority")
+        if p is not None:
+            return int(p)
+        return int(ADAPTER_CATALOG.get(e.get("adapter"), {}).get("priority", 100))
 
     def _use_when(self, e):
         """Effective routing hint: operator's explicit installation.use_when wins;
-        otherwise the catalog default by adapter. Symmetric with _route_priority."""
-        return e.get("use_when") or ADAPTER_CATALOG.get(e.get("adapter"), {}).get("use_when")
+        otherwise what the host's connector declared; otherwise the catalog default.
+        Symmetric with _route_priority."""
+        return (e.get("use_when")
+                or (self.execution.host_declared(e.get("host_id"), e.get("adapter")) or {}).get("use_when")
+                or ADAPTER_CATALOG.get(e.get("adapter"), {}).get("use_when"))
 
     def _stamp_workspace_key(self, inst):
         """Cache an installation's canonical workspace at register/config time (NOT in
@@ -4661,14 +4739,14 @@ class Service:
         candidate = copy.deepcopy(self.config)
         changed = False
         for e in candidate.get("installations", []):
-            # Leave a stored row whose adapter is outside the catalog untouched.
-            if e.get("adapter") not in ADAPTER_CATALOG:
+            # Leave a stored row whose adapter is unknown to its host untouched.
+            if not self.execution.knows_adapter(e.get("adapter"), e.get("host_id")):
                 continue
             if not e.get("workspace_key") or e.get("workspace_cwd") != e.get("cwd", ""):
                 self._stamp_workspace_key(e)
                 changed = True
-        if changed and any(isinstance(e, dict) and e.get("adapter") not in ADAPTER_CATALOG
-                           for e in candidate.get("installations", [])):
+        if changed and any(isinstance(e, dict) and not self.execution.knows_adapter(
+                e.get("adapter"), e.get("host_id")) for e in candidate.get("installations", [])):
             changed = False
         if changed:
             self.commit_managed_config(candidate)
@@ -4704,7 +4782,8 @@ class Service:
             iid = inst.get("id")
             if not isinstance(iid, str) or not iid:
                 continue
-            if iid in self.execution.unknown_adapters or inst.get("adapter") not in ADAPTER_CATALOG:
+            if iid in self.execution.unknown_adapters or not self.execution.knows_adapter(
+                    inst.get("adapter"), inst.get("host_id")):
                 continue
             host = self.execution.hosts.get(inst.get("host_id"), {})
             if host.get("transport") == "connector":
@@ -4840,7 +4919,8 @@ class Service:
         return self._authorization_digest(inst["id"])
 
     def _grant_matches(self, inst):
-        if inst["id"] in self.execution.unknown_adapters or inst.get("adapter") not in ADAPTER_CATALOG:
+        if inst["id"] in self.execution.unknown_adapters or not self.execution.knows_adapter(
+                inst.get("adapter"), inst.get("host_id")):
             return False
         live = self._captured_authorization_digest(inst)
         if not live:
@@ -4917,9 +4997,12 @@ class Service:
             })
         schema = executor_parameter_schema()
         names = [item["name"] for item in schema]
+        adapters = set(ADAPTER_CATALOG)
+        for declared in self.execution.declared_adapters.values():
+            adapters.update(declared)
         return {"installations": rows, "truncated": truncated, "parameters": schema,
                 "adapters": [{"adapter": name, "parameters": list(names)}
-                             for name in sorted(ADAPTER_CATALOG)]}
+                             for name in sorted(adapters)]}
 
     def propose_executor(self, bot_id, work_id, body):
         """Route and narrow directly. Execution-widening changes stay a setup request.
@@ -4943,14 +5026,17 @@ class Service:
             inst = self.execution.installations.get(body["installation_id"])
             if not inst:
                 raise Fault("installation_not_found", 404)
-            if inst["id"] in self.execution.unknown_adapters or inst.get("adapter") not in ADAPTER_CATALOG:
+            if inst["id"] in self.execution.unknown_adapters or not self.execution.knows_adapter(
+                    inst.get("adapter"), inst.get("host_id")):
                 raise Fault("unknown_adapter")
             host = self.execution.hosts.get(inst["host_id"], {})
         else:
             host = self.execution.hosts.get(body.get("host_id"), {})
             if host.get("transport") not in ("local", "connector"):
                 raise Fault("connector_host_required")
-            if body.get("adapter") not in ADAPTER_CATALOG:
+            # A new installation may target an adapter the host declares even
+            # when the cloud catalog never heard of it.
+            if not self.execution.knows_adapter(body.get("adapter"), body.get("host_id")):
                 raise Fault("unknown_adapter")
         if inst is not None and "profile" in body:
             if installation_id(inst.get("adapter"), inst.get("host_id"), body.get("profile") or None) != inst["id"]:
@@ -5972,21 +6058,18 @@ class Service:
     def _host_execution_level(self, host_id):
         """The isolation level that governs supervision admission for a host.
 
-        A connector carries an optional server-authored host.execution_level the
-        operator set on this device (a device self-report can never write it).
-        When set it OVERRIDES the coordinator's level (device-scoped L0 /
-        L1 / L2); when absent the connector INHERITS the coordinator's
-        --deployment-level (the previous contract: an explicit --deployment-level L0
-        on the cloud already admitted its connectors). local/ssh always use the
-        coordinator's level. None means the L0 cooperative tiers are not admitted on
-        their own (fail-closed).: a control-only+origin cloud is deployment_level
-        =None, so a specific connector can be opened with execution_level=L0 without
-        dropping the whole cloud to L0 (which would also admit local/ssh cooperative).
-        A connector's pgroup tier still needs device-side operator consent (the device
-        only reports posix-pgroup-cooperative after it) — double confirmation."""
+        A connector is ALWAYS governed by its own server-authored
+        host.execution_level — the silent inheritance of the cloud's
+        deployment_level was a dead end on a control-only+origin cloud, where
+        deployment_level is None. New pairings stamp L0 explicitly; legacy rows
+        without the key read as L0 here. A device self-report can never write this
+        field. local/ssh stay governed by the coordinator's --deployment-level.
+        L0 alone admits nothing on its own: the cooperative labels only reach a
+        probe after the device's OWN operator records consent (consent.py), so the
+        human risk-decision remains on the device — never on the cloud."""
         host = self.execution.hosts.get(host_id, {})
-        if host.get("transport") == "connector" and host.get("execution_level") is not None:
-            return host["execution_level"]
+        if host.get("transport") == "connector":
+            return host.get("execution_level") or "L0"
         return self.deployment_level
 
     _SSH_UNFINISHED = ("queued", "awaiting_approval", "starting", "running",

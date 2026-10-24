@@ -4,7 +4,7 @@ import {useTranslation} from 'react-i18next';
 import type {Store} from '../store';
 import {api} from '../api';
 import {SettingsDialog} from './Setup';
-import {clock, dateTime} from '../display';
+import {clock, dateTime, friendlyError} from '../display';
 import {executionFactsFor, installationSetupTone} from '../pure';
 
 // Hosts view (#hosts-view): devices + their executors, the global-model settings
@@ -57,6 +57,15 @@ export function HostsView({store}: {store: Store}) {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={`device-status text-xs ${device?.online || h.transport === 'local' ? 'text-good': 'text-muted'}`}>{statusText}{device?.last_seen ? <span title={dateTime(device.last_seen)}> · {t('hosts.asOf', {time: clock(device.last_seen)})}</span>: null}</span>
+                  {h.transport === 'connector' ? (
+                    <label className="flex items-center gap-1 text-xs text-muted" title={t('hosts.executionLevelHint')}>
+                      {t('hosts.executionLevel')}
+                      <select className="rounded-lg border border-line bg-raised px-1.5 py-1 text-xs" defaultValue={h.execution_level || 'L0'} onChange={async (e) => {
+                        try { await api(`hosts/${h.id}/execution-level`, {level: e.target.value}); await store.refresh(); }
+                        catch (err: any) { store.setNotice(friendlyError(err)); }
+                      }}>{['L0', 'L1', 'L2'].map((lv) => <option key={lv} value={lv}>{lv}</option>)}</select>
+                    </label>
+): null}
                   {h.transport === 'connector' && !device?.revoked ? (
                     <button className="rounded-lg border border-line px-2 py-1 text-xs" onClick={async () => {
                       if (!confirm(t('hosts.revokeConfirm'))) return;

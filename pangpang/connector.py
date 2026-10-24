@@ -156,7 +156,13 @@ class Connector:
         except Fault as error:
             if error.status != 404:
                 raise
-        merge_custom_adapters(self.data / "adapters.json")
+        from .execution import ADAPTER_CATALOG
+        declared = merge_custom_adapters(self.data / "adapters.json")
+        # Routing projection for the cloud: which operator rows this host runs,
+        # as name + hints only. Command truth (argv, binary, env) stays device-side.
+        self.declared_adapters = {name: {key: ADAPTER_CATALOG[name][key]
+                                         for key in ("concurrency", "priority", "use_when")}
+                                  for name in declared}
         self.host_id = config["host_id"]
         hosts = config.get("hosts", [])
         if len(hosts) != 1 or hosts[0]["id"] != self.host_id or hosts[0].get("transport") != "local":
@@ -573,7 +579,8 @@ A run that has ALREADY been reported/acknowledged is IMMUTABLE — the
         from .store import CONTRACT_VERSION
         response = self.request({"version": __version__, "instance_id": self.instance_id,
                                  "supported_contract_version": CONTRACT_VERSION,
-                                 "reports": reports, "receipts": receipts})
+                                 "reports": reports, "receipts": receipts,
+                                 "declared_adapters": self.declared_adapters})
         for identity in response.get("ack", []):
             record = self.store.get("local_command", identity)
             record["status"] = "acknowledged"

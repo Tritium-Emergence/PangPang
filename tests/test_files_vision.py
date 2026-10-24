@@ -233,13 +233,15 @@ class VisionSetupTests(unittest.TestCase):
         finally:
             endpoint.close()
 
-    def test_an_endpoint_that_rejects_images_is_not_saved_as_vision(self):
+    def test_an_endpoint_that_rejects_images_is_saved_without_vision(self):
         endpoint = Endpoint(lambda p, n: 400 if "image_url" in json.dumps(p)
                             else call("setup_probe", value="pangpang-ready") if n == 1 else {"content": "ready"})
         try:
-            with self.assertRaises(Fault) as cm:
-                self.app.onboarding.model({"endpoint": endpoint.url, "model": "test", "no_auth": True, "vision": True})
-            self.assertEqual(cm.exception.code, "model_vision_unverified")
+            # Vision is optional: the usable text model saves, vision stays off,
+            # and the response honestly reports the unverified capability.
+            result = self.app.onboarding.model({"endpoint": endpoint.url, "model": "test", "no_auth": True, "vision": True})
+            self.assertTrue(result["configured"])
+            self.assertTrue(result["vision_unverified"])
             self.assertFalse(self.app.onboarding.status()["model"]["vision"])
         finally:
             endpoint.close()

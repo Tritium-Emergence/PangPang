@@ -46,6 +46,8 @@ class SetupTests(unittest.TestCase):
         c,body,pair=self.device()
         try:
             self.assertEqual(self.app.onboarding.pair(body),pair)
+            # Pairing stamps an explicit execution_level — no silent None.
+            self.assertEqual(self.app.execution.hosts[pair["host_id"]]["execution_level"],"L0")
             self.assertEqual(self.app.broker.authenticate(pair["host_id"],"Bearer "+pair["token"]),pair["host_id"])
             with self.assertRaises(Fault):self.app.onboarding.pair(dict(body,instance_id=uid("device")))
             self.app.broker.revoke(pair["host_id"])

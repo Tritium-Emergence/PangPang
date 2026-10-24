@@ -314,7 +314,8 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
       {note ? <p className="mt-1 text-xs" data-testid="operator-resolve-note"><span className="font-medium text-warn">{tr('workpane.operatorResolveNoteLabel')}</span><span className="mt-0.5 block whitespace-pre-wrap text-muted">{note}</span></p> : null}
       <details className="mt-2"><summary className="cursor-pointer text-xs text-brand">{tr('workpane.viewTaskAndLogs')}</summary><Value value={{id: t.id, route: t.route, inputs: t.inputs, outputs: t.outputs, receipt: t.receipt, error: t.error}} /></details>
       {t.status === 'unknown' ? <p className="mt-1 text-xs text-warn">{tr('workpane.workspaceIsolatedFull')}</p>: null}
-      {t.error ? <p className="mt-1 text-xs text-warn">{t.error}</p>: null}
+      {t.error ? <p className="mt-1 text-xs text-warn">{friendlyError(t.error, tr)}</p>: null}
+      {t.error === 'executor_cleanup_unsupported' ? <SupervisionFix task={t} store={store} />: null}
       <RunPreview task={t} />
       <div className="mt-2 flex flex-wrap gap-2">
         {t.status === 'awaiting_approval' ? <ApprovalButtons task={t} store={store} single={tr('workpane.approveExecution')} /> : null}
@@ -323,6 +324,35 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
         {t.status === 'unknown' ? <RecoveryActions task={t} store={store} />: null}
         {['failed', 'cancelled'].includes(t.status) ? <Act label={tr('workpane.retry')} run={() => api(`tasks/${t.id}/retry`, {})} store={store} />: null}
       </div>
+    </div>
+);
+}
+
+// Supervision rejection used to be a dead end — the code alone
+// told the user nothing about where or what. This panel is the "where and what":
+// per-device level fix (connector only; local/ssh follow the coordinator flag)
+// plus the device-side consent command (the cloud can never record it for you).
+function SupervisionFix({task, store}: {task: Task; store: Store}) {
+  const {t: tr} = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const host = (store.snapshot!.hosts || []).find((h) => h.id === task.host_id);
+  const level = host?.execution_level || 'L0';
+  const consentCommand = 'python -m pangpang.consent accept --data <connector data dir>';
+  return (
+    <div className="mt-2 rounded-lg border border-line bg-surface p-3 text-xs" data-testid="supervision-fix">
+      <p className="font-medium text-warn">{tr('workpane.supervisionWhy')}</p>
+      {host?.transport === 'connector' && level !== 'L0' ? (
+        <div className="mt-2">
+          <p className="text-muted">{tr('workpane.supervisionLevelHint', {level})}</p>
+          <div className="mt-1"><Act label={tr('workpane.supervisionEnableL0')} store={store} run={() => api(`hosts/${task.host_id}/execution-level`, {level: 'L0'})} /></div>
+        </div>
+): null}
+      <p className="mt-2 text-muted">{tr('workpane.supervisionConsentHint')}</p>
+      <div className="mt-1 flex items-center gap-2">
+        <code className="rounded border border-line bg-raised px-1.5 py-0.5">{consentCommand}</code>
+        <button className="text-brand" onClick={() => { navigator.clipboard?.writeText(consentCommand).then(() => setCopied(true), () => {}); }}>{copied ? tr('workpane.copied'): tr('workpane.copy')}</button>
+      </div>
+      <p className="mt-1 text-muted">{tr('workpane.supervisionThenRetry')}</p>
     </div>
 );
 }

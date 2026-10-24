@@ -82,7 +82,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
       <form id="settings-form" onSubmit={async (e) => {
         e.preventDefault(); setSaving(true); setError(t('setup.validatingToolCalls'));
         const s = secret; setSecret('');
-        try { await api('setup/model', {endpoint, model: name, secret: s, no_auth: noAuth, vision, provider, api: protocol, reasoning_level: reasoning, thinking_format: format, thinking_budget_field: budgetField, thinking_budget: budget ? Number(budget): null, max_tokens_field: tokenField, output_tokens: outputTokens ? Number(outputTokens): null, context_window_tokens: provider === 'custom' && contextWindow ? Number(contextWindow): null, model_max_concurrency: concurrency ? Number(concurrency): null, keep_generation_settings: keepLegacy}); onClose(); await store.refresh(); }
+        try { const r = await api<any>('setup/model', {endpoint, model: name, secret: s, no_auth: noAuth, vision, provider, api: protocol, reasoning_level: reasoning, thinking_format: format, thinking_budget_field: budgetField, thinking_budget: budget ? Number(budget): null, max_tokens_field: tokenField, output_tokens: outputTokens ? Number(outputTokens): null, context_window_tokens: provider === 'custom' && contextWindow ? Number(contextWindow): null, model_max_concurrency: concurrency ? Number(concurrency): null, keep_generation_settings: keepLegacy}); onClose(); await store.refresh(); if (r?.vision_unverified) store.setNotice(t('setup.visionDisabled')); }
         catch (err: any) { setError(friendlyError(err) || t('setup.saveFailed')); } finally { setSaving(false); }
       }}>
         <h2 className="text-lg font-semibold">{t('setup.modelDialogTitle')}</h2>

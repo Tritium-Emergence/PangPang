@@ -1,9 +1,11 @@
 """Operator-owned adapter catalog extension: <data>/adapters.json.
 
 Custom rows join the built-in ADAPTER_CATALOG at the earliest startup point of
-each side (coordinator and connector read their OWN data directory; both sides
-must place the same file — argv stays operator-defined, never model-defined).
-Any violation fails closed at startup with the file, line and field named.
+each side (coordinator and connector read their OWN data directory — argv
+stays operator-defined, never model-defined). For a connector host this file
+is device-only: the connector reports a bounded routing projection over sync
+(validate_declared), so the cloud needs no copy. Any violation fails closed at
+startup with the file, line and field named.
 """
 import json
 import os
@@ -136,6 +138,60 @@ def load(path):
             _bad(path, line, name, "collides with a built-in adapter; built-in rows cannot be overridden")
         rows[name] = _clean_row(path, line, name, row)
     return rows
+
+
+DECLARED_ROW_KEYS = frozenset(("concurrency", "priority", "use_when"))
+
+
+def validate_declared(payload):
+    """Cloud-side check of a connector's declared_adapters wire projection.
+
+    A connector reports which operator-written adapters.json rows it runs so the
+    cloud need not hold a copy. Only routing metadata may cross: argv, binary and
+    env material stay device-side. The cloud re-validates everything — a device
+    report is not trusted for built-in collisions or name shape. Returns the
+    clean snapshot ({} is an explicit withdrawal) or None when the field is
+    absent (a legacy device, not an empty snapshot).
+    """
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or len(payload) > MAX_ROWS:
+        _declared_bad("an object of at most %d adapter names" % MAX_ROWS)
+    if len(json.dumps(payload, ensure_ascii=False)) > MAX_FILE_BYTES:
+        _declared_bad("at most %d bytes when encoded" % MAX_FILE_BYTES)
+    builtin = _builtin_names()
+    clean = {}
+    for name, row in payload.items():
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            _declared_bad("adapter name must match %s" % NAME.pattern, name)
+        if name in builtin:
+            _declared_bad("declared adapter collides with a built-in", name)
+        if not isinstance(row, dict) or set(row) - DECLARED_ROW_KEYS:
+            _declared_bad("only concurrency, priority and use_when may be declared", name)
+        out = {}
+        concurrency = row.get("concurrency")
+        if concurrency is not None:
+            if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 64:
+                _declared_bad("concurrency must be an integer between 1 and 64", name)
+            out["concurrency"] = concurrency
+        priority = row.get("priority")
+        if priority is not None:
+            if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 1000:
+                _declared_bad("priority must be an integer between 0 and 1000", name)
+            out["priority"] = priority
+        use_when = row.get("use_when")
+        if use_when is not None:
+            if not isinstance(use_when, str) or not use_when.strip() or len(use_when) > MAX_USE_WHEN_CHARS:
+                _declared_bad("use_when must be a non-empty string of at most %d characters"
+                              % MAX_USE_WHEN_CHARS, name)
+            out["use_when"] = use_when
+        clean[name] = out
+    return clean
+
+
+def _declared_bad(message, name=None):
+    raise Fault("invalid_declared_adapters", 400,
+                advice="declared_adapters: %s%s" % (str(name) + ": " if name is not None else "", message))
 
 
 def merge(path):

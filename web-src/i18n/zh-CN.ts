@@ -63,6 +63,7 @@ export default {
     invalid_output_tokens: '输出上限无效。未知模型最低 4096；过小会截断工具调用。',
     output_exceeds_context_window: '输出上限大于上下文窗口能容纳的长度（须为提示词留出空间）。32K 窗口请把输出上限降到模型实际接受的值，例如 8192。',
     invalid_context_window: '上下文窗口无效。须为整数，且不小于 5120，也不能超过该模型目录给出的窗口。',
+    executor_cleanup_unsupported: '这台设备当前的监督档位不允许这次执行（可靠停止未确认）。任务卡片下方有就地修复步骤。',
   },
   workpane: {
     prevPage: '上一页', nextPage: '下一页',
@@ -111,6 +112,12 @@ export default {
     activityUndeclared: '未声明必需文件',
     activityCapped: '日志可能已达上限',
     activityNone: '暂无可观测活动',
+    supervisionWhy: '这次执行被拒绝：该设备的监督档位不允许，启动后无法保证可靠停止子进程。',
+    supervisionLevelHint: '这台设备当前执行等级为 {{level}}，只允许强监管（Windows Job Object）。',
+    supervisionEnableL0: '把这台设备设为 L0（仅影响这台设备）',
+    supervisionConsentHint: '若执行等级已是 L0 仍被拒，说明设备还没记录进程组同意（macOS/无 cgroup 的 Linux）。请在该设备上：先停止连接器，交互执行下面命令并输入当前风险版本确认（云端不能替你记录），然后重启连接器：',
+    supervisionThenRetry: '完成后点「重新执行」。',
+    copy: '复制', copied: '已复制',
   },
   setup: {
     modelDialogTitle: '胖胖的全局对话模型',
@@ -137,6 +144,7 @@ export default {
     keyStorageHint: '密钥保存在云端加密凭据库，不进入聊天。',
     revokeConfirm: '删除已保存的模型 API 密钥？后续请求会阻塞，直到重新设置。',
     keyRevoked: '密钥已删除。后续请求会阻塞，直到重新设置；已发出的请求可能仍在进行。',
+    visionDisabled: '图片输入未通过验证：模型已保存，但视觉能力已关闭。如需图片输入，请确认端点支持图片后重新开启。',
     revokeFailed: '删除失败', revokeKey: '删除已保存密钥', cancel: '取消', validateAndSave: '验证并保存',
     connectModelTitle: '先给胖胖连接一个对话模型', connectModelDesc: '只需设置一次，主管和子 Bot 共用。',
     setupModel: '设置模型', needsSecretTitle: '需要安全输入密钥', configuringTitle: '设备正在处理设置',
@@ -172,6 +180,8 @@ export default {
     saveFailedPrefix: '保存失败：', configureExecutor: '配置执行器', concurrency: '并行数',
     timeoutSeconds: '超时（秒）', priority: '优先级', priorityPlaceholder: '默认', enabled: '启用',
     workingDir: '工作目录', useWhen: '用途说明', saveConfig: '保存配置',
+    executionLevel: '执行等级',
+    executionLevelHint: '只影响这台设备。L0 个人自用档：允许该设备自证的协作监管档（macOS/无 cgroup 的 Linux 还需在设备本机记录进程组同意）。L1/L2：只允许强监管（Windows Job Object）。',
   },
   chat: {
     botFallback: '胖胖', executorFallback: '执行器', emptyTitle: '先聊聊你想完成什么。',

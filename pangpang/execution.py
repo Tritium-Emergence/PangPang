@@ -641,8 +641,15 @@ def validate_staged_executor(adapter, host_id, staged):
         installation_id(adapter, host_id, staged["profile"])
 
 
-def unknown_adapter_advice(data, installation_id, adapter):
+def unknown_adapter_advice(data, installation_id, adapter, connector=False):
     """How to turn a stored installation back on when its adapter is not in the catalog."""
+    if connector:
+        # The device owns this host's catalog; the cloud copy is not the remedy.
+        text = ("installation %s adapter %s is not in the built-in catalog or in the adapters "
+                "this device declares; have the device add the adapter row to its own "
+                "adapters.json and restart its connector to re-enable it"
+                % (installation_id, adapter))
+        return " ".join(text.split())
     path = str(Path(data) / "adapters.json")
     text = ("installation %s adapter %s is not in the built-in catalog or %s; "
             "declare the adapter as a custom row in %s to re-enable it"
@@ -650,7 +657,20 @@ def unknown_adapter_advice(data, installation_id, adapter):
     return " ".join(str(text).split())
 
 
-def execution_for_stored_candidate(candidate, stored_config, data):
+def declared_for_host(declared_adapters, host_id):
+    return (declared_adapters or {}).get(host_id) or {}
+
+
+def known_adapter(adapter, host_id, declared_adapters):
+    """Membership for one host: built-in (and locally merged) catalog ∪ the
+    adapter rows that this host's connector declared. Non-connector hosts
+    never carry a declaration, so their membership is the catalog alone."""
+    if adapter in ADAPTER_CATALOG:
+        return True
+    return adapter in declared_for_host(declared_adapters, host_id)
+
+
+def execution_for_stored_candidate(candidate, stored_config, data, declared_adapters=None):
     """Validate a config write against the document already stored.
 
     Unknown-adapter rows identical to that document stay in the file and out of
@@ -659,22 +679,26 @@ def execution_for_stored_candidate(candidate, stored_config, data):
     """
     installations = candidate.get("installations") if isinstance(candidate, dict) else None
     if not isinstance(installations, list):
-        return Execution(candidate, data)
+        return Execution(candidate, data, declared_adapters=declared_adapters)
     unknown = [row for row in installations
-               if isinstance(row, dict) and row.get("adapter") not in ADAPTER_CATALOG]
+               if isinstance(row, dict)
+               and not known_adapter(row.get("adapter"), row.get("host_id"), declared_adapters)]
     if not unknown:
-        return Execution(candidate, data)
+        return Execution(candidate, data, declared_adapters=declared_adapters)
     stored_rows = stored_config.get("installations") if isinstance(stored_config, dict) else None
     stored = {row.get("id"): row for row in (stored_rows or []) if isinstance(row, dict)}
+    hosts = {h.get("id"): h for h in (candidate.get("hosts") or []) if isinstance(h, dict)}
     for row in unknown:
         if stored.get(row.get("id")) != row:
             raise Fault("invalid_adapter", 400,
-                        advice=unknown_adapter_advice(data, row.get("id"), row.get("adapter")))
-    return Execution(candidate, data, tolerate_unknown_adapters=True)
+                        advice=unknown_adapter_advice(
+                            data, row.get("id"), row.get("adapter"),
+                            connector=hosts.get(row.get("host_id"), {}).get("transport") == "connector"))
+    return Execution(candidate, data, tolerate_unknown_adapters=True, declared_adapters=declared_adapters)
 
 
 class Execution:
-    def __init__(self, config, data, *, tolerate_unknown_adapters=False):
+    def __init__(self, config, data, *, tolerate_unknown_adapters=False, declared_adapters=None):
         """Validate a config.
 
         ``tolerate_unknown_adapters`` is for a stored config loaded at process
@@ -682,9 +706,15 @@ class Execution:
         stored document. An adapter outside the built-in catalog and adapters.json
         stays in the document, is marked unavailable, and is left out of routing.
         A direct Execution() leaves the flag false and still raises ``invalid_adapter``.
+
+        ``declared_adapters`` is {host_id: {name: {concurrency, priority,
+        use_when}}} as reported by each connector host; an adapter declared by a
+        host counts as known on that host only, so the cloud needs no copy of the
+        device's adapters.json.
         """
         self.config, self.data = config, Path(data)
         self.broker = None
+        self.declared_adapters = dict(declared_adapters or {})
         self.unknown_adapters = {}
         # Set by Service from --deployment-level. None until then: do not treat
         # an Execution built for validation as an L0 declaration.
@@ -714,17 +744,14 @@ class Execution:
                 if not re.fullmatch(r"[a-zA-Z0-9_/.:\\ -]+", h.get("python", "python3")):
                     raise Fault("invalid_remote_python", 400)
         for e in config.get("installations", []):
-            if e.get("adapter") not in ADAPTER_CATALOG:
+            if not self.knows_adapter(e.get("adapter"), e.get("host_id")):
                 if not tolerate_unknown_adapters:
                     raise Fault("invalid_adapter", 400,
                                 advice="adapter rows come from the built-in catalog plus custom rows in %s; "
                                        "a removed or renamed adapters.json requires restoring it or removing "
                                        "the installations that reference its adapters" % (self.data / "adapters.json"))
-                advice = unknown_adapter_advice(self.data, e.get("id"), e.get("adapter"))
-                self.unknown_adapters[e.get("id")] = {
-                    "id": e.get("id"), "adapter": e.get("adapter"),
-                    "reason": "unknown_adapter", "advice": advice}
-                log.warning("%s", advice)
+                self.unknown_adapters[e.get("id")] = self._unknown_entry(e)
+                log.warning("%s", self.unknown_adapters[e.get("id")]["advice"])
             if not isinstance(e.get("argv"), list) or not e["argv"] or not all(isinstance(a, str) and "\x00" not in a for a in e["argv"]):
                 raise Fault("invalid_argv", 400)
             if "env" in e:
@@ -741,6 +768,31 @@ class Execution:
                 if key not in self.resources:
                     raise Fault("unknown_resource", 400)
             self.installations[e["id"]] = e
+
+    def knows_adapter(self, adapter, host_id):
+        return known_adapter(adapter, host_id, self.declared_adapters)
+
+    def _unknown_entry(self, e):
+        connector = self.hosts.get(e.get("host_id"), {}).get("transport") == "connector"
+        advice = unknown_adapter_advice(self.data, e.get("id"), e.get("adapter"), connector=connector)
+        return {"id": e.get("id"), "adapter": e.get("adapter"),
+                "reason": "unknown_adapter", "advice": advice}
+
+    def set_declared_adapters(self, host_id, declared):
+        """Apply a connector's freshly-reported declaration without a restart:
+        previously-quarantined installations on that host become routable again."""
+        self.declared_adapters[host_id] = dict(declared or {})
+        self.refresh_unknown_adapters()
+
+    def refresh_unknown_adapters(self):
+        """Re-derive the quarantine set from the current config and declarations."""
+        self.unknown_adapters = {}
+        for e in self.config.get("installations", []):
+            if not self.knows_adapter(e.get("adapter"), e.get("host_id")):
+                self.unknown_adapters[e.get("id")] = self._unknown_entry(e)
+
+    def host_declared(self, host_id, adapter):
+        return declared_for_host(self.declared_adapters, host_id).get(adapter)
 
     def ssh(self, host):
         # No ssh argv. A caller cannot fall this host back onto a local shell.

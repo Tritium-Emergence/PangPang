@@ -4,7 +4,11 @@ import hmac
 import os
 import re
 import time
+from .adapters_file import validate_declared
+from .logs import get_logger
 from .store import Fault, digest, uid
+
+log = get_logger(__name__)
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
 
@@ -259,6 +263,10 @@ class Broker:
         reports, receipts = body.get("reports", []), body.get("receipts", [])
         if not isinstance(reports, list) or not isinstance(receipts, list) or len(reports) > 4 or len(receipts) > 16:
             raise Fault("device_batch_limit", 400)
+        # A connector reports which operator-written adapters.json rows it runs so
+        # the cloud need not hold a copy. Re-validated here, never trusted as-is;
+        # absent means a legacy device, not "declares nothing".
+        declared_adapters = validate_declared(body.get("declared_adapters"))
         ack, receipt_ack, reconcile = [], [], []
         with self.store.atomic():
             if self.service.execution.hosts.get(host_id, {}).get("transport") != "connector":
@@ -344,10 +352,25 @@ class Broker:
             except (TypeError, ValueError):
                 facts["supported_contract_version"] = 0
             # Durable device facts are written only when they change (N1).
+            if declared_adapters is not None and device.get("declared_adapters") != declared_adapters:
+                facts["declared_adapters"] = declared_adapters
             if any(device.get(k) != v for k, v in facts.items()):
                 device.update(facts)
                 device.pop("last_seen", None)
                 self.store.put("device", device)
+            if "declared_adapters" in facts:
+                # Apply the new declaration to routing as soon as it is durable:
+                # a re-declared adapter un-quarantines its installations without
+                # a coordinator restart. A brand-new declaration also registers
+                # its row (tell-once-use-directly); a failed registration must
+                # not fail the sync that already stored the truth.
+                def apply_declarations():
+                    self.service.execution.set_declared_adapters(host_id, declared_adapters)
+                    try:
+                        self.service.auto_register_adapters(host_id, declared_adapters)
+                    except Exception:
+                        log.exception("auto-register failed host=%s", host_id)
+                self.store.after_commit("declared_adapters:" + host_id, apply_declarations)
             seen = time.time()
             self.store.after_commit("device_seen:" + host_id,
                                     lambda: self._last_seen.__setitem__(host_id, seen))

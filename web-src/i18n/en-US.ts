@@ -66,6 +66,7 @@ export default {
     output_exceeds_context_window: 'The output cap does not fit in the context window (the prompt still needs room). On a 32K window, set the cap the model actually accepts, for example 8192.',
 
     invalid_context_window: 'Invalid context window. Use an integer of at least 5120, and not above the catalog window for this model.',
+    executor_cleanup_unsupported: 'This device’s supervision tier does not allow this run (reliable stopping is not confirmed). Fix steps are on the task card below.',
 
   },
 
@@ -162,6 +163,12 @@ export default {
     activityCapped: 'log may have reached its cap',
 
     activityNone: 'no observable activity yet',
+    supervisionWhy: 'This run was refused: the device’s supervision tier does not allow it, and child processes could not be reliably stopped.',
+    supervisionLevelHint: 'This device’s execution level is {{level}}, which only allows strong supervision (Windows Job Object).',
+    supervisionEnableL0: 'Set this device to L0 (affects this device only)',
+    supervisionConsentHint: 'If the level is already L0 and it is still refused, the device has not recorded process-group consent (macOS / cgroup-less Linux). On that device: stop the connector, run the command below interactively and confirm the current risk version (the cloud cannot record it for you), then restart the connector:',
+    supervisionThenRetry: 'When done, press "Retry".',
+    copy: 'Copy', copied: 'Copied',
 
   },
 
@@ -214,6 +221,7 @@ export default {
     revokeConfirm: 'Delete the saved model API key? Later requests will block until it is set again.',
 
     keyRevoked: 'Key deleted. Later requests will block until it is set again; requests already sent may still be in progress.',
+    visionDisabled: 'Image test failed: the model was saved, but vision is disabled. Re-enable it once the endpoint accepts images.',
 
     revokeFailed: 'Delete failed', revokeKey: 'Delete saved key', cancel: 'Cancel', validateAndSave: 'Validate and save',
 
@@ -282,6 +290,8 @@ export default {
     timeoutSeconds: 'Timeout (seconds)', priority: 'Priority', priorityPlaceholder: 'Default', enabled: 'Enabled',
 
     workingDir: 'Working directory', useWhen: 'When to use', saveConfig: 'Save config',
+    executionLevel: 'Execution level',
+    executionLevelHint: 'Affects this device only. L0 (personal use): allows the device-proven cooperative supervision tiers (on macOS or cgroup-less Linux the device must also record process-group consent). L1/L2: strong supervision (Windows Job Object) only.',
 
   },
 

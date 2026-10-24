@@ -121,6 +121,7 @@ class Onboarding:
                   "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": False}}}
         messages = [{"role": "system", "content": "Call setup_probe with value pangpang-ready. After its result say ready."},
                     {"role": "user", "content": "Test the tool now."}]
+        vision_unverified = False
         try:
             message, _ = PiModel(self.s).complete(p, messages, [probe])
             calls = message.get("tool_calls", [])
@@ -135,16 +136,19 @@ class Onboarding:
             PiModel(self.s).complete(p, messages, [probe])
             if p["vision"]:
                 # The endpoint must accept an image in the request, else attaching one
-                # would fail every turn that carries it.
+                # would fail every turn that carries it. But vision is optional: a
+                # failed image probe disables the capability instead of refusing an
+                # otherwise usable model — setup saves config, the probe is diagnostics.
                 try:
                     message, _ = PiModel(self.s).complete(p, [
                         {"role": "system", "content": "Look at the image, then call setup_probe with value pangpang-ready."},
                         {"role": "user", "content": "Here is the image.",
                          "images": [{"data": PROBE_PNG, "mime": "image/png"}]}], [probe])
+                    if [c["function"]["name"] for c in message.get("tool_calls", [])] != ["setup_probe"]:
+                        raise Fault("model_vision_unverified")
                 except Fault:
-                    raise Fault("model_vision_unverified") from None
-                if [c["function"]["name"] for c in message.get("tool_calls", [])] != ["setup_probe"]:
-                    raise Fault("model_vision_unverified")
+                    p["vision"] = False
+                    vision_unverified = True
             candidate["models"] = [p]
             self.s.commit_managed_config(candidate, base_revision=base)
         except Exception:
@@ -154,7 +158,8 @@ class Onboarding:
             raise
         if old_ref and old_ref != p.get("credential_ref"):
             self.vault.delete(old_ref)
-        return {"configured": True, "tool_call_verified": True}
+        return {"configured": True, "tool_call_verified": True,
+                "vision_unverified": vision_unverified}
 
     def revoke_model_key(self):
         candidate, base = self.s.managed_snapshot()
@@ -210,8 +215,14 @@ class Onboarding:
                 token = secrets.token_urlsafe(32)
                 self.vault.set("pair:" + record["id"], token)
                 created.append("pair:" + record["id"])
+                # A connector is always governed by its own execution_level
+                # (never by inheritance). Defaulting L0 at pair time removes the
+                # silent-None dead end: L0 alone admits nothing by itself —
+                # the cooperative labels only appear in a probe after the device's
+                # OWN operator records consent, and consent is unwritable here.
                 host = {"id": host_id, "name": str(body.get("name", host_id))[:80],
                         "os": str(body.get("os", ""))[:40], "transport": "connector",
+                        "execution_level": "L0",
                         "credential_hash": hashlib.sha256(token.encode()).hexdigest(), "allowed_roots": []}
                 # The host becomes authenticatable only when this commits (G):
                 # no live-config mutation before the durable write.
@@ -243,7 +254,7 @@ class Onboarding:
         if action not in {"configure", "credential", "delete_credential"}:
             raise Fault("invalid_setup_action")
         if action == "configure":
-            if body.get("adapter") not in ADAPTER_CATALOG:
+            if not self.s.execution.knows_adapter(body.get("adapter"), host_id):
                 raise Fault("adapter_required")
             # Endpoint and qwen resource argv are operator/device-owned security
             # policy. A model proposal can request the adapter/auth mode only.
@@ -277,7 +288,7 @@ class Onboarding:
             raise Fault("connector_host_required")
         if action == "configure":
             adapter = body.get("adapter")
-            if adapter not in ADAPTER_CATALOG:
+            if not self.s.execution.knows_adapter(adapter, host_id):
                 raise Fault("adapter_required")
             if body.get("auth", "existing") not in {"existing", "api_key"}:
                 raise Fault("invalid_setup_auth", 400)
@@ -314,10 +325,16 @@ class Onboarding:
         """One setup_request for execution changes. The installation is not written."""
         host_id = inst["host_id"] if inst else raw.get("host_id")
         adapter = (inst or {}).get("adapter") or raw.get("adapter") or staged.get("adapter")
-        if adapter not in ADAPTER_CATALOG:
+        local = (host or {}).get("transport") == "local"
+        # A local coordinator builds argv from its own catalog, so the adapter
+        # must be there. A connector host runs its own commands: its declaration
+        # is the membership truth for that host.
+        if local:
+            if adapter not in ADAPTER_CATALOG:
+                raise Fault("unknown_adapter")
+        elif not self.s.execution.knows_adapter(adapter, host_id):
             raise Fault("unknown_adapter")
         validate_staged_executor(adapter, host_id, staged)
-        local = (host or {}).get("transport") == "local"
         proposal = {
             "action": "executor_config" if local else "configure",
             "installation_id": None if inst is None else inst["id"],
@@ -446,7 +463,7 @@ class Onboarding:
         if installation_id in self.s.execution.unknown_adapters:
             return None
         inst = self.s.execution.installations.get(installation_id)
-        if not inst or inst.get("adapter") not in ADAPTER_CATALOG:
+        if not inst or not self.s.execution.knows_adapter(inst.get("adapter"), inst.get("host_id")):
             return None
         try:
             stored = self.s.probe(installation_id)
@@ -591,7 +608,12 @@ class Onboarding:
                 if previous and previous["host_id"] != req["host_id"]:
                     raise Fault("installation_id_owned_by_other_host", 403)
                 proposal["resource_keys"] = list(previous.get("resource_keys", []))
-                proposal["max_concurrency"] = previous.get("max_concurrency", ADAPTER_CATALOG[proposal["adapter"]]["concurrency"])
+                # Device-declared concurrency is the capacity truth for a connector
+                # host; the catalog row covers built-ins, 1 the last resort.
+                declared_row = self.s.execution.host_declared(req["host_id"], proposal["adapter"]) or {}
+                proposal["max_concurrency"] = previous.get("max_concurrency",
+                                                           declared_row.get("concurrency",
+                                                           ADAPTER_CATALOG.get(proposal["adapter"], {}).get("concurrency", 1)))
                 if proposal["adapter"] == "pi":
                     from .broker import global_profile
                     profile = global_profile(self.s.config)
@@ -647,7 +669,8 @@ class Onboarding:
             else:
                 inst = result.get("installation", {})
                 if (not isinstance(inst, dict) or not all(isinstance(inst.get(k), str) for k in ("id", "host_id", "adapter"))
-                        or inst.get("host_id") != cmd["host_id"] or inst.get("adapter") not in ADAPTER_CATALOG):
+                        or inst.get("host_id") != cmd["host_id"]
+                        or not self.s.execution.knows_adapter(inst.get("adapter"), cmd["host_id"])):
                     raise Fault("invalid_installation_report")
                 item = {k: inst.get(k) for k in ("id", "host_id", "adapter", "cwd")}
                 candidate = copy.deepcopy(self._config())
@@ -658,9 +681,12 @@ class Onboarding:
                 if cmd["action"] == "configure":
                     adapter = payload.get("adapter")
                     target = (installation_id(adapter, cmd["host_id"], payload.get("profile"))
-                              if adapter in ADAPTER_CATALOG else None)
+                              if self.s.execution.knows_adapter(adapter, cmd["host_id"]) else None)
                     expected_resources = payload.get("resource_keys", previous.get("resource_keys", []))
-                    capacity = payload.get("max_concurrency", previous.get("max_concurrency", ADAPTER_CATALOG.get(adapter, {}).get("concurrency", 1)))
+                    declared_row = self.s.execution.host_declared(cmd["host_id"], adapter) or {}
+                    capacity = payload.get("max_concurrency", previous.get("max_concurrency",
+                                 declared_row.get("concurrency",
+                                 ADAPTER_CATALOG.get(adapter, {}).get("concurrency", 1))))
                     expected_cwd = payload.get("cwd")
                 else:
                     target = payload.get("installation_id")

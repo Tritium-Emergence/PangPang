@@ -163,7 +163,7 @@ export interface Exchange {
   id: string; status?: string; source_bot_id?: string; target_bot_id?: string;
   source_work_id?: string; target_work_id?: string; work_id?: string; summary?: string; request?: string;
 }
-export interface Host {id: string; name?: string; os?: string; transport?: string}
+export interface Host {id: string; name?: string; os?: string; transport?: string; execution_level?: string}
 export interface Device {id: string; online?: boolean; revoked?: boolean; last_seen?: number}
 export interface Installation {id: string; host_id?: string; [k: string]: unknown}
 export interface Probe {id: string; available?: boolean; version?: string; reason?: string}

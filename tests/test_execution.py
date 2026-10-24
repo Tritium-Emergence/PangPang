@@ -542,11 +542,12 @@ class SupervisionGateTests(unittest.TestCase):
 
 
 class ConnectorExecutionLevelTests(unittest.TestCase):
-    """: a personal/LAN control-only cloud (deployment_level=None) must not keep
+    """A personal/LAN control-only cloud (deployment_level=None) must not keep
     a paired connector whose device proves a cooperative tier hard-rejected. The
-    connector is governed by its own server-authored host.execution_level, which
-    OVERRIDES the coordinator level when set and INHERITS it when absent. A device
-    self-report can never write that field."""
+    connector is ALWAYS governed by its own server-authored host.execution_level
+    (pairing stamps L0; legacy rows read as L0; no inheritance). A device
+    self-report can never write that field, and the cooperative labels only appear
+    in a probe after the device's own operator records consent."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -582,15 +583,17 @@ class ConnectorExecutionLevelTests(unittest.TestCase):
         route = app.route('bot-main', work, {})
         return route['selected'], (route['rejected'][0]['reason'] if route['rejected'] else None)
 
-    def test_old_behaviour_connector_rejected_when_cloud_undeclared(self):
-        # BEFORE the fix a control-only+origin cloud is deployment_level=None, so a
-        # Linux connector's cooperative label was rejected. With no execution_level set
-        # it still inherits None → still rejected. This is the state observed.
+    def test_connector_defaults_L0_when_cloud_undeclared(self):
+        # A control-only+origin cloud is deployment_level=None. A connector
+        # with no explicit level READS as L0 (pairing stamps it; legacy rows
+        # default here) instead of inheriting None into a dead end. The human gate
+        # stays on the device: the cooperative label only exists in a probe after
+        # that device's own operator recorded consent.
         app = self._cloud(deployment_level=None)
         for label in ('linux-cgroup-cooperative', 'posix-pgroup-cooperative'):
             selected, reason = self._route_reason(app, label)
-            self.assertIsNone(selected, label)
-            self.assertEqual(reason, 'platform_supervision_unverified', label)
+            self.assertIsNotNone(selected, label)
+            self.assertIsNone(reason, label)
 
     def test_connector_execution_level_L0_admits_without_cloud_deployment_level(self):
         # THE fix: operator opens ONE connector with execution_level=L0; the cloud
@@ -601,9 +604,10 @@ class ConnectorExecutionLevelTests(unittest.TestCase):
             self.assertIsNotNone(selected, label)
             self.assertEqual(selected['installation_id'], 'codex-local', label)
 
-    def test_connector_inherits_cloud_L0_when_level_absent(self):
-        # Pre- contract preserved: an explicit --deployment-level L0 on the cloud
-        # already admitted its connectors; absence of a per-connector field inherits it.
+    def test_connector_without_level_admits_on_cloud_L0(self):
+        # An explicit --deployment-level L0 cloud with an unstamped connector: the
+        # connector's own default L0 admits it (the old inheritance contract is
+        # gone; the outcome is the same from one rule instead of two).
         app = self._cloud(deployment_level='L0')
         selected, _ = self._route_reason(app, 'linux-cgroup-cooperative')
         self.assertIsNotNone(selected)
@@ -618,10 +622,12 @@ class ConnectorExecutionLevelTests(unittest.TestCase):
         selected, _ = self._route_reason(app, 'windows-job-object')
         self.assertIsNotNone(selected)
 
-    def test_both_absent_fail_closed(self):
-        # Neither side declares L0 → cooperative stays rejected (fail-closed default).
+    def test_weak_supervision_stay_rejected_at_default_L0(self):
+        # The L0 default admits nothing unsafe: a WEAK label (bare posix, never a
+        # consented cooperative label) is still rejected — fail-closed survives the
+        # convenience default.
         app = self._cloud(deployment_level=None)
-        selected, reason = self._route_reason(app, 'posix-pgroup-cooperative')
+        selected, reason = self._route_reason(app, 'posix-process-group')
         self.assertIsNone(selected)
         self.assertEqual(reason, 'platform_supervision_unverified')
 
@@ -641,9 +647,12 @@ class ConnectorExecutionLevelTests(unittest.TestCase):
         self.assertEqual(app.execution.hosts['local'].get('execution_level'), 'L0')
         selected, _ = self._route_reason(app, 'linux-cgroup-cooperative')
         self.assertIsNotNone(selected)
-        # null clears the override (restores inheritance), not a magic value.
-        app.set_host_execution_level('local', {'level': None})
-        self.assertNotIn('execution_level', app.execution.hosts['local'])
+        # There is no inherit/clear state — null is invalid and the
+        # level stays exactly where the operator left it.
+        with self.assertRaises(Fault) as cleared:
+            app.set_host_execution_level('local', {'level': None})
+        self.assertEqual(cleared.exception.code, 'invalid_execution_level')
+        self.assertEqual(app.execution.hosts['local'].get('execution_level'), 'L0')
         with self.assertRaises(Fault) as bad:
             app.set_host_execution_level('local', {'level': 'L9'})
         self.assertEqual(bad.exception.code, 'invalid_execution_level')
@@ -675,16 +684,19 @@ class ConnectorExecutionLevelTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 'execution_level_required', bad_body)
             # the stricter override must survive the rejected request untouched
             self.assertEqual(app.execution.hosts['local'].get('execution_level'), 'L1', bad_body)
-        # an explicit null is still the one way to clear (restores inheritance)
-        app.set_host_execution_level('local', {'level': None})
-        self.assertNotIn('execution_level', app.execution.hosts['local'])
+        # An explicit null never clears to an inherited state — it is just
+        # an invalid value, and the stricter override survives it.
+        with self.assertRaises(Fault) as null:
+            app.set_host_execution_level('local', {'level': None})
+        self.assertEqual(null.exception.code, 'invalid_execution_level')
+        self.assertEqual(app.execution.hosts['local'].get('execution_level'), 'L1')
 
     def test_blocked_connector_on_L1_coordinator_still_points_to_execution_level(self):
         # Codex P2: on an L1/L2 coordinator the old ordering returned the 'strong
         # supervision only' hint before the connector branch, hiding the real recovery.
-        # A per-device execution_level=L0 OVERRIDES the coordinator level, so that
-        # recovery exists even here and the hint must name it.
-        app = self._cloud(deployment_level='L1')
+        # A per-device execution_level is what governs a connector, so that recovery
+        # exists even here and the hint must name it.
+        app = self._cloud(deployment_level='L1', execution_level='L1')
         selected, reason = self._route_reason(app, 'linux-cgroup-cooperative')
         self.assertIsNone(selected)
         self.assertEqual(reason, 'platform_supervision_unverified')
