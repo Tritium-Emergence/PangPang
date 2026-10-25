@@ -17,6 +17,16 @@ from .pi_worker_command import _SELECTORS, worker_invocation
 log = get_logger("model")
 
 
+def _ipc_line(value):
+    """One stdin frame for the pi worker.
+
+    Canonical JSON, then U+2028 and U+2029 escaped so Node readline keeps the
+    frame on one line. Decoding restores those characters.
+    """
+    text = encode(value).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return text + "\n"
+
+
 def _usage_brief(usage):
     u = usage or {}
     return "reasoning=%s output=%s input=%s total=%s" % (
@@ -174,7 +184,7 @@ class PiModel:
             # A worker that exits before reading stdin raises BrokenPipeError
             # (OSError) here. That is a dead worker, the existing pi_worker_failed.
             try:
-                proc.stdin.write(encode(init) + "\n")
+                proc.stdin.write(_ipc_line(init))
                 proc.stdin.flush()
             except OSError:
                 raise Fault("pi_worker_failed") from None
@@ -215,7 +225,7 @@ class PiModel:
                 result = handler(event)
                 if event["type"] == "context" and isinstance(result, dict) and "history" in result:
                     result = dict(result, history=self.with_images(profile, result["history"]))
-                proc.stdin.write(encode({"version": 1, "id": event["id"], "result": result}) + "\n")
+                proc.stdin.write(_ipc_line({"version": 1, "id": event["id"], "result": result}))
                 proc.stdin.flush()
         finally:
             if proc.poll() is None:
