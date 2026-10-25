@@ -9,6 +9,7 @@ import platform
 import shutil
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -190,12 +191,17 @@ def host_display_name(host):
 
 
 def normalize_display_name(value):
-    """The label a rename may store. Empty, over-long, and control characters fail."""
+    """The label a rename may store. Empty, over-long, and control characters fail.
+
+    Cc covers C0, DEL, and C1 (including U+0085). Cf covers format characters
+    such as U+202E. Both are rejected after stripping, so they cannot be stored.
+    """
     advice = "A display name is 1-%d characters and cannot contain control characters." % DISPLAY_NAME_MAX
     if not isinstance(value, str):
         raise Fault("invalid_display_name", 400, advice=advice)
     label = value.strip()
-    if not label or len(label) > DISPLAY_NAME_MAX or any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
+    if (not label or len(label) > DISPLAY_NAME_MAX
+            or any(unicodedata.category(ch) in ("Cc", "Cf") for ch in label)):
         raise Fault("invalid_display_name", 400, advice=advice)
     return label
 

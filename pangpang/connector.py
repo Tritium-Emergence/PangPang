@@ -60,16 +60,21 @@ def policy_digest(config, installation_id):
 
 
 def authorization_digest(config, installation_id):
-    """policy_digest without routing metadata.
+    """policy_digest without routing metadata and without the display name.
 
     priority and use_when choose which installation is preferred. They are not
     part of what a run is allowed to execute, so they are removed before the
     same installation + host + resources digest. The grant record is stored
     outside the installation, so it is not hashed either.
+
+    hosts[].name is the operator-facing label. A rename must not change this
+    digest. Every other host field stays in the hash, including id, os,
+    transport, allowed_roots, credential_hash, execution_level, and consent.
     """
     installation = next(e for e in config["installations"] if e["id"] == installation_id)
     installation = {k: v for k, v in installation.items() if k not in ("priority", "use_when")}
     host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
+    host = {k: v for k, v in host.items() if k != "name"}
     resources = [r for r in config.get("resources", []) if r["key"] in installation.get("resource_keys", [])]
     return digest({"installation": installation, "host": host, "resources": resources})
 

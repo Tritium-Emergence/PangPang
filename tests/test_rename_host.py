@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pangpang.connector import authorization_digest
 from pangpang.runtime import Runtime
 from pangpang.service import Service
 from pangpang.store import Fault
@@ -247,7 +248,8 @@ class RenameHostTests(unittest.TestCase):
     def test_invalid_ambiguous_and_collision_fail_without_writes(self):
         before_card = self.app.store.get("task", "task-linux")["run_preview"]["host_name"]
         revision = self.app.config_revision
-        for bad in ("", "   ", "x" * 81, "line\nbreak", "tab\there", 12):
+        for bad in ("", "   ", "x" * 81, "line\nbreak", "tab\there", "del\x7f",
+                    "next\u0085line", "rtl\u202eoverride", "zw\u200bspace", "\u202efinland", 12):
             with self.assertRaises(Fault) as ctx:
                 self._rename(LINUX, bad)
             self.assertEqual(ctx.exception.code, "invalid_display_name")
@@ -290,6 +292,38 @@ class RenameHostTests(unittest.TestCase):
         stripped = self._rename("  host-win  ", "  Work-Windows  ")
         self.assertEqual(stripped["name"], "Work-Windows")
         self.assertEqual(stripped["host_id"], "host-win")
+
+    def test_rename_keeps_the_authorization_grant(self):
+        inst = self.app.execution.installations["codex-local"]
+        frozen = self.app._authorization_digest("codex-local")
+        self.assertEqual(self.app._executor_grant("codex-local")["digest"], frozen)
+        self.assertTrue(self.app._grant_matches(inst))
+        renamed_only = json.loads(json.dumps(self.app.config))
+        for host in renamed_only["hosts"]:
+            if host["id"] == "local":
+                host["name"] = "Something-Else"
+        self.assertEqual(authorization_digest(renamed_only, "codex-local"), frozen)
+        rooted = json.loads(json.dumps(self.app.config))
+        for host in rooted["hosts"]:
+            if host["id"] == "local":
+                host["allowed_roots"] = [str(self.root / "other-root")]
+        self.assertNotEqual(authorization_digest(rooted, "codex-local"), frozen)
+        self.app.store.put("probe", {
+            "id": "codex-local", "available": True, "supervision": "windows-job-object"})
+        task = {"id": "task-auth", "host_id": "local", "installation_id": "codex-local",
+                "authorization_digest": frozen, "status": "queued"}
+        self.app.store.put("task", task)
+        self.assertIsNone(self.app._start_denied(task))
+        self._rename("Desk-Local", "Desk-Renamed")
+        live = self.app.execution.installations["codex-local"]
+        self.assertEqual(self.app.execution.hosts["local"]["id"], "local")
+        self.assertEqual(self.app.execution.hosts["local"]["name"], "Desk-Renamed")
+        self.assertEqual(self.app._authorization_digest("codex-local"), frozen)
+        self.assertEqual(self.app._executor_grant("codex-local")["digest"], frozen)
+        self.assertTrue(self.app._grant_matches(live))
+        stored = self.app.store.get("task", "task-auth")
+        self.assertIsNone(self.app._authorization_denied(stored, live))
+        self.assertIsNone(self.app._start_denied(stored))
 
     def test_child_bot_cannot_rename(self):
         child = self.app.create_bot({"name": "helper", "role": "notes"})
