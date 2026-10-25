@@ -67,12 +67,22 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
     const sentIds = new Set(sentAttached.map((a) => a.id));
     const pendingId = 'pending-' + crypto.randomUUID();
     // Paint before any await so the bubble and the cleared field are not gated on the network.
+    // The refs move with that clear in this same turn. A throw from stream setup
+    // (sessionStorage) happens before React applies the queued state, and the
+    // rollback has to see the empty composer rather than the pre-clear draft.
     store.pushPendingSend({
       id: pendingId, botId, text: sentText.trim(), created: Date.now() / 1000,
       knownIds: store.messages.map((m) => m.id),
     });
     setText((draft) => draft === sentText ? '': draft);
-    setAttached((prev) => prev.filter((a) => !sentIds.has(a.id)));
+    if (textRef.current === sentText) textRef.current = '';
+    const clearedAttached = attachedRef.current.filter((a) => !sentIds.has(a.id));
+    attachedRef.current = clearedAttached;
+    setAttached((prev) => (
+      prev.length === sentAttached.length && prev.every((a, i) => a === sentAttached[i])
+        ? clearedAttached
+        : prev.filter((a) => !sentIds.has(a.id))
+    ));
     try {
       const body: Record<string, unknown> = {text: sentText, refs: sentAttached.map((a) => a.id), stream_id: streamId(botId)};
       const cw = sessionStorage.getItem(workKey(botId));

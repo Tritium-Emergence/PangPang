@@ -24,6 +24,29 @@ test('send shows the user bubble before the request finishes and rolls it back o
   await expect(page.locator('#send')).toBeEnabled();
 });
 
+test('a storage failure before the request returns the cleared draft', async ({page}) => {
+  await login(page);
+  await page.locator('#message').fill('还在');
+  // streamId writes the per-tab id on first send, after the field is cleared and
+  // before the request. Chat only reads that key, so the throw stays on this path.
+  await page.evaluate(() => {
+    const orig = Storage.prototype.setItem;
+    let pending = true;
+    Storage.prototype.setItem = function (key, value) {
+      if (pending && String(key).startsWith('conversationStreamId:')) {
+        pending = false;
+        throw new Error('storage blocked');
+      }
+      return orig.call(this, key, value);
+    };
+  });
+  await page.locator('#send').click();
+  await expect(page.locator('#notice')).toContainText('storage blocked');
+  await expect(page.locator('#message')).toHaveValue('还在');
+  await expect(page.getByTestId('pending-msg')).toHaveCount(0);
+  await expect(page.locator('#send')).toBeEnabled();
+});
+
 test('a newer draft survives a failed send', async ({page}) => {
   let release;
   const held = new Promise((resolve) => { release = resolve; });
