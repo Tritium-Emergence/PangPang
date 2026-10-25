@@ -13,7 +13,14 @@ EVENT_PRUNE_EVERY = 1024
 
 
 def encode(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Compact canonical JSON.
+
+    U+2028 and U+2029 stay legal inside JSON strings, but Node readline treats
+    them as line breaks. Escaping them keeps one IPC frame on one line.
+    Decoding restores the original characters. Other non-ASCII is left as-is.
+    """
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
 
 
 def digest(value):
