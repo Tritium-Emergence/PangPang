@@ -5112,8 +5112,9 @@ class Service:
 
         The name-inclusive value matches only while every host field, including
         the current display name, is unchanged. A connector matches the
-        device-reported digest, and also the name-inclusive digest of the
-        stored host. That device digest is not wrapped with a profile binding.
+        device-reported digest. It also matches the name-inclusive digest of
+        the stored host when that report equals the name-excluded digest of
+        the same host. That device digest is not wrapped with a profile binding.
         """
         if not isinstance(stored, str) or not stored or not isinstance(inst, dict):
             return False
@@ -5125,7 +5126,9 @@ class Service:
             return False
         host = self.execution.hosts.get(inst.get("host_id"), {})
         if host.get("transport") == "connector":
-            from .connector import legacy_authorization_digest
+            from .connector import authorization_digest, legacy_authorization_digest
+            if live != authorization_digest(config, inst["id"]):
+                return False
             return stored == legacy_authorization_digest(config, inst["id"])
         return stored == self._legacy_authorization_digest(inst["id"])
 

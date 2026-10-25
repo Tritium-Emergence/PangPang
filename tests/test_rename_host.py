@@ -391,6 +391,38 @@ class RenameHostTests(unittest.TestCase):
         self.assertEqual(self.app._authorization_denied(task, renamed), "installation_not_authorized")
         self.assertEqual(self.app._start_denied(task), "installation_not_authorized")
 
+    def test_connector_legacy_digest_rejects_a_device_root_change(self):
+        config = self.app._config_for_digest()
+        legacy = legacy_authorization_digest(config, "codex-linux")
+        cloud_now = authorization_digest(config, "codex-linux")
+        expanded = json.loads(json.dumps(config))
+        for host in expanded["hosts"]:
+            if host["id"] == "host-linux":
+                host["allowed_roots"] = list(host.get("allowed_roots") or []) + [str(self.root / "wider")]
+        reported = authorization_digest(expanded, "codex-linux")
+        self.assertNotEqual(reported, cloud_now)
+        self.assertEqual(self.app.execution.hosts["host-linux"].get("name"), LINUX)
+        row = self.app.store.get("settings", "executor_grants")
+        grants = dict(row.get("grants") or {})
+        grants["codex-linux"] = {"digest": legacy, "granted_at": 1, "origin": "migration"}
+        pending = [item for item in (row.get("pending_device") or []) if item != "codex-linux"]
+        self.app.store.put("settings", dict(row, grants=grants, pending_device=pending))
+        self.app.store.put("probe", {
+            "id": "codex-linux", "available": True, "supervision": "windows-job-object",
+            "authorization_digest": reported})
+        task = {"id": "task-connector-roots", "host_id": "host-linux",
+                "installation_id": "codex-linux", "authorization_digest": legacy,
+                "status": "queued"}
+        self.app.store.put("task", task)
+        inst = self.app.execution.installations["codex-linux"]
+        self.assertEqual(self.app._device_reported_digest("codex-linux"), reported)
+        self.assertNotEqual(reported, authorization_digest(self.app._config_for_digest(), "codex-linux"))
+        self.assertFalse(self.app._grant_matches(inst))
+        self.assertEqual(self.app._authorization_denied(task, inst), "installation_not_authorized")
+        self.assertEqual(self.app._start_denied(task), "installation_not_authorized")
+        stored_roots = next(host.get("allowed_roots") for host in config["hosts"] if host["id"] == "host-linux")
+        self.assertEqual(self.app.execution.hosts["host-linux"].get("allowed_roots"), stored_roots)
+
     def test_child_bot_cannot_rename(self):
         child = self.app.create_bot({"name": "helper", "role": "notes"})
         sent = self.app.send("bot-main", {"text": "child"}, "child-work")
