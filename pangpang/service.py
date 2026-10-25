@@ -173,6 +173,68 @@ def text(value, limit=16000):
     return value.strip()
 
 
+# Pairing stores the reported label in hosts[].name and caps it at 80 characters.
+# A rename rejects a longer value instead of truncating it.
+DISPLAY_NAME_MAX = 80
+
+
+def host_display_name(host):
+    """Registered label for a host record. A blank name falls back to the host id."""
+    if not isinstance(host, dict):
+        return ""
+    name = host.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    ident = host.get("id")
+    return ident if isinstance(ident, str) else ""
+
+
+def normalize_display_name(value):
+    """The label a rename may store. Empty, over-long, and control characters fail."""
+    advice = "A display name is 1-%d characters and cannot contain control characters." % DISPLAY_NAME_MAX
+    if not isinstance(value, str):
+        raise Fault("invalid_display_name", 400, advice=advice)
+    label = value.strip()
+    if not label or len(label) > DISPLAY_NAME_MAX or any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
+        raise Fault("invalid_display_name", 400, advice=advice)
+    return label
+
+
+def _ambiguous_host_advice(hosts):
+    listed = ", ".join("%s (%s)" % (h.get("id"), host_display_name(h)) for h in hosts)
+    return "Several registered computers match that name: %s. Ask which one." % listed
+
+
+def resolve_registered_host(hosts, query):
+    """Exact host id, otherwise the unique display name. Never guess."""
+    if not isinstance(query, str) or not query.strip():
+        raise Fault("host_not_found", 404,
+                    advice="Name the computer by its current display name or host id.")
+    key = query.strip()
+    by_id = [h for h in hosts if h.get("id") == key]
+    if len(by_id) == 1:
+        return by_id[0]
+    if len(by_id) > 1:
+        raise Fault("ambiguous_host_name", 409, advice=_ambiguous_host_advice(by_id))
+    named = [h for h in hosts if host_display_name(h) == key]
+    if len(named) == 1:
+        return named[0]
+    if not named:
+        raise Fault("host_not_found", 404,
+                    advice="No registered computer has that id or display name.")
+    raise Fault("ambiguous_host_name", 409, advice=_ambiguous_host_advice(named))
+
+
+def display_name_conflict(hosts, host_id, label):
+    """Another host already owns this label, or the label is another host's id."""
+    for host in hosts:
+        if host.get("id") == host_id:
+            continue
+        if host.get("id") == label or host_display_name(host) == label:
+            return host
+    return None
+
+
 UPLOAD_MAX_BYTES = runner.HARVEST_MAX_FILE_BYTES # one connector command carries it
 MODEL_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -3340,6 +3402,73 @@ class Service:
         self.commit_managed_config(candidate, base_revision=revision)
         return {"host_id": host_id, "execution_level": level}
 
+    def _rewrite_denormalized_host_labels(self, host_id, label):
+        """Write the canonical display name onto rows that snapshot it.
+
+        task.run_preview.host_name is the routing card stored at submit. The
+        card's host_id stays the stable id. spec_digest is a frozen execution
+        hash and is left alone so an in-flight receipt still matches.
+
+        Other rows join on host id and do not store the label: device,
+        inventory, declared_adapters, command, receipt, artifact,
+        setup_request, installation.host_id, and work.required_host_id.
+        Pairing copies platform.node() into hosts[].name once; the connector
+        does not keep a second hostname row, and a rename does not send a
+        device command. device_kb is unused. Pitfall notes are files on the
+        device, not rows keyed by this label. Chat text and task prompts are
+        not join keys.
+        """
+        updated = 0
+        for task in self._all("task", host_id=host_id):
+            preview = task.get("run_preview")
+            if not isinstance(preview, dict) or preview.get("host_name") == label:
+                continue
+            if "host_name" not in preview:
+                continue
+            current = self.store.get("task", task["id"])
+            card = current.get("run_preview")
+            if not isinstance(card, dict) or "host_name" not in card or card.get("host_name") == label:
+                continue
+            current["run_preview"] = dict(card, host_name=label)
+            self.store.put("task", current)
+            updated += 1
+        return updated
+
+    def rename_host_display(self, bot_id, query, new_name):
+        """Rename one registered computer's display label.
+
+        Writes hosts[].name and every stored routing card for that host id in
+        one transaction. The host id, OS field, pairing, and executor rows stay
+        as they are. Unknown, ambiguous, invalid, and colliding names fail
+        before any write.
+        """
+        if self.bot(bot_id)["kind"] != "main":
+            raise Fault("main_bot_required", 403)
+        label = normalize_display_name(new_name)
+        candidate, revision = self.managed_snapshot()
+        hosts = [h for h in candidate.get("hosts", []) if isinstance(h, dict)]
+        target = resolve_registered_host(hosts, query)
+        host_id = target.get("id")
+        if not isinstance(host_id, str) or not host_id:
+            raise Fault("host_not_found", 404)
+        previous = host_display_name(target)
+        conflict = display_name_conflict(hosts, host_id, label)
+        if conflict is not None:
+            raise Fault("display_name_conflict", 409, advice=(
+                "That display name is already used by %s (%s). Choose a different label."
+                % (conflict.get("id"), host_display_name(conflict))))
+        same = target.get("name") == label
+        # Publish of execution.hosts waits for the outermost commit. Callers
+        # inside store.once must still see the label this write stores.
+        with self.store.atomic():
+            if not same:
+                target["name"] = label
+                self.commit_managed_config(candidate, base_revision=revision)
+            copied = self._rewrite_denormalized_host_labels(host_id, label)
+        return {"host_id": host_id, "name": label, "previous_name": previous,
+                "os": target.get("os"), "transport": target.get("transport"),
+                "unchanged": same and copied == 0, "labels_updated": copied}
+
     def capabilities(self):
         """Which optional capabilities are actually usable (H). Booleans and
         configured modes only; never key material.
@@ -5027,11 +5156,13 @@ class Service:
                 else:
                     availability = "available" if probe.get("available") else "unavailable"
                 authorization = "always" if self._grant_matches(inst) else "required"
+            host = self.execution.hosts.get(inst.get("host_id"), {})
             rows.append({
                 "installation_id": iid,
                 "adapter": inst.get("adapter"),
                 "profile": inst.get("profile"),
                 "host_id": inst.get("host_id"),
+                "host_name": host_display_name(host) or inst.get("host_id"),
                 "use_when": None if unknown else self._use_when(inst),
                 "priority": None if unknown else self._route_priority(inst),
                 "enabled": inst.get("enabled") is True,
