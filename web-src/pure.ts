@@ -231,7 +231,8 @@ interface PendingMatch {
 }
 
 // Drop a pending bubble once a new durable user message carries the same text.
-// Oldest pending consumes the oldest matching message, one each.
+// Oldest pending consumes the oldest matching message, one each. The consumed
+// id stays on the remaining pendings so a later pass cannot spend it again.
 export function reconcilePendingSends<M extends PendingMatch>(
   pending: readonly PendingSend[],
   messages: readonly M[],
@@ -250,19 +251,26 @@ export function reconcilePendingSends<M extends PendingMatch>(
     });
     if (match) { used.add(match.id); drop.add(p.id); }
   }
-  return pending.filter((p) => !drop.has(p.id));
+  if (!drop.size) return pending.slice();
+  return pending.filter((p) => !drop.has(p.id)).map((p) => {
+    let changed = false;
+    const knownIds = p.knownIds.slice();
+    const have = new Set(knownIds);
+    for (const id of used) if (!have.has(id)) { knownIds.push(id); changed = true; }
+    return changed ? {...p, knownIds}: p;
+  });
 }
 
-// Put a failed send back into the composer unless the user already typed or
-// attached something else.
+// Put a failed send back only when the composer was left empty. Any new text
+// or attachment is a newer draft and stays as the user left it.
 export function restoreComposerDraft<A extends {id: string}>(
   current: {text: string; attached: readonly A[]},
   sent: {text: string; attached: readonly A[]},
 ): {text: string; attached: A[]} {
-  const text = current.text === '' ? sent.text : current.text;
-  const have = new Set(current.attached.map((a) => a.id));
-  const restored = sent.attached.filter((a) => !have.has(a.id));
-  return {text, attached: restored.length ? [...restored, ...current.attached] : [...current.attached]};
+  if (current.text !== '' || current.attached.length > 0) {
+    return {text: current.text, attached: current.attached as A[]};
+  }
+  return {text: sent.text, attached: sent.attached.slice()};
 }
 
 export type ViewportAction =

@@ -1,5 +1,7 @@
 // Local send bubble: it stays until a new durable user message carries the same
-// text, and a failed send puts the draft back only when the field is still empty.
+// text. One durable id can retire only one pending, including across later
+// passes. A failed send puts the draft back only when text and attachments
+// are both still empty.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {reconcilePendingSends, restoreComposerDraft} from '../web-src/pure.ts';
@@ -42,15 +44,29 @@ test('clock skew of a few seconds still matches, a much older row does not', () 
   assert.deepEqual(reconcilePendingSends(open, [user('skew', 'hello', 80)]), []);
 });
 
-test('a failed send restores the draft only when the field was left empty', () => {
+test('the same durable user message cannot retire a second pending on a later pass', () => {
+  const open = [pending('p1', '是的', 100, []), pending('p2', '是的', 101, [])];
+  const once = [user('m1', '是的', 102)];
+  const left = reconcilePendingSends(open, once);
+  assert.deepEqual(left.map((p) => p.id), ['p2']);
+  assert.ok(left[0].knownIds.includes('m1'));
+  assert.deepEqual(reconcilePendingSends(left, once).map((p) => p.id), ['p2']);
+  assert.deepEqual(reconcilePendingSends(left, [...once, user('m2', '是的', 110)]), []);
+});
+
+test('a failed send restores the draft only when text and attachments are both empty', () => {
   const sent = {text: '前一条', attached: [{id: 'a'}, {id: 'b'}]};
   assert.deepEqual(restoreComposerDraft({text: '', attached: []}, sent), sent);
   assert.deepEqual(
-    restoreComposerDraft({text: '后一条草稿', attached: [{id: 'c'}]}, sent),
-    {text: '后一条草稿', attached: [{id: 'a'}, {id: 'b'}, {id: 'c'}]},
+    restoreComposerDraft({text: '后一条草稿', attached: []}, sent),
+    {text: '后一条草稿', attached: []},
   );
   assert.deepEqual(
-    restoreComposerDraft({text: '', attached: [{id: 'b'}, {id: 'c'}]}, sent),
-    {text: '前一条', attached: [{id: 'a'}, {id: 'b'}, {id: 'c'}]},
+    restoreComposerDraft({text: '', attached: [{id: 'c'}]}, sent),
+    {text: '', attached: [{id: 'c'}]},
+  );
+  assert.deepEqual(
+    restoreComposerDraft({text: '后一条草稿', attached: [{id: 'c'}]}, sent),
+    {text: '后一条草稿', attached: [{id: 'c'}]},
   );
 });

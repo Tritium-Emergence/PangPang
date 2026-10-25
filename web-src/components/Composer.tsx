@@ -14,7 +14,8 @@ import {restoreComposerDraft} from '../pure';
 // - attachments + continuation target belong to the current bot; both clear on bot
 // switch — the store does that in select(), so this component just reads props.
 // The user bubble and an empty field appear before the network returns. The bubble
-// leaves when the durable message arrives, or the draft is put back if the send fails.
+// leaves when the durable message arrives. A failed send puts the draft back only
+// when the field and the attachments are both still empty.
 // The button stays disabled until that request settles.
 
 function streamId(botId: string): string {
@@ -47,6 +48,10 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
   const inFlight = useRef(0);
   const [uploads, setUploads] = useState(0);
   const sendingRef = useRef(false);
+  const textRef = useRef(text);
+  const attachedRef = useRef(attached);
+  textRef.current = text;
+  attachedRef.current = attached;
 
   const send = async () => {
     if (sendingRef.current) return;
@@ -105,8 +110,16 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
         clearPending(botId, sessionStorage);
       }
       store.setNotice(e?.message || t('composer.sendFailed'));
-      setText((draft) => restoreComposerDraft({text: draft, attached: []}, {text: sentText, attached: []}).text);
-      setAttached((prev) => restoreComposerDraft({text: '', attached: prev}, {text: sentText, attached: sentAttached}).attached);
+      const currentText = textRef.current;
+      const currentAttached = attachedRef.current;
+      const restored = restoreComposerDraft(
+        {text: currentText, attached: currentAttached},
+        {text: sentText, attached: sentAttached},
+      );
+      if (restored.text !== currentText) setText((draft) => draft === currentText ? restored.text : draft);
+      if (restored.attached !== currentAttached) {
+        setAttached((prev) => prev === currentAttached ? restored.attached : prev);
+      }
     } finally {
       // Always re-enable this Composer's own send control. `sending` is local component
       // state (the Composer is keyed per bot and unmounts on switch), not cross-bot
@@ -212,7 +225,7 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
           rows={3}
           required
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { textRef.current = e.target.value; setText(e.target.value); }}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !(e as any).isComposing) { e.preventDefault(); void send(); } }}
           placeholder={t('composer.placeholder')}
           className="mt-2 w-full resize-none rounded-xl border border-line px-3 py-2"
