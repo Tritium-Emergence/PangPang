@@ -89,13 +89,49 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .md-table th { background: var(--soft); }
 .md-h, .md-p, .md-list, .md-quote, .md-pre { margin: 6px 0; }
 .md-hr { border-top: 1px solid var(--line); margin: 12px 0; }
-/* Message field and send control share one row at every pane width. */
+/* File actions, the message field, and send share one row at every pane width. */
 #composer .compose-row {
   display: flex;
   flex-flow: row nowrap;
   align-items: flex-end;
+  gap: 0.375rem;
   min-width: 0;
   max-width: 100%;
+}
+#composer .compose-row > .compose-files {
+  display: flex;
+  flex: 0 0 auto;
+  flex-flow: row nowrap;
+  align-items: flex-end;
+  gap: 0.25rem;
+  margin: 0;
+  min-width: 0;
+}
+#composer .compose-row > .compose-files > button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+#composer .compose-row > .compose-files > button:hover {
+  background: var(--soft);
+  color: var(--ink);
+}
+#composer .compose-row > .compose-files > button svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 #composer .compose-row > #message {
   flex: 1 1 0%;
@@ -106,7 +142,7 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 #composer .compose-row > .compose-bottom {
   flex: 0 0 auto;
   margin-top: 0;
-  margin-left: 0.5rem;
+  margin-left: 0;
 }
 #composer #send { white-space: nowrap; }
 
@@ -140,11 +176,90 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   font-size: clamp(1rem, 0.96rem + 0.3cqi, 1.125rem);
   line-height: 1.7;
 }
-/* Secondary composer chrome drops out when the composer itself is narrow. */
+/* The hint is the only thing left above the control row; drop that bar when the composer is narrow. */
 @container composer (max-width: 36rem) {
-  #composer .compose-hint { display: none; }
-  #composer .compose-options { flex-wrap: wrap; }
-  #composer .compose-files { margin-left: 0; flex-wrap: wrap; }
+  #composer .compose-options { display: none; }
+}
+/* Narrow chat column: one-line field, tighter transcript. Wide columns keep the
+   multi-line field (container is the pane, not the viewport). */
+@container pane (max-width: 40rem) {
+  #messages {
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+  #composer.composer-root {
+    padding-top: 0.375rem;
+    padding-bottom: calc(0.375rem + env(safe-area-inset-bottom));
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+  #capability-list {
+    padding: 0.25rem 0.5rem;
+  }
+  #capability-list ul {
+    margin-top: 0.25rem;
+    column-gap: 0.375rem;
+    row-gap: 0.25rem;
+  }
+  #capability-list .cap-pill {
+    padding: 0.125rem 0.5rem;
+    gap: 0.25rem;
+  }
+}
+@container composer (max-width: 40rem) {
+  #composer .compose-row { gap: 0.25rem; }
+  #composer .compose-row > #message,
+  #composer .compose-row > .compose-bottom,
+  #composer .compose-row > .compose-files { margin-top: 0; }
+  #composer #message {
+    height: 2.75rem;
+    min-height: 2.75rem;
+    max-height: 6.5rem;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+    overflow-y: auto;
+  }
+}
+@supports (field-sizing: content) {
+  @container composer (max-width: 40rem) {
+    /* Empty field stays one line; a draft grows until the cap, then scrolls. */
+    #composer #message:not(:placeholder-shown) {
+      field-sizing: content;
+      height: auto;
+    }
+  }
+}
+@container transcript (max-width: 40rem) {
+  #messages .bubble,
+  #messages .bubble.thinking,
+  #messages [data-testid="stream-preview"] {
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+  #messages .body {
+    margin-top: 0.125rem;
+    padding: 0.375rem 0.625rem;
+  }
+  #messages .body,
+  #messages .md-p,
+  #messages .md-list,
+  #messages .md-pre,
+  #messages .md-quote,
+  #messages .md-h,
+  #messages .evidence-raw,
+  #messages .bubble .text-sm,
+  #messages .text-sm {
+    line-height: 1.55;
+  }
+  #messages .md-p,
+  #messages .md-list,
+  #messages .md-h,
+  #messages .md-quote,
+  #messages .md-pre { margin-top: 0.25rem; margin-bottom: 0.25rem; }
+  #messages .body > :first-child { margin-top: 0; }
+  #messages .body > :last-child { margin-bottom: 0; }
 }
 #attention-pill { flex: none; }
 @container pane (max-width: 28rem) {
@@ -188,5 +303,5 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   #setup-panel, #capability-list, #notice { max-height: 15dvh; }
   #composer.composer-root { padding-top: 0.375rem; padding-bottom: calc(0.375rem + env(safe-area-inset-bottom)); }
   #composer .compose-hint { display: none; }
-  #message { height: 3.5rem; }
+  #composer #message { height: 3.5rem; max-height: 3.5rem; }
 }

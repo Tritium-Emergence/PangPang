@@ -62,6 +62,9 @@ async function assertChatLayout(page, width, height, {coarse}) {
   const report = await page.evaluate((short) => {
     const input = document.querySelector('#message').getBoundingClientRect();
     const send = document.querySelector('#send').getBoundingClientRect();
+    const upload = document.querySelector('#upload').getBoundingClientRect();
+    const attach = document.querySelector('#attach').getBoundingClientRect();
+    const sharesRow = (a, b) => a.top < b.bottom - 1 && b.top < a.bottom - 1;
     const body = document.querySelector('#messages .body');
     const bodyStyle = getComputedStyle(body);
     const probe = document.createElement('span');
@@ -91,6 +94,21 @@ async function assertChatLayout(page, width, height, {coarse}) {
     const name = document.querySelector('#bot-name');
     const nameBox = name.getBoundingClientRect();
     const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const contentInline = (el) => {
+      const s = getComputedStyle(el);
+      return el.getBoundingClientRect().width
+        - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight)
+        - parseFloat(s.borderLeftWidth) - parseFloat(s.borderRightWidth);
+    };
+    const paneInline = contentInline(document.querySelector('main'));
+    const composerEl = document.querySelector('#composer');
+    const messagesEl = document.querySelector('#messages');
+    const messageEl = document.querySelector('#message');
+    const composerInline = contentInline(composerEl);
+    const transcriptInline = contentInline(messagesEl);
+    const narrowLimit = 40 * root + 0.5;
+    const firstBlock = body.firstElementChild;
+    const caps = document.querySelector('#capability-list');
     const activity = document.querySelector('#activity');
     const activityBox = activity.getBoundingClientRect();
     const pill = document.querySelector('#attention-pill');
@@ -113,7 +131,16 @@ async function assertChatLayout(page, width, height, {coarse}) {
       }
     }
     return {
-      sameRow: input.top < send.bottom - 1 && send.top < input.bottom - 1 && send.left >= input.right - 1 && input.width > send.width,
+      sameRow: sharesRow(input, send) && send.left >= input.right - 1 && input.width > send.width
+        && sharesRow(upload, input) && sharesRow(attach, input)
+        && upload.right <= attach.left + 2 && attach.right <= input.left + 2,
+      uploadW: upload.width, uploadH: upload.height, attachW: attach.width, attachH: attach.height,
+      inputW: input.width, sendW: send.width,
+      uploadLabel: document.querySelector('#upload').getAttribute('aria-label'),
+      attachLabel: document.querySelector('#attach').getAttribute('aria-label'),
+      uploadText: document.querySelector('#upload').innerText.trim(),
+      attachText: document.querySelector('#attach').innerText.trim(),
+      composerInline,
       sendInView: send.right <= innerWidth + 1 && send.bottom <= innerHeight + 1,
       overflow: document.documentElement.scrollWidth - innerWidth,
       fonts,
@@ -131,12 +158,34 @@ async function assertChatLayout(page, width, height, {coarse}) {
       pillText: pill ? pill.innerText.trim() : '',
       pillWidth: pillBox ? pillBox.width : 0,
       pillHeight: pillBox ? pillBox.height : 0,
-      composerPad: parseFloat(getComputedStyle(document.querySelector('#composer')).paddingBottom),
-      expectedPad: (short ? 0.375 : 0.75) * root,
+      composerPad: parseFloat(getComputedStyle(composerEl).paddingBottom),
+      composerPadTop: parseFloat(getComputedStyle(composerEl).paddingTop),
+      hintHidden: document.querySelector('#composer .compose-hint').getBoundingClientRect().height < 1,
+      expectedPad: ((short || paneInline <= narrowLimit) ? 0.375 : 0.75) * root,
+      root,
+      messageH: messageEl.getBoundingClientRect().height,
+      composerH: composerEl.getBoundingClientRect().height,
+      narrowComposer: composerInline <= narrowLimit,
+      narrowPane: paneInline <= narrowLimit,
+      narrowTranscript: transcriptInline <= narrowLimit,
+      transcriptInline,
+      bodyWidth: body.getBoundingClientRect().width,
+      bodyPadTop: parseFloat(bodyStyle.paddingTop),
+      bodyPadLeft: parseFloat(bodyStyle.paddingLeft),
+      listPadLeft: parseFloat(getComputedStyle(messagesEl).paddingLeft),
+      firstBlockMargin: firstBlock ? parseFloat(getComputedStyle(firstBlock).marginTop) : 0,
+      capPadTop: caps ? parseFloat(getComputedStyle(caps).paddingTop) : null,
     };
   }, height <= 500);
   expect(report.missing, JSON.stringify(report)).toBeFalsy();
   expect(report.sameRow, JSON.stringify({width, height, report})).toBeTruthy();
+  expect(report.uploadText, 'upload shows an icon at ' + width).toBe('');
+  expect(report.attachText, 'device-file shows an icon at ' + width).toBe('');
+  expect(report.uploadLabel).toBe('上传文件');
+  expect(report.attachLabel).toBe('引用设备文件');
+  expect(report.inputW, 'field dominates at ' + width).toBeGreaterThan(report.sendW);
+  expect(report.inputW, 'field wider than both icons at ' + width).toBeGreaterThan(report.uploadW + report.attachW);
+  if (width >= 360 && width <= 430) expect(report.inputW / report.composerInline, 'field share at ' + width).toBeGreaterThanOrEqual(0.45);
   expect(report.sendInView, JSON.stringify(report)).toBeTruthy();
   expect(report.overflow).toBeLessThanOrEqual(1);
   for (const font of report.fonts) expect(font.fs, font.id + ' at ' + width).toBeGreaterThanOrEqual(16);
@@ -157,6 +206,45 @@ async function assertChatLayout(page, width, height, {coarse}) {
     expect(report.pillHeight, 'pending height at ' + width).toBeGreaterThanOrEqual(44);
   }
   expect(Math.abs(report.composerPad - report.expectedPad)).toBeLessThanOrEqual(1);
+  // Empty field: one line on a narrow composer, multi-line on a wide one.
+  // A short viewport keeps the existing 3.5rem field so send stays on screen.
+  if (height <= 500) {
+    expect(report.messageH, 'short field at ' + width).toBeGreaterThanOrEqual(3.5 * report.root - 2);
+    expect(report.messageH, 'short field at ' + width).toBeLessThanOrEqual(3.5 * report.root + 2);
+  } else if (report.narrowComposer) {
+    expect(report.messageH, 'compact field at ' + width).toBeGreaterThanOrEqual(2.75 * report.root - 2);
+    expect(report.messageH, 'compact field at ' + width).toBeLessThanOrEqual(2.75 * report.root + 2);
+    if (coarse) expect(report.messageH, 'field tap size at ' + width).toBeGreaterThanOrEqual(44);
+  } else {
+    expect(report.messageH, 'wide field at ' + width).toBeGreaterThanOrEqual(4.5 * report.root);
+  }
+  if (report.narrowTranscript) {
+    expect(report.lineRatio, 'narrow leading at ' + width).toBeLessThanOrEqual(1.6);
+    expect(report.bodyPadTop, 'bubble pad at ' + width).toBeLessThanOrEqual(0.375 * report.root + 1);
+    expect(report.bodyPadLeft, 'bubble side pad at ' + width).toBeLessThanOrEqual(0.625 * report.root + 1);
+    const bubbleCap = Math.min(report.transcriptInline, report.capCh * 72 / 75, 42 * report.root);
+    expect(report.bodyWidth, 'bubble fill at ' + width).toBeGreaterThanOrEqual(bubbleCap - 2);
+    if (report.transcriptInline <= 28 * report.root) {
+      expect(report.bodyWidth / report.transcriptInline, 'phone bubble fill at ' + width).toBeGreaterThanOrEqual(0.96);
+    }
+    expect(report.firstBlockMargin, 'nested block margin at ' + width).toBeLessThanOrEqual(0.5);
+  } else {
+    expect(report.lineRatio, 'wide leading at ' + width).toBeGreaterThanOrEqual(1.65);
+    expect(report.bodyPadLeft, 'wide bubble pad at ' + width).toBeGreaterThanOrEqual(0.75 * report.root - 1);
+  }
+  if (report.narrowPane) {
+    expect(report.listPadLeft, 'list gutter at ' + width).toBeLessThanOrEqual(0.5 * report.root + 1);
+  } else {
+    expect(report.listPadLeft, 'wide gutter at ' + width).toBeGreaterThanOrEqual(0.75 * report.root - 1);
+  }
+  if (report.capPadTop !== null && report.narrowPane) {
+    expect(report.capPadTop, 'status pad at ' + width).toBeLessThanOrEqual(0.25 * report.root + 1);
+  }
+  // File actions sit on the field's row. With the hint hidden, that row is the composer.
+  if (report.hintHidden && height > 500) {
+    const rowBudget = report.messageH + report.composerPad + report.composerPadTop + 8;
+    expect(report.composerH, 'one control row at ' + width).toBeLessThanOrEqual(rowBudget);
+  }
   await saveShot(page, width, height);
 }
 
