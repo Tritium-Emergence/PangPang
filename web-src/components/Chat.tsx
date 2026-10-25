@@ -70,9 +70,28 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
+  // The keyboard resizes this scroller without a React render. Stay on the latest
+  // line when the reader was already pinned there.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let height = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const next = el.clientHeight;
+      if (next === height) return;
+      height = next;
+      if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const botName = (id?: string) => snap.bots.find((b) => b.id === id)?.name || id || t('chat.botFallback');
+  const pendingSends = store.pendingSends.filter((p) => p.botId === botId);
   const timeline = [
-...visible.map((m) => ({key: 'message-' + m.id, at: m.created || 0, node: <MessageBubble m={m} snap={snap} botName={(id) => snap.bots.find((b) => b.id === id)?.name || id || t('chat.botFallback')} />})),
-...taskCards.map((t) => ({key: 'approval-' + t.id, at: t.created || 0, node: <TaskCard task={t} store={store} />})),
+...visible.map((m) => ({key: 'message-' + m.id, at: m.created || 0, node: <MessageBubble m={m} snap={snap} botName={botName} />})),
+...taskCards.map((task) => ({key: 'approval-' + task.id, at: task.created || 0, node: <TaskCard task={task} store={store} />})),
+...pendingSends.map((p) => ({key: 'pending-' + p.id, at: p.created || 0, node: <div data-testid="pending-msg"><MessageBubble m={{id: p.id, kind: 'user', from: 'user', content: p.text, created: p.created}} snap={snap} botName={botName} /></div>})),
   ].sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
   const curId = currentWorkId(botId, store.messages);
   const current = snap.work.find((w) => w.id === curId);
@@ -88,8 +107,6 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   const delegate = exchange ? {bot: exchange.target_bot_id, text: exchange.request || exchange.summary}: delegated ? {bot: delegated.owner_bot_id, text: delegated.goal}: null;
   const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): activity.tasks.length ? t('chat.dispatchedTo', {executor: activity.tasks[0].installation_id || t('chat.executorFallback'), prompt: (activity.tasks[0].prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
 
-  const botName = (id?: string) => snap.bots.find((b) => b.id === id)?.name || id || t('chat.botFallback');
-
   return (
     <div
       id="messages"
@@ -98,7 +115,7 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
       aria-live="polite"
       className="scroll-none flex-1 overflow-auto px-5 py-4"
     >
-      {visible.length === 0 && taskCards.length === 0 && unknownTasks.length === 0 && !progress && !livePreviews.length ? (
+      {visible.length === 0 && taskCards.length === 0 && unknownTasks.length === 0 && !pendingSends.length && !progress && !livePreviews.length ? (
         <div className="grid h-full place-items-center text-center text-muted">
           <div>
             <h2 className="text-lg font-medium text-ink">{t('chat.emptyTitle')}</h2>

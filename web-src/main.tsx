@@ -3,7 +3,10 @@ import {createRoot} from 'react-dom/client';
 import {I18nextProvider} from 'react-i18next';
 import i18n from './i18n';
 import {App} from './App';
+import {bindShellViewport} from './viewport';
 import './styles.css';
+
+bindShellViewport();
 
 // Single entry. The production bundle (one app.js) mounts into #app, which the
 // hand-written pangpang/web/index.html provides. The dev-server index.html uses #root;

@@ -5,6 +5,7 @@ import {api} from '../api';
 import {FileDialog} from './FileDialog';
 import {friendlyError} from '../display';
 import {sendKeyFor, clearPending} from '../idempotency';
+import {restoreComposerDraft} from '../pure';
 
 // Composer. Preserves the selectors/behaviors:
 // - #composer form, #message textbox (role=textbox), #send button "发送 →"
@@ -12,8 +13,10 @@ import {sendKeyFor, clearPending} from '../idempotency';
 // - stream_id (stable per bot×tab), work_hint_id (last work), continue_work_id (one-shot)
 // - attachments + continuation target belong to the current bot; both clear on bot
 // switch — the store does that in select(), so this component just reads props.
-// RCB: sending is request progress (send disabled in flight); the durable result comes
-// back via refresh(), never invented locally.
+// The user bubble and an empty field appear before the network returns. The bubble
+// leaves when the durable message arrives. A failed send puts the draft back only
+// when the field and the attachments are both still empty.
+// The button stays disabled until that request settles.
 
 function streamId(botId: string): string {
   const key = 'conversationStreamId:' + botId;
@@ -44,16 +47,44 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
   const [dropping, setDropping] = useState(false);
   const inFlight = useRef(0);
   const [uploads, setUploads] = useState(0);
+  const sendingRef = useRef(false);
+  const textRef = useRef(text);
+  const attachedRef = useRef(attached);
+  textRef.current = text;
+  attachedRef.current = attached;
 
   const send = async () => {
+    if (sendingRef.current) return;
     if (inFlight.current || attached.some((a) => a.uploading)) { store.setNotice(t('composer.uploadingWait')); return; }
-    if (sending || !text.trim()) return;
+    const sentText = text;
+    if (!sentText.trim()) return;
+    sendingRef.current = true;
     setSending(true);
     const ct = continueTarget; // snapshot the one-shot target for this attempt
     const token = store.selectionToken(); // capture the selection epoch at send start
     const mine = () => store.liveSelected() === botId && store.selectionCurrent(token);
+    const sentAttached = attached.slice();
+    const sentIds = new Set(sentAttached.map((a) => a.id));
+    const pendingId = 'pending-' + crypto.randomUUID();
+    // Paint before any await so the bubble and the cleared field are not gated on the network.
+    // The refs move with that clear in this same turn. A throw from stream setup
+    // (sessionStorage) happens before React applies the queued state, and the
+    // rollback has to see the empty composer rather than the pre-clear draft.
+    store.pushPendingSend({
+      id: pendingId, botId, text: sentText.trim(), created: Date.now() / 1000,
+      knownIds: store.messages.map((m) => m.id),
+    });
+    setText((draft) => draft === sentText ? '': draft);
+    if (textRef.current === sentText) textRef.current = '';
+    const clearedAttached = attachedRef.current.filter((a) => !sentIds.has(a.id));
+    attachedRef.current = clearedAttached;
+    setAttached((prev) => (
+      prev.length === sentAttached.length && prev.every((a, i) => a === sentAttached[i])
+        ? clearedAttached
+        : prev.filter((a) => !sentIds.has(a.id))
+    ));
     try {
-      const body: Record<string, unknown> = {text, refs: attached.map((a) => a.id), stream_id: streamId(botId)};
+      const body: Record<string, unknown> = {text: sentText, refs: sentAttached.map((a) => a.id), stream_id: streamId(botId)};
       const cw = sessionStorage.getItem(workKey(botId));
       if (cw) body.work_hint_id = cw;
       const lastSeen = sessionStorage.getItem(lastSeenKey(botId));
@@ -61,7 +92,7 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
       if (ct) body.continue_work_id = ct.id;
       if (ct && movePrevious) body.correct_to_work_id = ct.id;
       const requestKey = await sendKeyFor(botId, {
-        text, refs: attached.map((a) => a.id), continueWorkId: ct?.id || null,
+        text: sentText, refs: sentAttached.map((a) => a.id), continueWorkId: ct?.id || null,
         correctToWorkId: ct && movePrevious ? ct.id : null,
       }, sessionStorage, crypto.subtle, () => crypto.randomUUID());
       const res = await api<any>(`bots/${botId}/messages`, body, requestKey);
@@ -74,14 +105,13 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
       if (mine()) {
         if (res?.route_quality === 'fallback') store.setNotice(t('composer.routeFallback'));
         else if (res?.work_switched) store.setNotice(t('composer.workSwitched'));
-        setText((draft) => draft === text ? '': draft);
-        const sentIds = new Set(attached.map((a) => a.id));
         setAttached((prev) => prev.filter((a) => !sentIds.has(a.id)));
         if (ct && store.continueTarget === ct) setContinueTarget(null);
         if (ct) setMovePrevious(false);
         await store.refresh();
       }
     } catch (e: any) {
+      store.dropPendingSend(pendingId);
       if (!mine()) return; // switched away mid-send: never touch the new bot's ephemeral state
       // Only a DETERMINISTIC invalid-continuation error clears the one-shot target and
       // retires the key. Transient/ambiguous failures keep both so a retry reuses the key.
@@ -90,11 +120,22 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
         clearPending(botId, sessionStorage);
       }
       store.setNotice(e?.message || t('composer.sendFailed'));
+      const currentText = textRef.current;
+      const currentAttached = attachedRef.current;
+      const restored = restoreComposerDraft(
+        {text: currentText, attached: currentAttached},
+        {text: sentText, attached: sentAttached},
+      );
+      if (restored.text !== currentText) setText((draft) => draft === currentText ? restored.text : draft);
+      if (restored.attached !== currentAttached) {
+        setAttached((prev) => prev === currentAttached ? restored.attached : prev);
+      }
     } finally {
       // Always re-enable this Composer's own send control. `sending` is local component
       // state (the Composer is keyed per bot and unmounts on switch), not cross-bot
       // ephemeral state, so it must reset unconditionally — gating it on mine() could
       // leave the button stuck disabled.
+      sendingRef.current = false;
       setSending(false);
     }
   };
@@ -194,8 +235,8 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
           rows={3}
           required
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !(e as any).isComposing) { e.preventDefault(); if (!sending) void send(); } }}
+          onChange={(e) => { textRef.current = e.target.value; setText(e.target.value); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !(e as any).isComposing) { e.preventDefault(); void send(); } }}
           placeholder={t('composer.placeholder')}
           className="mt-2 w-full resize-none rounded-xl border border-line px-3 py-2"
         />
