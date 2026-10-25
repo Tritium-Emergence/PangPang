@@ -1,13 +1,14 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {api, ApiError} from './api';
-import {applyPreviewFrame, mergeRefreshScope} from './pure';
+import {applyPreviewFrame, mergeRefreshScope, reconcilePendingSends, type PendingSend} from './pure';
 import type {Snapshot, Message} from './types';
 
 // THE single data coordinator: "one root data entry, no second domain
-// store"). It owns exactly three things, all server-truth or ephemeral:
+// store"). It owns server truth plus ephemeral UI:
 // snapshot — the whole dashboard projection (/api/v1/snapshot), read verbatim
 // messages — the selected bot's conversation (/api/v1/bots/{id}/messages)
 // previews — ephemeral per-turn streaming text from the /bots/{id}/stream SSE
+// pendingSends — local user bubbles for sends not yet present in messages
 // SSE only INVALIDATES (triggers a refetch) or APPENDS an ephemeral preview; it never
 // patches/invents domain truth. Single-flight coalescing mirrors the old app.js so a
 // burst of /events during an active turn collapses into one in-flight refresh + one
@@ -21,6 +22,9 @@ export interface Store {
   snapshot: Snapshot | null;
   messages: Message[];
   previews: Map<string, Preview>; // turn_id -> ephemeral streaming preview
+  pendingSends: PendingSend[];
+  pushPendingSend: (pending: PendingSend) => void;
+  dropPendingSend: (id: string) => void;
   authed: boolean;
   selected: string;
   // A monotonic selection generation. select() bumps it on EVERY switch, so an A→B→A
@@ -52,6 +56,7 @@ export function useStore(): Store {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [previews, setPreviews] = useState<Map<string, Preview>>(new Map());
+  const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
   const [authed, setAuthed] = useState(true);
   const [selected, setSelected] = useState('bot-main');
   const [connection, setConnection] = useState<Store['connection']>('connecting');
@@ -79,6 +84,13 @@ export function useStore(): Store {
     const msgs = await api<Message[]>(`bots/${bot}/messages`);
     if (selectedRef.current !== bot) return; // selection moved on — drop stale result
     setMessages(msgs);
+    setPendingSends((prev) => {
+      const mine = prev.filter((p) => p.botId === bot);
+      if (!mine.length) return prev;
+      const kept = reconcilePendingSends(mine, msgs);
+      if (kept.length === mine.length) return prev;
+      return prev.filter((p) => p.botId !== bot).concat(kept);
+    });
     const persisted = new Set(msgs.filter((m) => m.kind === 'assistant' && m.turn_id).map((m) => m.turn_id));
     // A preview is only legitimately pending while its turn is still active. Prune it
     // when its durable final has landed OR when the turn is no longer active with no
@@ -137,6 +149,12 @@ export function useStore(): Store {
     setPreviews(new Map());
     setContinueTarget(null);
     setAttached(() => []);
+  }, []);
+  const pushPendingSend = useCallback((pending: PendingSend) => {
+    setPendingSends((prev) => prev.some((item) => item.id === pending.id) ? prev : [...prev, pending]);
+  }, []);
+  const dropPendingSend = useCallback((id: string) => {
+    setPendingSends((prev) => prev.some((item) => item.id === id) ? prev.filter((item) => item.id !== id) : prev);
   }, []);
   const liveSelected = useCallback(() => selectedRef.current, []);
   const selectionToken = useCallback(() => generation.current, []);
@@ -224,5 +242,5 @@ export function useStore(): Store {
   // initial load
   useEffect(() => { void refresh(); }, [refresh]);
 
-  return {snapshot, messages, previews, authed, selected, liveSelected, selectionToken, selectionCurrent, select, refresh, login, logout, connection, notice, setNotice, continueTarget, setContinueTarget, attached, setAttached};
+  return {snapshot, messages, previews, pendingSends, pushPendingSend, dropPendingSend, authed, selected, liveSelected, selectionToken, selectionCurrent, select, refresh, login, logout, connection, notice, setNotice, continueTarget, setContinueTarget, attached, setAttached};
 }

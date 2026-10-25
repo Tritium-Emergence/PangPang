@@ -210,3 +210,89 @@ export function installationSetupTone(
   if (!discovered) return null;
   return facts?.execution_verified === true ? 'ready' : 'discovered_not_verified';
 }
+
+// A user bubble shown before the durable message exists. knownIds are the
+// message ids already on screen when Send was tapped, so an older copy of the
+// same text cannot retire the bubble.
+export interface PendingSend {
+  id: string;
+  botId: string;
+  text: string;
+  created: number;
+  knownIds: readonly string[];
+}
+
+interface PendingMatch {
+  id: string;
+  from?: string;
+  kind?: string;
+  content: unknown;
+  created?: number;
+}
+
+// Drop a pending bubble once a new durable user message carries the same text.
+// Oldest pending consumes the oldest matching message, one each.
+export function reconcilePendingSends<M extends PendingMatch>(
+  pending: readonly PendingSend[],
+  messages: readonly M[],
+): PendingSend[] {
+  const fresh = messages.filter((m) => m.from === 'user' && m.kind === 'user' && m.id);
+  const used = new Set<string>();
+  const ordered = [...pending].sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const drop = new Set<string>();
+  for (const p of ordered) {
+    const known = new Set(p.knownIds);
+    const want = p.text.trim();
+    const match = fresh.find((m) => {
+      if (used.has(m.id) || known.has(m.id)) return false;
+      if (typeof m.created === 'number' && m.created + 30 < p.created) return false;
+      return (typeof m.content === 'string' ? m.content.trim() : '') === want;
+    });
+    if (match) { used.add(match.id); drop.add(p.id); }
+  }
+  return pending.filter((p) => !drop.has(p.id));
+}
+
+// Put a failed send back into the composer unless the user already typed or
+// attached something else.
+export function restoreComposerDraft<A extends {id: string}>(
+  current: {text: string; attached: readonly A[]},
+  sent: {text: string; attached: readonly A[]},
+): {text: string; attached: A[]} {
+  const text = current.text === '' ? sent.text : current.text;
+  const have = new Set(current.attached.map((a) => a.id));
+  const restored = sent.attached.filter((a) => !have.has(a.id));
+  return {text, attached: restored.length ? [...restored, ...current.attached] : [...current.attached]};
+}
+
+export type ViewportAction =
+  | {type: 'none'}
+  | {type: 'reset'}
+  | {type: 'pin'; top: number; height: number};
+
+// How the chat shell should track visualViewport. A full-height pan is a stuck
+// scroll (keyboard already closed): the shell cannot follow it and stay inside
+// the layout viewport. A shorter visual viewport is the keyboard; pin the shell
+// to that rectangle, clamped so it is not clipped.
+export function viewportAction(
+  vv: {height: number; offsetTop: number} | null | undefined,
+  layout: {innerHeight: number} | null | undefined,
+): ViewportAction {
+  if (!vv || !layout) return {type: 'none'};
+  const height = vv.height;
+  const rawTop = vv.offsetTop;
+  const inner = layout.innerHeight;
+  if (!Number.isFinite(height) || !Number.isFinite(rawTop) || !Number.isFinite(inner)) return {type: 'none'};
+  if (height < 1 || inner < 1) return {type: 'none'};
+  const top = rawTop > 0 ? rawTop : 0;
+  if (top < 1 && Math.abs(height - inner) <= 2) return {type: 'none'};
+  if (Math.abs(height - inner) <= 2 && top >= 1) return {type: 'reset'};
+  const pinH = Math.round(Math.min(height, inner));
+  const pinTop = Math.round(Math.min(top, Math.max(0, inner - pinH)));
+  if (pinTop < 1 && Math.abs(pinH - inner) <= 2) return {type: 'none'};
+  return {type: 'pin', top: pinTop, height: pinH};
+}
+
+export function shellFrameCss(frame: {top: number; height: number}): string {
+  return `#shell{position:fixed;top:${Math.round(frame.top)}px;left:0;right:0;height:${Math.round(frame.height)}px}`;
+}
