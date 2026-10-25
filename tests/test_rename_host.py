@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pangpang.connector import authorization_digest
+from pangpang.connector import authorization_digest, legacy_authorization_digest
 from pangpang.runtime import Runtime
 from pangpang.service import Service
 from pangpang.store import Fault
@@ -324,6 +324,42 @@ class RenameHostTests(unittest.TestCase):
         stored = self.app.store.get("task", "task-auth")
         self.assertIsNone(self.app._authorization_denied(stored, live))
         self.assertIsNone(self.app._start_denied(stored))
+
+    def test_legacy_name_inclusive_digest_still_authorizes(self):
+        inst = self.app.execution.installations["codex-local"]
+        live = self.app._authorization_digest("codex-local")
+        legacy = self.app._legacy_authorization_digest("codex-local")
+        self.assertEqual(legacy, legacy_authorization_digest(self.app.config, "codex-local"))
+        self.assertNotEqual(legacy, live)
+        row = self.app.store.get("settings", "executor_grants")
+        grants = dict(row["grants"])
+        grants["codex-local"] = dict(grants["codex-local"], digest=legacy)
+        self.app.store.put("settings", dict(row, grants=grants))
+        self.app.store.put("probe", {
+            "id": "codex-local", "available": True, "supervision": "windows-job-object"})
+        task = {"id": "task-legacy", "host_id": "local", "installation_id": "codex-local",
+                "authorization_digest": legacy, "status": "queued"}
+        self.app.store.put("task", task)
+        self.assertTrue(self.app._grant_matches(inst))
+        self.assertIsNone(self.app._authorization_denied(task, inst))
+        self.assertIsNone(self.app._start_denied(task))
+        listed = {item["installation_id"]: item for item in self.app.list_executors()["installations"]}
+        self.assertEqual(listed["codex-local"]["authorization"], "always")
+        forged = dict(task, authorization_digest="forged")
+        self.assertEqual(self.app._authorization_denied(forged, inst), "installation_not_authorized")
+        self._rename("Desk-Local", "Desk-Renamed")
+        renamed = self.app.execution.installations["codex-local"]
+        self.assertFalse(self.app._grant_matches(renamed))
+        self.assertEqual(self.app._start_denied(task), "installation_not_authorized")
+        candidate, revision = self.app.managed_snapshot()
+        for host in candidate["hosts"]:
+            if host["id"] == "local":
+                host["allowed_roots"] = [str(self.root / "other-root")]
+        self.app.commit_managed_config(candidate, base_revision=revision)
+        moved = self.app.execution.installations["codex-local"]
+        self.assertFalse(self.app._grant_matches(moved))
+        self.assertEqual(self.app._authorization_denied(task, moved), "installation_not_authorized")
+        self.assertEqual(self.app._start_denied(task), "installation_not_authorized")
 
     def test_child_bot_cannot_rename(self):
         child = self.app.create_bot({"name": "helper", "role": "notes"})

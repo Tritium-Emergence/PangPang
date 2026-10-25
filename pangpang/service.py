@@ -4645,9 +4645,11 @@ class Service:
                 raise Fault("approval_scope_changed")
             if body.get("always") is True:
                 inst = self.execution.installations.get(task.get("installation_id"))
-                live = self._captured_authorization_digest(inst) if inst else None
                 frozen = task.get("authorization_digest")
-                if not frozen or frozen != live or not inst:
+                if not inst or not self._authorization_matches(frozen, inst):
+                    raise Fault("approval_scope_changed")
+                live = self._captured_authorization_digest(inst)
+                if not live:
                     raise Fault("approval_scope_changed")
                 if inst["id"] in self.execution.unknown_adapters:
                     raise Fault("unknown_adapter")
@@ -5073,9 +5075,17 @@ class Service:
         """Authorization hash. Profile-derived pi also covers the credential identity
         the next launch will bind. The launch overlay itself stays out of the hash,
         so binding at start does not ask again."""
-        from .connector import authorization_digest
+        return self._digest_with_pi_binding(installation_id, include_name=False)
+
+    def _legacy_authorization_digest(self, installation_id):
+        """Name-inclusive formula still stored on grants and queued tasks."""
+        return self._digest_with_pi_binding(installation_id, include_name=True)
+
+    def _digest_with_pi_binding(self, installation_id, include_name):
+        from .connector import authorization_digest, legacy_authorization_digest
         config = self._config_for_digest()
-        base = authorization_digest(config, installation_id)
+        compute = legacy_authorization_digest if include_name else authorization_digest
+        base = compute(config, installation_id)
         inst = next((i for i in config.get("installations", [])
                      if isinstance(i, dict) and i.get("id") == installation_id), None)
         if not inst or not self._profile_derived_pi(inst):
@@ -5097,6 +5107,25 @@ class Service:
             return None
         return self._authorization_digest(inst["id"])
 
+    def _authorization_matches(self, stored, inst):
+        """True when a stored digest is the current formula or the name-inclusive one.
+
+        The legacy value matches only while every host field, including the
+        current display name, is unchanged. Connector rows compare the
+        device-reported digest only.
+        """
+        if not isinstance(stored, str) or not stored or not isinstance(inst, dict):
+            return False
+        live = self._captured_authorization_digest(inst)
+        if live and stored == live:
+            return True
+        host = self.execution.hosts.get(inst.get("host_id"), {})
+        if host.get("transport") == "connector":
+            return False
+        if inst.get("id") not in {i.get("id") for i in self._config_for_digest().get("installations", [])}:
+            return False
+        return stored == self._legacy_authorization_digest(inst["id"])
+
     def _grant_matches(self, inst):
         if inst["id"] in self.execution.unknown_adapters or not self.adapter_known(inst.get("host_id"), inst.get("adapter")):
             return False
@@ -5104,7 +5133,7 @@ class Service:
         if not live:
             return False
         grant = self._executor_grant(inst["id"])
-        if grant and grant.get("digest") == live:
+        if grant and self._authorization_matches(grant.get("digest"), inst):
             return True
         row = self._executor_grants_row()
         if inst["id"] in (row.get("pending_device") or []) and self._device_reported_digest(inst["id"]) == live:
@@ -6213,8 +6242,7 @@ class Service:
         if not inst or not inst.get("id"):
             return "installation_not_authorized"
         self._persist_pending_device_grant(inst.get("id"))
-        live = self._captured_authorization_digest(inst)
-        if task.get("authorization_digest") != live:
+        if not self._authorization_matches(task.get("authorization_digest"), inst):
             return "installation_not_authorized"
         if task.get("approved_at"):
             return None
