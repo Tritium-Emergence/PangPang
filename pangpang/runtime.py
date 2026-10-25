@@ -82,7 +82,9 @@ TOOLS.extend([
           "binary": S, "argv": {"type": "array", "items": S}, "concurrency": I, "priority": I,
           "use_when": S, "secret_env": S, "extra_env": {"type": "object"}},
          ["host_id", "action"]),
-    tool("list_executors", "List stored executors for the operator: id, adapter, profile, host, routing, enabled, availability and authorization, plus adapter names and parameter names. Does not probe, scan PATH, or return commands, env, endpoints or credential ids.", {}),
+    tool("list_executors", "List stored executors for the operator: id, adapter, profile, host id and display name, routing, enabled, availability and authorization, plus adapter names and parameter names. Does not probe, scan PATH, or return commands, env, endpoints or credential ids.", {}),
+    tool("rename_host", "Rename one registered computer's display name. host_id is the current display name or the host id. name is the new label. Updates the inventory label and stored routing labels for that computer only. Does not change the OS hostname, the host id, pairing, or executors. Fails when the computer is unknown, the current name matches more than one computer, the new label is empty or too long, or another computer already uses that label or id.",
+         {"host_id": S, "name": S}, ["host_id", "name"]),
     tool("propose_executor", "Propose an executor change for an existing installation_id, or a new local profile of an adapter already registered on that machine. The new profile stays a proposal until the operator approves it. priority and use_when, and changes that only reduce enabled, concurrency or timeout, apply immediately on an existing local installation. cwd, extra argv, env, profile and higher limits are staged until the operator approves that setup. A connector host rejects enabled, concurrency, timeout and credential ids. This call does not start a run and cannot approve one. Endpoint is never accepted here.",
          {"installation_id": S, "host_id": S, "adapter": S, "priority": I, "use_when": S, "enabled": B,
           "max_concurrency": I, "timeout_s": I, "cwd": S, "profile": S,
@@ -147,7 +149,7 @@ class Runtime:
     def tools_for(self, turn):
         main = self.service.bot(turn["bot_id"])["kind"] == "main"
         hidden = set() if main else {"create_bot", "update_bot", "archive_bot", "setup_agent",
-                                     "list_executors", "propose_executor"}
+                                     "list_executors", "propose_executor", "rename_host"}
         return [t for t in TOOLS if t["function"]["name"] not in hidden]
 
     def final_round(self, turn):
@@ -853,6 +855,8 @@ class Runtime:
             if service.bot(bot_id)["kind"] != "main":
                 raise Fault("main_bot_required", 403)
             return service.list_executors()
+        if name == "rename_host":
+            return service.rename_host_display(bot_id, body.get("host_id"), body.get("name"))
         if name == "propose_executor":
             return service.propose_executor(bot_id, work["id"], body)
         if name == "catalog":

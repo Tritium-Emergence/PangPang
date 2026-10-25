@@ -9,6 +9,7 @@ import platform
 import shutil
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -171,6 +172,73 @@ def text(value, limit=16000):
     if not isinstance(value, str) or not value.strip() or len(value.encode()) > limit:
         raise Fault("invalid_text", 400)
     return value.strip()
+
+
+# Pairing stores the reported label in hosts[].name and caps it at 80 characters.
+# A rename rejects a longer value instead of truncating it.
+DISPLAY_NAME_MAX = 80
+
+
+def host_display_name(host):
+    """Registered label for a host record. A blank name falls back to the host id."""
+    if not isinstance(host, dict):
+        return ""
+    name = host.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    ident = host.get("id")
+    return ident if isinstance(ident, str) else ""
+
+
+def normalize_display_name(value):
+    """The label a rename may store. Empty, over-long, and control characters fail.
+
+    Cc covers C0, DEL, and C1 (including U+0085). Cf covers format characters
+    such as U+202E. Both are rejected after stripping, so they cannot be stored.
+    """
+    advice = "A display name is 1-%d characters and cannot contain control characters." % DISPLAY_NAME_MAX
+    if not isinstance(value, str):
+        raise Fault("invalid_display_name", 400, advice=advice)
+    label = value.strip()
+    if (not label or len(label) > DISPLAY_NAME_MAX
+            or any(unicodedata.category(ch) in ("Cc", "Cf") for ch in label)):
+        raise Fault("invalid_display_name", 400, advice=advice)
+    return label
+
+
+def _ambiguous_host_advice(hosts):
+    listed = ", ".join("%s (%s)" % (h.get("id"), host_display_name(h)) for h in hosts)
+    return "Several registered computers match that name: %s. Ask which one." % listed
+
+
+def resolve_registered_host(hosts, query):
+    """Exact host id, otherwise the unique display name. Never guess."""
+    if not isinstance(query, str) or not query.strip():
+        raise Fault("host_not_found", 404,
+                    advice="Name the computer by its current display name or host id.")
+    key = query.strip()
+    by_id = [h for h in hosts if h.get("id") == key]
+    if len(by_id) == 1:
+        return by_id[0]
+    if len(by_id) > 1:
+        raise Fault("ambiguous_host_name", 409, advice=_ambiguous_host_advice(by_id))
+    named = [h for h in hosts if host_display_name(h) == key]
+    if len(named) == 1:
+        return named[0]
+    if not named:
+        raise Fault("host_not_found", 404,
+                    advice="No registered computer has that id or display name.")
+    raise Fault("ambiguous_host_name", 409, advice=_ambiguous_host_advice(named))
+
+
+def display_name_conflict(hosts, host_id, label):
+    """Another host already owns this label, or the label is another host's id."""
+    for host in hosts:
+        if host.get("id") == host_id:
+            continue
+        if host.get("id") == label or host_display_name(host) == label:
+            return host
+    return None
 
 
 UPLOAD_MAX_BYTES = runner.HARVEST_MAX_FILE_BYTES # one connector command carries it
@@ -3340,6 +3408,73 @@ class Service:
         self.commit_managed_config(candidate, base_revision=revision)
         return {"host_id": host_id, "execution_level": level}
 
+    def _rewrite_denormalized_host_labels(self, host_id, label):
+        """Write the canonical display name onto rows that snapshot it.
+
+        task.run_preview.host_name is the routing card stored at submit. The
+        card's host_id stays the stable id. spec_digest is a frozen execution
+        hash and is left alone so an in-flight receipt still matches.
+
+        Other rows join on host id and do not store the label: device,
+        inventory, declared_adapters, command, receipt, artifact,
+        setup_request, installation.host_id, and work.required_host_id.
+        Pairing copies platform.node() into hosts[].name once; the connector
+        does not keep a second hostname row, and a rename does not send a
+        device command. device_kb is unused. Pitfall notes are files on the
+        device, not rows keyed by this label. Chat text and task prompts are
+        not join keys.
+        """
+        updated = 0
+        for task in self._all("task", host_id=host_id):
+            preview = task.get("run_preview")
+            if not isinstance(preview, dict) or preview.get("host_name") == label:
+                continue
+            if "host_name" not in preview:
+                continue
+            current = self.store.get("task", task["id"])
+            card = current.get("run_preview")
+            if not isinstance(card, dict) or "host_name" not in card or card.get("host_name") == label:
+                continue
+            current["run_preview"] = dict(card, host_name=label)
+            self.store.put("task", current)
+            updated += 1
+        return updated
+
+    def rename_host_display(self, bot_id, query, new_name):
+        """Rename one registered computer's display label.
+
+        Writes hosts[].name and every stored routing card for that host id in
+        one transaction. The host id, OS field, pairing, and executor rows stay
+        as they are. Unknown, ambiguous, invalid, and colliding names fail
+        before any write.
+        """
+        if self.bot(bot_id)["kind"] != "main":
+            raise Fault("main_bot_required", 403)
+        label = normalize_display_name(new_name)
+        candidate, revision = self.managed_snapshot()
+        hosts = [h for h in candidate.get("hosts", []) if isinstance(h, dict)]
+        target = resolve_registered_host(hosts, query)
+        host_id = target.get("id")
+        if not isinstance(host_id, str) or not host_id:
+            raise Fault("host_not_found", 404)
+        previous = host_display_name(target)
+        conflict = display_name_conflict(hosts, host_id, label)
+        if conflict is not None:
+            raise Fault("display_name_conflict", 409, advice=(
+                "That display name is already used by %s (%s). Choose a different label."
+                % (conflict.get("id"), host_display_name(conflict))))
+        same = target.get("name") == label
+        # Publish of execution.hosts waits for the outermost commit. Callers
+        # inside store.once must still see the label this write stores.
+        with self.store.atomic():
+            if not same:
+                target["name"] = label
+                self.commit_managed_config(candidate, base_revision=revision)
+            copied = self._rewrite_denormalized_host_labels(host_id, label)
+        return {"host_id": host_id, "name": label, "previous_name": previous,
+                "os": target.get("os"), "transport": target.get("transport"),
+                "unchanged": same and copied == 0, "labels_updated": copied}
+
     def capabilities(self):
         """Which optional capabilities are actually usable (H). Booleans and
         configured modes only; never key material.
@@ -4510,9 +4645,11 @@ class Service:
                 raise Fault("approval_scope_changed")
             if body.get("always") is True:
                 inst = self.execution.installations.get(task.get("installation_id"))
-                live = self._captured_authorization_digest(inst) if inst else None
                 frozen = task.get("authorization_digest")
-                if not frozen or frozen != live or not inst:
+                if not inst or not self._authorization_matches(frozen, inst):
+                    raise Fault("approval_scope_changed")
+                live = self._captured_authorization_digest(inst)
+                if not live:
                     raise Fault("approval_scope_changed")
                 if inst["id"] in self.execution.unknown_adapters:
                     raise Fault("unknown_adapter")
@@ -4938,9 +5075,17 @@ class Service:
         """Authorization hash. Profile-derived pi also covers the credential identity
         the next launch will bind. The launch overlay itself stays out of the hash,
         so binding at start does not ask again."""
-        from .connector import authorization_digest
+        return self._digest_with_pi_binding(installation_id, include_name=False)
+
+    def _legacy_authorization_digest(self, installation_id):
+        """Name-inclusive formula still stored on grants and queued tasks."""
+        return self._digest_with_pi_binding(installation_id, include_name=True)
+
+    def _digest_with_pi_binding(self, installation_id, include_name):
+        from .connector import authorization_digest, legacy_authorization_digest
         config = self._config_for_digest()
-        base = authorization_digest(config, installation_id)
+        compute = legacy_authorization_digest if include_name else authorization_digest
+        base = compute(config, installation_id)
         inst = next((i for i in config.get("installations", [])
                      if isinstance(i, dict) and i.get("id") == installation_id), None)
         if not inst or not self._profile_derived_pi(inst):
@@ -4962,6 +5107,31 @@ class Service:
             return None
         return self._authorization_digest(inst["id"])
 
+    def _authorization_matches(self, stored, inst):
+        """True when a stored digest is the current formula or the name-inclusive one.
+
+        The name-inclusive value matches only while every host field, including
+        the current display name, is unchanged. A connector matches the
+        device-reported digest. It also matches the name-inclusive digest of
+        the stored host when that report equals the name-excluded digest of
+        the same host. That device digest is not wrapped with a profile binding.
+        """
+        if not isinstance(stored, str) or not stored or not isinstance(inst, dict):
+            return False
+        live = self._captured_authorization_digest(inst)
+        if live and stored == live:
+            return True
+        config = self._config_for_digest()
+        if inst.get("id") not in {i.get("id") for i in config.get("installations", [])}:
+            return False
+        host = self.execution.hosts.get(inst.get("host_id"), {})
+        if host.get("transport") == "connector":
+            from .connector import authorization_digest, legacy_authorization_digest
+            if live != authorization_digest(config, inst["id"]):
+                return False
+            return stored == legacy_authorization_digest(config, inst["id"])
+        return stored == self._legacy_authorization_digest(inst["id"])
+
     def _grant_matches(self, inst):
         if inst["id"] in self.execution.unknown_adapters or not self.adapter_known(inst.get("host_id"), inst.get("adapter")):
             return False
@@ -4969,7 +5139,7 @@ class Service:
         if not live:
             return False
         grant = self._executor_grant(inst["id"])
-        if grant and grant.get("digest") == live:
+        if grant and self._authorization_matches(grant.get("digest"), inst):
             return True
         row = self._executor_grants_row()
         if inst["id"] in (row.get("pending_device") or []) and self._device_reported_digest(inst["id"]) == live:
@@ -5027,11 +5197,13 @@ class Service:
                 else:
                     availability = "available" if probe.get("available") else "unavailable"
                 authorization = "always" if self._grant_matches(inst) else "required"
+            host = self.execution.hosts.get(inst.get("host_id"), {})
             rows.append({
                 "installation_id": iid,
                 "adapter": inst.get("adapter"),
                 "profile": inst.get("profile"),
                 "host_id": inst.get("host_id"),
+                "host_name": host_display_name(host) or inst.get("host_id"),
                 "use_when": None if unknown else self._use_when(inst),
                 "priority": None if unknown else self._route_priority(inst),
                 "enabled": inst.get("enabled") is True,
@@ -6076,8 +6248,7 @@ class Service:
         if not inst or not inst.get("id"):
             return "installation_not_authorized"
         self._persist_pending_device_grant(inst.get("id"))
-        live = self._captured_authorization_digest(inst)
-        if task.get("authorization_digest") != live:
+        if not self._authorization_matches(task.get("authorization_digest"), inst):
             return "installation_not_authorized"
         if task.get("approved_at"):
             return None
