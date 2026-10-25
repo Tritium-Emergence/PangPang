@@ -136,6 +136,11 @@ async function assertChatLayout(page, width, height, {coarse}) {
         && upload.right <= attach.left + 2 && attach.right <= input.left + 2,
       uploadW: upload.width, uploadH: upload.height, attachW: attach.width, attachH: attach.height,
       inputW: input.width, sendW: send.width,
+      uploadLabel: document.querySelector('#upload').getAttribute('aria-label'),
+      attachLabel: document.querySelector('#attach').getAttribute('aria-label'),
+      uploadText: document.querySelector('#upload').innerText.trim(),
+      attachText: document.querySelector('#attach').innerText.trim(),
+      composerInline,
       sendInView: send.right <= innerWidth + 1 && send.bottom <= innerHeight + 1,
       overflow: document.documentElement.scrollWidth - innerWidth,
       fonts,
@@ -174,6 +179,13 @@ async function assertChatLayout(page, width, height, {coarse}) {
   }, height <= 500);
   expect(report.missing, JSON.stringify(report)).toBeFalsy();
   expect(report.sameRow, JSON.stringify({width, height, report})).toBeTruthy();
+  expect(report.uploadText, 'upload shows an icon at ' + width).toBe('');
+  expect(report.attachText, 'device-file shows an icon at ' + width).toBe('');
+  expect(report.uploadLabel).toBe('上传文件');
+  expect(report.attachLabel).toBe('引用设备文件');
+  expect(report.inputW, 'field dominates at ' + width).toBeGreaterThan(report.sendW);
+  expect(report.inputW, 'field wider than both icons at ' + width).toBeGreaterThan(report.uploadW + report.attachW);
+  if (width >= 360 && width <= 430) expect(report.inputW / report.composerInline, 'field share at ' + width).toBeGreaterThanOrEqual(0.45);
   expect(report.sendInView, JSON.stringify(report)).toBeTruthy();
   expect(report.overflow).toBeLessThanOrEqual(1);
   for (const font of report.fonts) expect(font.fs, font.id + ' at ' + width).toBeGreaterThanOrEqual(16);

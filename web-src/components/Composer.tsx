@@ -174,9 +174,19 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
 ): null}
 
       <div className="compose-row">
-        <span className="compose-files flex gap-2 text-xs text-muted">
-          <button type="button" id="upload" className="hover:text-ink" onClick={() => fileRef.current?.click()}>＋ {t('composer.uploadFile')}</button>
-          <button type="button" id="attach" className="hover:text-ink" onClick={() => setFileDialog(true)}>＋ {t('composer.referenceDeviceFile')}</button>
+        <span className="compose-files flex text-muted">
+          <button type="button" id="upload" aria-label={t('composer.uploadFile')} title={t('composer.uploadFile')} onClick={() => fileRef.current?.click()}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 16V5" />
+              <path d="M8 8.5 12 4.5 16 8.5" />
+              <path d="M5 14.5V18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3.5" />
+            </svg>
+          </button>
+          <button type="button" id="attach" aria-label={t('composer.referenceDeviceFile')} title={t('composer.referenceDeviceFile')} onClick={() => setFileDialog(true)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 8.2V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-6.1L10.4 6H6a2 2 0 0 0-2 2.2Z" />
+            </svg>
+          </button>
           <input ref={fileRef} type="file" id="file-pick" multiple hidden onChange={(e) => { if (e.target.files?.length) void upload(e.target.files); e.target.value = ''; }} />
         </span>
         <textarea

@@ -107,7 +107,32 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   margin: 0;
   min-width: 0;
 }
-#composer .compose-row > .compose-files > button { white-space: nowrap; }
+#composer .compose-row > .compose-files > button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+#composer .compose-row > .compose-files > button:hover {
+  background: var(--soft);
+  color: var(--ink);
+}
+#composer .compose-row > .compose-files > button svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 #composer .compose-row > #message {
   flex: 1 1 0%;
   width: auto;
@@ -188,8 +213,6 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   #composer .compose-row > #message,
   #composer .compose-row > .compose-bottom,
   #composer .compose-row > .compose-files { margin-top: 0; }
-  /* Labels stay intact; a shorter send padding keeps the field the widest control. */
-  #composer #send { padding-left: 0.5rem; padding-right: 0.5rem; }
   #composer #message {
     height: 2.75rem;
     min-height: 2.75rem;
