@@ -5,13 +5,16 @@ each side (coordinator and connector read their OWN data directory — argv
 stays operator-defined, never model-defined). For a connector host the file is
 device-only: sync carries a bounded routing projection (validate_declared), and
 the connector can merge one row after the operator approves that exact row.
-The cloud does not run that command. Any violation fails closed with the file,
-line and field named.
+The cloud does not run that command. A local host is this coordinator: the
+same approval writes the row into the coordinator data directory and merges
+it. That write does not launch the binary. Any violation fails closed with
+the file, line and field named.
 """
 import json
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 
 from .store import Fault, assert_no_txn_io
@@ -38,6 +41,30 @@ def _builtin_names():
 
 
 _merged_names = set()
+
+
+def is_merged(name):
+    """True when this name was merged from an adapters file, not a built-in row."""
+    return name in _merged_names
+
+
+_file_locks_guard = threading.Lock()
+_file_locks = {}
+
+
+def _adapters_file_lock(path):
+    """One lock for the read-modify-write of a single adapters file.
+
+    Distinct from the store transaction. Two approvals can otherwise each
+    read a stale copy, and the later replace drops the other row.
+    """
+    key = os.path.normcase(os.path.abspath(path))
+    with _file_locks_guard:
+        lock = _file_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _file_locks[key] = lock
+        return lock
 
 
 def _bad(path, line, subject, message):
@@ -244,22 +271,24 @@ def _write_document(path, rows):
 
 
 def write_merged_row(path, name, row):
-    """Merge one approved row into a device adapters file and the live catalog.
+    """Merge one approved row into an adapters file and the live catalog.
 
     An identical stored row is left as-is. A different stored row is refused.
-    Built-in catalog rows are never replaced.
+    Built-in catalog rows are never replaced. The read, conflict check,
+    replace, and catalog merge of this file run under that file's lock.
     """
     assert_no_txn_io("adapters_file.write_merged_row")
     path = Path(path)
-    clean = clean_declaration(name, row)
-    current = load(path)
-    if name in current and current[name] != clean:
-        raise Fault("adapter_declaration_conflict", 409,
-                    advice="%s: %s: conflicts with an adapter row already stored" % (path, name))
-    if current.get(name) != clean:
-        current[name] = clean
-        _write_document(path, current)
-    merge(path)
+    with _adapters_file_lock(path):
+        clean = clean_declaration(name, row)
+        current = load(path)
+        if name in current and current[name] != clean:
+            raise Fault("adapter_declaration_conflict", 409,
+                        advice="%s: %s: conflicts with an adapter row already stored" % (path, name))
+        if current.get(name) != clean:
+            current[name] = clean
+            _write_document(path, current)
+        merge(path)
     return clean
 
 

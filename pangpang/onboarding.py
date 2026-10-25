@@ -6,14 +6,16 @@ import ntpath
 import posixpath
 import re
 import secrets
+import shutil
+import threading
 import time
 from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from .store import Fault, digest, uid, encode
-from .execution import (ADAPTER_CATALOG, endpoint_extra_env, installation_id,
-                       validate_extra_argv, validate_profile_env, validate_secret_refs,
-                       validate_staged_executor)
+from .execution import (ADAPTER_CATALOG, binary_matches_pin, endpoint_extra_env,
+                       installation_id, validate_extra_argv, validate_profile_env,
+                       validate_secret_refs, validate_staged_executor)
 from .logs import get_logger
 from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
 
@@ -66,6 +68,28 @@ def endpoint(value):
 class Onboarding:
     def __init__(self, service):
         self.s, self.store, self.vault = service, service.store, service.vault
+        self._declare_gates_guard = threading.Lock()
+        self._declare_gates = {}
+
+    def _declare_gate(self, identity):
+        """The claim for one local declaration card. Approve and deny share it."""
+        with self._declare_gates_guard:
+            gate = self._declare_gates.get(identity)
+            if gate is None:
+                gate = threading.Lock()
+                self._declare_gates[identity] = gate
+            return gate
+
+    def _local_declare_gate(self, identity):
+        """The claim when this id is a local declare_adapter card, else None."""
+        req = self.store.get("setup_request", identity)
+        proposal = req.get("proposal") or {}
+        if proposal.get("action") != "declare_adapter":
+            return None
+        host = self.s.execution.hosts.get(req.get("host_id"), {})
+        if host.get("transport") != "local":
+            return None
+        return self._declare_gate(identity)
 
     def _config(self):
         # Includes earlier reports staged in this batch, without publishing them.
@@ -365,7 +389,10 @@ class Onboarding:
         action = body["action"]
         if action == "probe":
             return self.s.operator_probe(host_id, body.get("installation_id"))
-        if self.s.execution.hosts.get(host_id, {}).get("transport") != "connector":
+        host = self.s.execution.hosts.get(host_id, {})
+        if host.get("transport") == "local" and action in {"declare_adapter", "configure"}:
+            return self._request_local(bot_id, work_id, host_id, host, action, body)
+        if host.get("transport") != "connector":
             raise Fault("connector_host_required")
         if action == "discover":
             cmd = self.s.broker.enqueue(host_id, "discover", {"bot_id": bot_id, "work_id": work_id})
@@ -395,6 +422,23 @@ class Onboarding:
         req = self.store.put("setup_request", {"id": uid("setup"), "host_id": host_id, "bot_id": bot_id,
                   "work_id": work_id, "proposal": body, "status": "needs_secret" if action == "credential" else "needs_approval",
                   "expires": time.time() + 3600})
+        return {"request_id": req["id"], "status": req["status"], "yielded": True}
+
+    def _request_local(self, bot_id, work_id, host_id, host, action, body):
+        """Declare or configure on this coordinator. Neither call writes a row."""
+        if action == "declare_adapter":
+            return self._stage_adapter_declaration(host_id, bot_id, work_id, body)
+        if _DECLARATION_FIELDS & set(body):
+            raise Fault("invalid_setup_request_field", 400)
+        if any(k in body for k in ("endpoint", "slot_acquire_args", "slot_release_args",
+                                   "profile", "env", "extra_argv")):
+            raise Fault("operator_owned_setup_field", 400)
+        if not self.s.adapter_known(host_id, body.get("adapter")):
+            raise Fault("adapter_required")
+        staged = {"adapter": body.get("adapter")}
+        if body.get("cwd"):
+            staged["cwd"] = body["cwd"]
+        req = self.stage_executor(bot_id, work_id, None, host, staged, body)
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
     def operator_request(self, body):
@@ -473,6 +517,10 @@ class Onboarding:
             argv = (sibling or {}).get("argv") or []
             if argv:
                 proposal["command"] = [argv[0], *ADAPTER_CATALOG[adapter]["argv"]]
+            else:
+                shown = self._catalog_command(adapter)
+                if shown:
+                    proposal["command"] = shown
         req = self.store.put("setup_request", {
             "id": uid("setup"), "host_id": host_id, "bot_id": bot_id, "work_id": work_id,
             "origin": "executor_proposal", "proposal": proposal, "status": "needs_approval",
@@ -480,6 +528,13 @@ class Onboarding:
         return req
 
     def deny(self, identity):
+        gate = self._local_declare_gate(identity)
+        if gate is None:
+            return self._deny_request(identity)
+        with gate:
+            return self._deny_request(identity)
+
+    def _deny_request(self, identity):
         with self.store.atomic():
             req = self.checked_request(identity, "needs_approval")
             req["status"] = "denied"
@@ -494,8 +549,56 @@ class Onboarding:
                 and i.get("argv")]
         return sorted(rows, key=lambda i: i["id"])[0] if rows else None
 
+    def _catalog_command(self, adapter):
+        """The command shown for a custom row that has no installation yet."""
+        from .adapters_file import is_merged
+        if not is_merged(adapter):
+            return None
+        cat = ADAPTER_CATALOG.get(adapter) or {}
+        binary, argv = cat.get("binary"), cat.get("argv")
+        if not isinstance(binary, str) or not binary or not isinstance(argv, list):
+            return None
+        return [binary, *argv]
+
+    def _resolved_custom_binary(self, adapter):
+        """PATH resolution of one custom catalog binary. Built-ins stay on startup discovery."""
+        from .adapters_file import is_merged
+        if not is_merged(adapter):
+            return None
+        cat = ADAPTER_CATALOG.get(adapter) or {}
+        name = cat.get("binary")
+        if not isinstance(name, str) or not name or "\x00" in name:
+            return None
+        found = shutil.which(name)
+        if not found or not binary_matches_pin(cat, found):
+            return None
+        return found
+
+    def _apply_new_routing(self, row, routing):
+        """Copy priority and use_when onto a row that has no sibling yet."""
+        if "priority" in routing:
+            raw = routing["priority"]
+            if isinstance(raw, bool):
+                raise Fault("invalid_priority", 400)
+            if isinstance(raw, int):
+                value = raw
+            elif isinstance(raw, float) and raw.is_integer():
+                value = int(raw)
+            else:
+                raise Fault("invalid_priority", 400)
+            if not 1 <= value <= 999:
+                raise Fault("invalid_priority", 400)
+            row["priority"] = value
+        if "use_when" in routing:
+            text = routing["use_when"]
+            if text is None or (isinstance(text, str) and not text.strip()):
+                return
+            if not isinstance(text, str) or len(text) > 500:
+                raise Fault("invalid_use_when", 400)
+            row["use_when"] = text.strip()
+
     def _prepare_new_local_profile(self, proposal, draft, body, host_id):
-        """Build a local profile row from an existing command. Does not write it."""
+        """Build a local profile row from a catalog command. Does not write it."""
         adapter = proposal.get("adapter")
         if adapter not in ADAPTER_CATALOG or not host_id:
             raise Fault("unknown_adapter")
@@ -504,32 +607,39 @@ class Onboarding:
         if iid in self.s.execution.installations:
             raise Fault("installation_already_exists", 409)
         sibling = self._sibling_local_installation(host_id, adapter)
-        if not sibling:
-            raise Fault("cli_not_installed")
+        if sibling:
+            binary = sibling["argv"][0]
+        else:
+            binary = self._resolved_custom_binary(adapter)
+            if not binary:
+                raise Fault("cli_not_installed")
         host = self.s.execution.hosts.get(host_id, {})
         from . import runner
         try:
             runner.check_control_separation(host.get("allowed_roots") or [], [self.s.data])
         except ValueError:
             raise Fault("workspace_overlaps_control_plane", 400) from None
+        roots = host.get("allowed_roots") or []
+        fallback = roots[0] if sibling is None and roots else ""
         try:
-            cwd = str(runner.checked(str(draft.get("cwd") or sibling.get("cwd") or "").strip(),
-                                     host.get("allowed_roots") or []))
+            cwd = str(runner.checked(str(draft.get("cwd") or (sibling or {}).get("cwd") or fallback).strip(),
+                                     roots))
         except (ValueError, OSError):
             raise Fault("cwd_outside_allowed_roots", 400) from None
+        base = sibling or {}
         row = {
             "id": iid, "host_id": host_id, "adapter": adapter,
-            "argv": [sibling["argv"][0], *ADAPTER_CATALOG[adapter]["argv"]],
+            "argv": [binary, *ADAPTER_CATALOG[adapter]["argv"]],
             "cwd": cwd, "enabled": True,
-            "prompt_mode": sibling.get("prompt_mode", "stdin"),
-            "risk": sibling.get("risk", "write"),
-            "timeout_s": sibling.get("timeout_s", 3600),
-            "max_concurrency": sibling.get("max_concurrency", ADAPTER_CATALOG[adapter]["concurrency"]),
-            "env_allowlist": list(sibling.get("env_allowlist") or []),
-            "resource_keys": list(sibling.get("resource_keys") or []),
+            "prompt_mode": base.get("prompt_mode", "stdin"),
+            "risk": base.get("risk", "write"),
+            "timeout_s": base.get("timeout_s", 3600),
+            "max_concurrency": base.get("max_concurrency", ADAPTER_CATALOG[adapter]["concurrency"]),
+            "env_allowlist": list(base.get("env_allowlist") or []),
+            "resource_keys": list(base.get("resource_keys") or []),
         }
-        if sibling.get("probe_argv"):
-            row["probe_argv"] = list(sibling["probe_argv"])
+        if base.get("probe_argv"):
+            row["probe_argv"] = list(base["probe_argv"])
         if profile:
             row["profile"] = profile
         if draft.get("env"):
@@ -539,11 +649,13 @@ class Onboarding:
         if draft.get("secret_refs"):
             row["secret_refs"] = dict(draft["secret_refs"])
         routing = {k: draft[k] for k in ("priority", "use_when") if k in draft}
-        if routing:
+        if routing and sibling:
             checked = self.s.prepare_installation_config(sibling["id"], routing)["updated"]
             for key in routing:
                 if key in checked:
                     row[key] = checked[key]
+        elif routing:
+            self._apply_new_routing(row, routing)
         endpoint_value = (body or {}).get("endpoint")
         model, api = "", None
         if endpoint_value and ADAPTER_CATALOG[adapter].get("models_json"):
@@ -667,12 +779,65 @@ class Onboarding:
                 raise Fault("device_revoked", 403)
         return req
 
+    def _approve_local_declaration(self, identity):
+        """Write one approved row into this coordinator's adapters file.
+
+        The card is claimed before any file write, so deny cannot commit
+        while this approval is in progress. The file write stays outside the
+        store transaction. The request remains needs_approval until that
+        write has succeeded.
+        """
+        with self._declare_gate(identity):
+            req = self.checked_request(identity, "needs_approval")
+            proposal = dict(req.get("proposal") or {})
+            host_id = req.get("host_id")
+            if self.s.execution.hosts.get(host_id, {}).get("transport") != "local":
+                raise Fault("connector_host_required")
+            from .adapters_file import clean_declaration, write_merged_row
+            name = proposal.get("adapter")
+            clean = clean_declaration(name, proposal.get("adapter_row"))
+            if (clean != proposal.get("adapter_row")
+                    or proposal.get("command") != [clean["binary"], *clean["argv"]]):
+                raise Fault("adapter_declaration_mismatch", 403)
+            write_merged_row(self.s.data / "adapters.json", name, clean)
+            self.s.execution.refresh_unknown_adapters()
+            with self.store.atomic():
+                current = self.checked_request(identity, "needs_approval")
+                current_proposal = current.get("proposal") or {}
+                if (current_proposal.get("adapter_row") != clean
+                        or current_proposal.get("command") != [clean["binary"], *clean["argv"]]):
+                    raise Fault("adapter_declaration_mismatch", 403)
+                current["status"] = "done"
+                self.store.put("setup_request", current)
+                self._publish_local_declaration(current, name, clean)
+            return {"accepted": True}
+
+    def _publish_local_declaration(self, req, name, clean):
+        """Tell the assistant the approved row was stored. No command is launched."""
+        bot_id, work_id = req.get("bot_id"), req.get("work_id")
+        if not bot_id or not work_id:
+            return
+        try:
+            work = self.store.get("work", work_id)
+        except Fault:
+            return
+        safe = {"action": "declare_adapter", "host_id": req.get("host_id"),
+                "declared_adapters": [{"adapter": name, **clean}]}
+        root = self.s._new_root("operator", "setup:" + str(req.get("id") or name))["id"]
+        self.s.new_turn(bot_id, work, safe, "setup_result", "device", root_request_id=root)
+
     def approve(self, identity, body=None):
         body = body or {}
         if set(body) - {"endpoint", "profile", "env", "extra_argv"}:
             raise Fault("invalid_setup_approval", 400)
         peeked = self.store.get("setup_request", identity)
-        if (peeked.get("proposal") or {}).get("action") == "executor_config":
+        proposal = peeked.get("proposal") or {}
+        if (proposal.get("action") == "declare_adapter"
+                and self.s.execution.hosts.get(peeked.get("host_id"), {}).get("transport") == "local"):
+            if body:
+                raise Fault("invalid_setup_approval", 400)
+            return self._approve_local_declaration(identity)
+        if proposal.get("action") == "executor_config":
             creating = not (peeked.get("proposal") or {}).get("installation_id")
             if creating:
                 if set(body) - {"endpoint"}:

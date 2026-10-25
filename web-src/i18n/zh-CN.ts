@@ -156,7 +156,7 @@ export default {
     apiEndpointOptional: 'API 地址（可留空用 CLI 默认端点）', operationFailed: '操作失败',
     applySettings: '应用这些设置', denySettings: '拒绝', draftLine: '待确认的更改：{{draft}}', cannotOpen: '无法打开', openSecretWindow: '打开密钥窗口',
     declareAdapterLine: '登记自定义执行器：{{adapter}}',
-    declareAdapterBoundary: '批准后设备会写入下面这一整行。命令以这里显示的为准。',
+    declareAdapterBoundary: '批准后按这里显示的整行保存。命令以这里显示的为准。',
     commandLine: '命令：{{command}}',
     secretDialogTitle: '安全输入密钥', secretSaveHeading: '安全保存 API 密钥', cliDefaultEndpoint: 'CLI 默认端点',
     secret: '密钥', secretStorageHint: '浏览器加密后交给目标设备解密保存。密钥不进入聊天或模型。',
