@@ -91,6 +91,21 @@ async function assertChatLayout(page, width, height, {coarse}) {
     const name = document.querySelector('#bot-name');
     const nameBox = name.getBoundingClientRect();
     const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const contentInline = (el) => {
+      const s = getComputedStyle(el);
+      return el.getBoundingClientRect().width
+        - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight)
+        - parseFloat(s.borderLeftWidth) - parseFloat(s.borderRightWidth);
+    };
+    const paneInline = contentInline(document.querySelector('main'));
+    const composerEl = document.querySelector('#composer');
+    const messagesEl = document.querySelector('#messages');
+    const messageEl = document.querySelector('#message');
+    const composerInline = contentInline(composerEl);
+    const transcriptInline = contentInline(messagesEl);
+    const narrowLimit = 40 * root + 0.5;
+    const firstBlock = body.firstElementChild;
+    const caps = document.querySelector('#capability-list');
     const activity = document.querySelector('#activity');
     const activityBox = activity.getBoundingClientRect();
     const pill = document.querySelector('#attention-pill');
@@ -131,8 +146,21 @@ async function assertChatLayout(page, width, height, {coarse}) {
       pillText: pill ? pill.innerText.trim() : '',
       pillWidth: pillBox ? pillBox.width : 0,
       pillHeight: pillBox ? pillBox.height : 0,
-      composerPad: parseFloat(getComputedStyle(document.querySelector('#composer')).paddingBottom),
-      expectedPad: (short ? 0.375 : 0.75) * root,
+      composerPad: parseFloat(getComputedStyle(composerEl).paddingBottom),
+      expectedPad: ((short || paneInline <= narrowLimit) ? 0.375 : 0.75) * root,
+      root,
+      messageH: messageEl.getBoundingClientRect().height,
+      composerH: composerEl.getBoundingClientRect().height,
+      narrowComposer: composerInline <= narrowLimit,
+      narrowPane: paneInline <= narrowLimit,
+      narrowTranscript: transcriptInline <= narrowLimit,
+      transcriptInline,
+      bodyWidth: body.getBoundingClientRect().width,
+      bodyPadTop: parseFloat(bodyStyle.paddingTop),
+      bodyPadLeft: parseFloat(bodyStyle.paddingLeft),
+      listPadLeft: parseFloat(getComputedStyle(messagesEl).paddingLeft),
+      firstBlockMargin: firstBlock ? parseFloat(getComputedStyle(firstBlock).marginTop) : 0,
+      capPadTop: caps ? parseFloat(getComputedStyle(caps).paddingTop) : null,
     };
   }, height <= 500);
   expect(report.missing, JSON.stringify(report)).toBeFalsy();
@@ -157,6 +185,41 @@ async function assertChatLayout(page, width, height, {coarse}) {
     expect(report.pillHeight, 'pending height at ' + width).toBeGreaterThanOrEqual(44);
   }
   expect(Math.abs(report.composerPad - report.expectedPad)).toBeLessThanOrEqual(1);
+  // Empty field: one line on a narrow composer, multi-line on a wide one.
+  // A short viewport keeps the existing 3.5rem field so send stays on screen.
+  if (height <= 500) {
+    expect(report.messageH, 'short field at ' + width).toBeGreaterThanOrEqual(3.5 * report.root - 2);
+    expect(report.messageH, 'short field at ' + width).toBeLessThanOrEqual(3.5 * report.root + 2);
+  } else if (report.narrowComposer) {
+    expect(report.messageH, 'compact field at ' + width).toBeGreaterThanOrEqual(2.75 * report.root - 2);
+    expect(report.messageH, 'compact field at ' + width).toBeLessThanOrEqual(2.75 * report.root + 2);
+    if (coarse) expect(report.messageH, 'field tap size at ' + width).toBeGreaterThanOrEqual(44);
+    expect(report.composerH, 'composer chrome at ' + width).toBeLessThanOrEqual(9 * report.root);
+  } else {
+    expect(report.messageH, 'wide field at ' + width).toBeGreaterThanOrEqual(4.5 * report.root);
+  }
+  if (report.narrowTranscript) {
+    expect(report.lineRatio, 'narrow leading at ' + width).toBeLessThanOrEqual(1.6);
+    expect(report.bodyPadTop, 'bubble pad at ' + width).toBeLessThanOrEqual(0.375 * report.root + 1);
+    expect(report.bodyPadLeft, 'bubble side pad at ' + width).toBeLessThanOrEqual(0.625 * report.root + 1);
+    const bubbleCap = Math.min(report.transcriptInline, report.capCh * 72 / 75, 42 * report.root);
+    expect(report.bodyWidth, 'bubble fill at ' + width).toBeGreaterThanOrEqual(bubbleCap - 2);
+    if (report.transcriptInline <= 28 * report.root) {
+      expect(report.bodyWidth / report.transcriptInline, 'phone bubble fill at ' + width).toBeGreaterThanOrEqual(0.96);
+    }
+    expect(report.firstBlockMargin, 'nested block margin at ' + width).toBeLessThanOrEqual(0.5);
+  } else {
+    expect(report.lineRatio, 'wide leading at ' + width).toBeGreaterThanOrEqual(1.65);
+    expect(report.bodyPadLeft, 'wide bubble pad at ' + width).toBeGreaterThanOrEqual(0.75 * report.root - 1);
+  }
+  if (report.narrowPane) {
+    expect(report.listPadLeft, 'list gutter at ' + width).toBeLessThanOrEqual(0.5 * report.root + 1);
+  } else {
+    expect(report.listPadLeft, 'wide gutter at ' + width).toBeGreaterThanOrEqual(0.75 * report.root - 1);
+  }
+  if (report.capPadTop !== null && report.narrowPane) {
+    expect(report.capPadTop, 'status pad at ' + width).toBeLessThanOrEqual(0.25 * report.root + 1);
+  }
   await saveShot(page, width, height);
 }
 
