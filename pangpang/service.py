@@ -5110,20 +5110,23 @@ class Service:
     def _authorization_matches(self, stored, inst):
         """True when a stored digest is the current formula or the name-inclusive one.
 
-        The legacy value matches only while every host field, including the
-        current display name, is unchanged. Connector rows compare the
-        device-reported digest only.
+        The name-inclusive value matches only while every host field, including
+        the current display name, is unchanged. A connector matches the
+        device-reported digest, and also the name-inclusive digest of the
+        stored host. That device digest is not wrapped with a profile binding.
         """
         if not isinstance(stored, str) or not stored or not isinstance(inst, dict):
             return False
         live = self._captured_authorization_digest(inst)
         if live and stored == live:
             return True
+        config = self._config_for_digest()
+        if inst.get("id") not in {i.get("id") for i in config.get("installations", [])}:
+            return False
         host = self.execution.hosts.get(inst.get("host_id"), {})
         if host.get("transport") == "connector":
-            return False
-        if inst.get("id") not in {i.get("id") for i in self._config_for_digest().get("installations", [])}:
-            return False
+            from .connector import legacy_authorization_digest
+            return stored == legacy_authorization_digest(config, inst["id"])
         return stored == self._legacy_authorization_digest(inst["id"])
 
     def _grant_matches(self, inst):

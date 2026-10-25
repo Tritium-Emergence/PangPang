@@ -361,6 +361,36 @@ class RenameHostTests(unittest.TestCase):
         self.assertEqual(self.app._authorization_denied(task, moved), "installation_not_authorized")
         self.assertEqual(self.app._start_denied(task), "installation_not_authorized")
 
+    def test_connector_legacy_digest_matches_until_rename(self):
+        config = self.app._config_for_digest()
+        legacy = legacy_authorization_digest(config, "codex-linux")
+        reported = authorization_digest(config, "codex-linux")
+        self.assertNotEqual(legacy, reported)
+        row = self.app.store.get("settings", "executor_grants")
+        grants = dict(row.get("grants") or {})
+        grants["codex-linux"] = {"digest": legacy, "granted_at": 1, "origin": "migration"}
+        pending = [item for item in (row.get("pending_device") or []) if item != "codex-linux"]
+        self.app.store.put("settings", dict(row, grants=grants, pending_device=pending))
+        self.app.store.put("probe", {
+            "id": "codex-linux", "available": True, "supervision": "windows-job-object",
+            "authorization_digest": reported})
+        task = {"id": "task-connector-legacy", "host_id": "host-linux",
+                "installation_id": "codex-linux", "authorization_digest": legacy,
+                "status": "queued"}
+        self.app.store.put("task", task)
+        inst = self.app.execution.installations["codex-linux"]
+        self.assertEqual(self.app._device_reported_digest("codex-linux"), reported)
+        self.assertTrue(self.app._grant_matches(inst))
+        self.assertIsNone(self.app._authorization_denied(task, inst))
+        self.assertIsNone(self.app._start_denied(task))
+        self._rename(LINUX, "Finland-Linux")
+        renamed = self.app.execution.installations["codex-linux"]
+        self.assertEqual(self.app.execution.hosts["host-linux"]["name"], "Finland-Linux")
+        self.assertEqual(self.app._device_reported_digest("codex-linux"), reported)
+        self.assertFalse(self.app._grant_matches(renamed))
+        self.assertEqual(self.app._authorization_denied(task, renamed), "installation_not_authorized")
+        self.assertEqual(self.app._start_denied(task), "installation_not_authorized")
+
     def test_child_bot_cannot_rename(self):
         child = self.app.create_bot({"name": "helper", "role": "notes"})
         sent = self.app.send("bot-main", {"text": "child"}, "child-work")
