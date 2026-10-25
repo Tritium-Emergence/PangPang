@@ -89,14 +89,25 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .md-table th { background: var(--soft); }
 .md-h, .md-p, .md-list, .md-quote, .md-pre { margin: 6px 0; }
 .md-hr { border-top: 1px solid var(--line); margin: 12px 0; }
-/* Message field and send control share one row at every pane width. */
+/* File actions, the message field, and send share one row at every pane width. */
 #composer .compose-row {
   display: flex;
   flex-flow: row nowrap;
   align-items: flex-end;
+  gap: 0.375rem;
   min-width: 0;
   max-width: 100%;
 }
+#composer .compose-row > .compose-files {
+  display: flex;
+  flex: 0 0 auto;
+  flex-flow: row nowrap;
+  align-items: flex-end;
+  gap: 0.25rem;
+  margin: 0;
+  min-width: 0;
+}
+#composer .compose-row > .compose-files > button { white-space: nowrap; }
 #composer .compose-row > #message {
   flex: 1 1 0%;
   width: auto;
@@ -106,7 +117,7 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 #composer .compose-row > .compose-bottom {
   flex: 0 0 auto;
   margin-top: 0;
-  margin-left: 0.5rem;
+  margin-left: 0;
 }
 #composer #send { white-space: nowrap; }
 
@@ -140,14 +151,11 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   font-size: clamp(1rem, 0.96rem + 0.3cqi, 1.125rem);
   line-height: 1.7;
 }
-/* Secondary composer chrome drops out when the composer itself is narrow. */
+/* The hint is the only thing left above the control row; drop that bar when the composer is narrow. */
 @container composer (max-width: 36rem) {
-  #composer .compose-hint { display: none; }
-  #composer .compose-options { flex-wrap: wrap; }
-  #composer .compose-files { margin-left: 0; flex-wrap: wrap; }
+  #composer .compose-options { display: none; }
 }
-/* Narrow chat column: one-line field, tighter transcript. File actions stay a
-   separate row so their labels and 44px targets remain. Wide columns keep the
+/* Narrow chat column: one-line field, tighter transcript. Wide columns keep the
    multi-line field (container is the pane, not the viewport). */
 @container pane (max-width: 40rem) {
   #messages {
@@ -176,10 +184,12 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   }
 }
 @container composer (max-width: 40rem) {
-  #composer .compose-options { gap: 0.25rem 0.5rem; }
-  #composer .compose-files { gap: 0.25rem 0.5rem; }
+  #composer .compose-row { gap: 0.25rem; }
   #composer .compose-row > #message,
-  #composer .compose-row > .compose-bottom { margin-top: 0.25rem; }
+  #composer .compose-row > .compose-bottom,
+  #composer .compose-row > .compose-files { margin-top: 0; }
+  /* Labels stay intact; a shorter send padding keeps the field the widest control. */
+  #composer #send { padding-left: 0.5rem; padding-right: 0.5rem; }
   #composer #message {
     height: 2.75rem;
     min-height: 2.75rem;

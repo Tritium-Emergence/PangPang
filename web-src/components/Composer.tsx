@@ -146,11 +146,6 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
     >
       <div className="compose-options flex items-center gap-3 text-xs text-muted">
         <span className="compose-hint">{t('composer.hint')}</span>
-        <span className="compose-files ml-auto flex gap-2">
-          <button type="button" id="upload" className="hover:text-ink" onClick={() => fileRef.current?.click()}>＋ {t('composer.uploadFile')}</button>
-          <button type="button" id="attach" className="hover:text-ink" onClick={() => setFileDialog(true)}>＋ {t('composer.referenceDeviceFile')}</button>
-          <input ref={fileRef} type="file" id="file-pick" multiple hidden onChange={(e) => { if (e.target.files?.length) void upload(e.target.files); e.target.value = ''; }} />
-        </span>
       </div>
       {fileDialog ? <FileDialog store={store} botId={botId} onClose={() => setFileDialog(false)} />: null}
 
@@ -179,6 +174,11 @@ export function Composer({store, botId}: {store: Store; botId: string}) {
 ): null}
 
       <div className="compose-row">
+        <span className="compose-files flex gap-2 text-xs text-muted">
+          <button type="button" id="upload" className="hover:text-ink" onClick={() => fileRef.current?.click()}>＋ {t('composer.uploadFile')}</button>
+          <button type="button" id="attach" className="hover:text-ink" onClick={() => setFileDialog(true)}>＋ {t('composer.referenceDeviceFile')}</button>
+          <input ref={fileRef} type="file" id="file-pick" multiple hidden onChange={(e) => { if (e.target.files?.length) void upload(e.target.files); e.target.value = ''; }} />
+        </span>
         <textarea
           id="message"
           rows={3}

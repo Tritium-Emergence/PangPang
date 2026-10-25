@@ -62,6 +62,9 @@ async function assertChatLayout(page, width, height, {coarse}) {
   const report = await page.evaluate((short) => {
     const input = document.querySelector('#message').getBoundingClientRect();
     const send = document.querySelector('#send').getBoundingClientRect();
+    const upload = document.querySelector('#upload').getBoundingClientRect();
+    const attach = document.querySelector('#attach').getBoundingClientRect();
+    const sharesRow = (a, b) => a.top < b.bottom - 1 && b.top < a.bottom - 1;
     const body = document.querySelector('#messages .body');
     const bodyStyle = getComputedStyle(body);
     const probe = document.createElement('span');
@@ -128,7 +131,11 @@ async function assertChatLayout(page, width, height, {coarse}) {
       }
     }
     return {
-      sameRow: input.top < send.bottom - 1 && send.top < input.bottom - 1 && send.left >= input.right - 1 && input.width > send.width,
+      sameRow: sharesRow(input, send) && send.left >= input.right - 1 && input.width > send.width
+        && sharesRow(upload, input) && sharesRow(attach, input)
+        && upload.right <= attach.left + 2 && attach.right <= input.left + 2,
+      uploadW: upload.width, uploadH: upload.height, attachW: attach.width, attachH: attach.height,
+      inputW: input.width, sendW: send.width,
       sendInView: send.right <= innerWidth + 1 && send.bottom <= innerHeight + 1,
       overflow: document.documentElement.scrollWidth - innerWidth,
       fonts,
@@ -147,6 +154,8 @@ async function assertChatLayout(page, width, height, {coarse}) {
       pillWidth: pillBox ? pillBox.width : 0,
       pillHeight: pillBox ? pillBox.height : 0,
       composerPad: parseFloat(getComputedStyle(composerEl).paddingBottom),
+      composerPadTop: parseFloat(getComputedStyle(composerEl).paddingTop),
+      hintHidden: document.querySelector('#composer .compose-hint').getBoundingClientRect().height < 1,
       expectedPad: ((short || paneInline <= narrowLimit) ? 0.375 : 0.75) * root,
       root,
       messageH: messageEl.getBoundingClientRect().height,
@@ -194,7 +203,6 @@ async function assertChatLayout(page, width, height, {coarse}) {
     expect(report.messageH, 'compact field at ' + width).toBeGreaterThanOrEqual(2.75 * report.root - 2);
     expect(report.messageH, 'compact field at ' + width).toBeLessThanOrEqual(2.75 * report.root + 2);
     if (coarse) expect(report.messageH, 'field tap size at ' + width).toBeGreaterThanOrEqual(44);
-    expect(report.composerH, 'composer chrome at ' + width).toBeLessThanOrEqual(9 * report.root);
   } else {
     expect(report.messageH, 'wide field at ' + width).toBeGreaterThanOrEqual(4.5 * report.root);
   }
@@ -219,6 +227,11 @@ async function assertChatLayout(page, width, height, {coarse}) {
   }
   if (report.capPadTop !== null && report.narrowPane) {
     expect(report.capPadTop, 'status pad at ' + width).toBeLessThanOrEqual(0.25 * report.root + 1);
+  }
+  // File actions sit on the field's row. With the hint hidden, that row is the composer.
+  if (report.hintHidden && height > 500) {
+    const rowBudget = report.messageH + report.composerPad + report.composerPadTop + 8;
+    expect(report.composerH, 'one control row at ' + width).toBeLessThanOrEqual(rowBudget);
   }
   await saveShot(page, width, height);
 }
