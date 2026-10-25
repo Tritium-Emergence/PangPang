@@ -652,7 +652,8 @@ def unknown_adapter_advice(data, installation_id, adapter, connector=False):
         return " ".join(text.split())
     path = str(Path(data) / "adapters.json")
     text = ("installation %s adapter %s is not in the built-in catalog or %s; "
-            "declare the adapter as a custom row in %s to re-enable it"
+            "declare the adapter as a custom row in %s, or approve a declare_adapter "
+            "card for that full command, to re-enable it"
             % (installation_id, adapter, path, path))
     return " ".join(str(text).split())
 

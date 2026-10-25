@@ -389,5 +389,188 @@ class DeclaredMapPageTests(unittest.TestCase):
         self.assertFalse(self.app.adapter_known("host-200", "legacy-private-cli"))
 
 
+class LocalDeclareAdapterTests(unittest.TestCase):
+    """A local host stores an approved custom row in the coordinator data directory."""
+
+    def setUp(self):
+        catalog_teardown(self)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.cfg = empty_config()
+        self.cfg["hosts"] = [{
+            "id": "host-local", "name": "this-machine", "transport": "local", "os": "Linux",
+            "allowed_roots": [str(self.workspace)],
+        }]
+        self.app = Service(self.cfg, self.data, deployment_level="L0")
+        self.addCleanup(self.app.store.close)
+        self.addCleanup(self.tmp.cleanup)
+        self.codex_argv = list(ADAPTER_CATALOG["codex"]["argv"])
+        self.work_id = self.app.send("bot-main", {"text": "declare local"}, "declare-local")["work_id"]
+        self.row = {"binary": "dsk-claude", "argv": ["--stdio"], "concurrency": 1, "priority": 20,
+                    "use_when": "echo a line", "secret_env": "DESK_TOKEN",
+                    "extra_env": {"DESK_PROFILE": "notes"}}
+
+    def declare_body(self, **extra):
+        fields = {"host_id": "host-local", "action": "declare_adapter", "adapter": "dsk-claude", **self.row}
+        fields.update(extra)
+        return fields
+
+    def stage(self, **extra):
+        return self.app.onboarding.request("bot-main", self.work_id, self.declare_body(**extra))
+
+    def test_approval_writes_the_coordinator_catalog_and_configure_can_use_it(self):
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.request("bot-main", self.work_id, {
+                "host_id": "host-local", "action": "configure", "adapter": "dsk-claude"})
+        self.assertEqual(ctx.exception.code, "adapter_required")
+        with self.assertRaises(Fault) as ctx:
+            self.app.propose_executor("bot-main", self.work_id, {
+                "host_id": "host-local", "adapter": "dsk-claude"})
+        self.assertEqual(ctx.exception.code, "unknown_adapter")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.request("bot-main", self.work_id, {
+                "host_id": "host-local", "action": "discover"})
+        self.assertEqual(ctx.exception.code, "connector_host_required")
+        self.assertFalse((self.data / "adapters.json").exists())
+        self.assertNotIn("dsk-claude", ADAPTER_CATALOG)
+
+        with self.app.store.atomic():
+            denied = self.stage()
+        self.assertEqual(denied["status"], "needs_approval")
+        self.assertFalse((self.data / "adapters.json").exists())
+        self.assertEqual(self.app.store.find("command", action="declare_adapter"), [])
+        proposal = self.app.store.get("setup_request", denied["request_id"])["proposal"]
+        self.assertEqual(proposal["command"], ["dsk-claude", "--stdio"])
+        self.assertEqual(proposal["adapter_row"], self.row)
+        self.app.onboarding.deny(denied["request_id"])
+        self.assertFalse((self.data / "adapters.json").exists())
+        self.assertNotIn("dsk-claude", ADAPTER_CATALOG)
+
+        staged = self.stage()
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(staged["request_id"], {"endpoint": "https://example.com"})
+        self.assertEqual(ctx.exception.code, "invalid_setup_approval")
+        self.assertFalse((self.data / "adapters.json").exists())
+        with self.assertRaises(Fault) as ctx:
+            with self.app.store.atomic():
+                self.app.onboarding.approve(staged["request_id"], {})
+        self.assertTrue(ctx.exception.code.startswith("io_inside_transaction"))
+        self.assertFalse((self.data / "adapters.json").exists())
+        self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "needs_approval")
+
+        accepted = self.app.onboarding.approve(staged["request_id"], {})
+        self.assertEqual(accepted, {"accepted": True})
+        self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "done")
+        self.assertEqual(self.app.store.find("command", action="declare_adapter"), [])
+        self.assertEqual(self.app.store.find("declared_adapters"), [])
+        stored = json.loads((self.data / "adapters.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["dsk-claude"], self.row)
+        self.assertEqual(adapters_file.load(self.data / "adapters.json")["dsk-claude"], self.row)
+        self.assertEqual((self.data / "adapters.json").stat().st_mode & 0o022, 0)
+        self.assertFalse((self.data / ".adapters.json.tmp").exists())
+        self.assertEqual(ADAPTER_CATALOG["dsk-claude"]["argv"], ["--stdio"])
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], self.codex_argv)
+        self.assertTrue(self.app.adapter_known("host-local", "dsk-claude"))
+        names = [item["adapter"] for item in self.app.list_executors()["adapters"]]
+        self.assertIn("dsk-claude", names)
+        self.assertNotIn("argv", self.app.list_executors()["adapters"][0])
+        told = [item for item in self.app.store.find("message") if item.get("kind") == "setup_result"]
+        self.assertEqual(told[-1]["content"]["declared_adapters"][0]["binary"], "dsk-claude")
+        self.assertEqual(told[-1]["content"]["declared_adapters"][0]["argv"], ["--stdio"])
+
+        missing = self.app.propose_executor("bot-main", self.work_id, {
+            "host_id": "host-local", "adapter": "dsk-claude", "profile": "missing"})
+        with patch("pangpang.onboarding.shutil.which", return_value=None):
+            with self.assertRaises(Fault) as ctx:
+                self.app.onboarding.approve(missing["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "cli_not_installed")
+        self.assertNotIn("dsk-claude-missing-host-local", self.app.execution.installations)
+
+        proposed = self.app.propose_executor("bot-main", self.work_id, {
+            "host_id": "host-local", "adapter": "dsk-claude", "priority": 4, "use_when": "notes only"})
+        self.assertEqual(proposed["staged"]["status"], "needs_approval")
+        card = self.app.store.get("setup_request", proposed["staged"]["request_id"])
+        self.assertEqual(card["proposal"]["action"], "executor_config")
+        self.assertEqual(card["proposal"]["command"], ["dsk-claude", "--stdio"])
+        card["proposal"]["command"] = ["evil-binary", "--not-catalog"]
+        self.app.store.put("setup_request", card)
+        with patch("pangpang.onboarding.shutil.which", return_value="/usr/local/bin/dsk-claude"):
+            created = self.app.onboarding.approve(card["id"], {})
+        iid = "dsk-claude-host-local"
+        self.assertEqual(created["installation_id"], iid)
+        self.assertFalse(created["probe"]["available"])
+        self.assertEqual(created["probe"]["reason"], "binary_not_found")
+        installed = self.app.execution.installations[iid]
+        self.assertEqual(installed["argv"], ["/usr/local/bin/dsk-claude", "--stdio"])
+        self.assertEqual(installed["cwd"], str(self.workspace.resolve()))
+        self.assertEqual(installed["extra_env"], {"DESK_PROFILE": "notes"})
+        self.assertEqual(installed["priority"], 4)
+        self.assertEqual(installed["use_when"], "notes only")
+        self.assertEqual(self.app._route_priority(installed), 4)
+        self.assertEqual(self.app._use_when(installed), "notes only")
+        self.assertNotIn(iid, self.app.execution.unknown_adapters)
+        blocked = self.app.route("bot-main", {"id": self.work_id}, {"installation_id": "dsk-claude"})
+        self.assertIsNone(blocked["selected"])
+        reasons = {item["reason"] for item in blocked["rejected"] if item["installation_id"] == iid}
+        self.assertIn("discovery_failed", reasons)
+        self.assertNotIn("unknown_adapter", reasons)
+        self.app.store.put("probe", {"id": iid, "available": True, "supervision": "windows-job-object",
+                                     "at": 1})
+        routed = self.app.route("bot-main", {"id": self.work_id}, {"installation_id": "dsk-claude"})
+        self.assertEqual(routed["selected"]["installation_id"], iid)
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], self.codex_argv)
+
+    def test_builtin_protocol_and_conflict_are_refused(self):
+        before = self.app.store.find("setup_request")
+        with self.assertRaises(Fault) as ctx:
+            self.stage(adapter="codex")
+        self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
+        self.assertIn("built-in", ctx.exception.advice)
+        with self.assertRaises(Fault) as ctx:
+            self.stage(stdin_protocol="claude-stream-json")
+        self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
+        self.assertIn("stdin_protocol", ctx.exception.advice)
+        self.assertEqual(self.app.store.find("setup_request"), before)
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], self.codex_argv)
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.request("bot-main", self.work_id, self.declare_body(host_id="missing"))
+        self.assertEqual(ctx.exception.code, "connector_host_required")
+
+        staged = self.stage()
+        path = self.data / "adapters.json"
+        other = {"binary": "dsk-claude", "argv": ["--old"], "concurrency": 1, "priority": 20,
+                 "use_when": "echo a line"}
+        path.write_text(json.dumps({"dsk-claude": other, "my-echo": dict(ROW)}), encoding="utf-8")
+        path.chmod(0o644)
+        before_text = path.read_text(encoding="utf-8")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(staged["request_id"], {})
+        self.assertEqual(ctx.exception.code, "adapter_declaration_conflict")
+        self.assertEqual(path.read_text(encoding="utf-8"), before_text)
+        self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "needs_approval")
+        self.assertNotIn("dsk-claude", ADAPTER_CATALOG)
+
+        fresh = self.stage()
+        stored_req = self.app.store.get("setup_request", fresh["request_id"])
+        stored_req["proposal"]["command"] = ["dsk-claude", "--swapped"]
+        self.app.store.put("setup_request", stored_req)
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(fresh["request_id"], {})
+        self.assertEqual(ctx.exception.code, "adapter_declaration_mismatch")
+        self.assertEqual(path.read_text(encoding="utf-8"), before_text)
+
+        opened = self.app.onboarding.request("bot-main", self.work_id, {
+            "host_id": "host-local", "action": "configure", "adapter": "codex"})
+        self.assertEqual(opened["status"], "needs_approval")
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(opened["request_id"], {})
+        self.assertEqual(ctx.exception.code, "cli_not_installed")
+        self.assertNotIn("codex-host-local", self.app.execution.installations)
+
+
 if __name__ == "__main__":
     unittest.main()

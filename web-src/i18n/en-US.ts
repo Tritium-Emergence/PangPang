@@ -243,7 +243,7 @@ export default {
 
     applySettings: 'Apply these settings', denySettings: 'Deny', draftLine: 'Change awaiting confirmation: {{draft}}', cannotOpen: 'Cannot open', openSecretWindow: 'Open key window',
     declareAdapterLine: 'Declare custom adapter: {{adapter}}',
-    declareAdapterBoundary: 'Approving writes this row on the device. The command is stored as shown.',
+    declareAdapterBoundary: 'Approving stores this exact row. The command is stored as shown.',
     commandLine: 'Command: {{command}}',
 
     secretDialogTitle: 'Secure key entry', secretSaveHeading: 'Securely save the API key', cliDefaultEndpoint: 'CLI default endpoint',

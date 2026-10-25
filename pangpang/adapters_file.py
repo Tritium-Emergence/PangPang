@@ -5,8 +5,10 @@ each side (coordinator and connector read their OWN data directory — argv
 stays operator-defined, never model-defined). For a connector host the file is
 device-only: sync carries a bounded routing projection (validate_declared), and
 the connector can merge one row after the operator approves that exact row.
-The cloud does not run that command. Any violation fails closed with the file,
-line and field named.
+The cloud does not run that command. A local host is this coordinator: the
+same approval writes the row into the coordinator data directory and merges
+it. That write does not launch the binary. Any violation fails closed with
+the file, line and field named.
 """
 import json
 import os
@@ -38,6 +40,11 @@ def _builtin_names():
 
 
 _merged_names = set()
+
+
+def is_merged(name):
+    """True when this name was merged from an adapters file, not a built-in row."""
+    return name in _merged_names
 
 
 def _bad(path, line, subject, message):
