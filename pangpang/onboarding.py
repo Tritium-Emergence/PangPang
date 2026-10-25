@@ -19,6 +19,11 @@ from .model_config import DEFAULT_OUTPUT_TOKENS, FIELDS, setup_profile
 
 log = get_logger("onboarding")
 
+# Fields of one adapters.json row. They are accepted only on declare_adapter.
+# configure must not carry them: argv stays the approved declaration, not a
+# later model edit of the configure call.
+_DECLARATION_FIELDS = {"binary", "argv", "concurrency", "priority", "use_when", "secret_env", "extra_env"}
+
 
 def apply_model_concurrency(candidate, value):
     """Persist the operator's model slot count on the existing scheduler dict.
@@ -239,6 +244,120 @@ class Onboarding:
                 self.vault.delete(ref)
             raise
 
+    def _stage_adapter_declaration(self, host_id, bot_id, work_id, body):
+        """Open an approval card for one custom row. Does not write a file."""
+        from .adapters_file import clean_declaration
+        row = {k: body[k] for k in _DECLARATION_FIELDS if k in body}
+        for key in set(body) - {"host_id", "action", "adapter", *_DECLARATION_FIELDS}:
+            row[key] = body[key]
+        name = body.get("adapter")
+        clean = clean_declaration(name, row)
+        proposal = {"action": "declare_adapter", "adapter": name, "adapter_row": clean,
+                    "command": [clean["binary"], *clean["argv"]]}
+        req = self.store.put("setup_request", {
+            "id": uid("setup"), "host_id": host_id, "bot_id": bot_id, "work_id": work_id,
+            "proposal": proposal, "status": "needs_approval", "expires": time.time() + 3600})
+        return {"request_id": req["id"], "status": req["status"], "yielded": True}
+
+    def _project_declared(self, host_id, reported, expected_name, expected_row):
+        """The rows a matching declare report would store. Does not write.
+
+        Every reported row is checked. Only the approved name is kept; sibling
+        names are not imported. A mismatch stores nothing.
+        """
+        from .adapters_file import MAX_ROWS, clean_declaration
+        if not isinstance(reported, list) or len(reported) > MAX_ROWS:
+            raise Fault("invalid_declared_adapters", 400)
+        expected = clean_declaration(expected_name, expected_row)
+        rows = {}
+        for item in reported:
+            if not isinstance(item, dict):
+                raise Fault("invalid_declared_adapters", 400)
+            name = item.get("adapter")
+            body = {k: v for k, v in item.items() if k != "adapter"}
+            rows[name] = clean_declaration(name, body)
+        if rows.get(expected_name) != expected:
+            raise Fault("adapter_declaration_mismatch", 403)
+        try:
+            previous = dict(self.store.get("declared_adapters", host_id).get("rows") or {})
+        except Fault as error:
+            if error.status != 404:
+                raise
+            previous = {}
+        previous[expected_name] = expected
+        return previous
+
+    def _accept_declared(self, host_id, reported, expected_name, expected_row):
+        """Remember one approved row when the device report matches it exactly."""
+        previous = self._project_declared(host_id, reported, expected_name, expected_row)
+        self.store.put("declared_adapters", {"id": host_id, "rows": previous})
+        remembered = dict(previous)
+
+        def publish():
+            host_rows = dict(self.s.execution.declared_adapters.get(host_id) or {})
+            host_rows.update(remembered)
+            self.s.execution.set_declared_adapters(host_id, host_rows)
+        self.store.after_commit("declared:" + host_id, publish)
+        return previous
+
+    def _bounded_result(self, cmd, result):
+        """Fields safe to persist for discover and declare_adapter. No writes."""
+        safe = {"action": cmd["action"], "host_id": cmd["host_id"]}
+        payload = cmd.get("payload") or {}
+        if result.get("error"):
+            advice = result.get("advice") if result.get("error") in {
+                "invalid_adapter", "invalid_adapter_declaration", "adapter_declaration_conflict"} else None
+            folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
+            safe["error"] = result["error"] + ": " + folded if folded else "device_setup_failed"
+            return safe
+        if cmd["action"] == "discover":
+            items = [{k: str(x[k])[:500] for k in ("adapter", "binary", "version") if k in x}
+                     for x in result.get("inventory", [])[:20] if isinstance(x, dict)]
+            safe["inventory"] = items
+            return safe
+        stored = self._project_declared(cmd["host_id"], result.get("declared_adapters"),
+                                        payload.get("adapter"), payload.get("row"))
+        safe["declared_adapters"] = [{"adapter": name, **row} for name, row in sorted(stored.items())]
+        return safe
+
+    def _finish_setup_report(self, cmd, safe):
+        payload = cmd["payload"]
+        req = None
+        if payload.get("request_id"):
+            req = self.store.get("setup_request", payload["request_id"])
+        if req:
+            req["status"] = "failed" if safe.get("error") else "done"
+            self.store.put("setup_request", req)
+        bot_id = req["bot_id"] if req else payload.get("bot_id")
+        work_id = req["work_id"] if req else payload.get("work_id")
+        if bot_id and work_id:
+            work = self.store.get("work", work_id)
+            root = self.s._new_root("operator", "setup:" + str(cmd.get("id", "")))["id"]
+            self.s.new_turn(bot_id, work, safe, "setup_result", "device", root_request_id=root)
+
+    _BOUNDED_REPORT_FAULTS = {"adapter_declaration_mismatch", "invalid_declared_adapters",
+                              "invalid_adapter_declaration"}
+
+    def _report_bounded(self, cmd, result, *, apply):
+        """Persist discover and declare_adapter as the checked projection only."""
+        try:
+            safe = self._bounded_result(cmd, result)
+        except Fault as error:
+            if error.code not in self._BOUNDED_REPORT_FAULTS:
+                raise
+            safe = {"action": cmd["action"], "host_id": cmd["host_id"], "error": error.code}
+        if not apply:
+            return safe
+        with self.store.atomic():
+            if not safe.get("error") and cmd["action"] == "discover":
+                self.store.put("inventory", {"id": cmd["host_id"], "items": safe["inventory"]})
+            elif not safe.get("error") and cmd["action"] == "declare_adapter":
+                payload = cmd.get("payload") or {}
+                self._accept_declared(cmd["host_id"], result.get("declared_adapters"),
+                                      payload.get("adapter"), payload.get("row"))
+            self._finish_setup_report(cmd, safe)
+        return safe
+
     def request(self, bot_id, work_id, body):
         if self.s.bot(bot_id)["kind"] != "main":
             raise Fault("main_bot_required", 403)
@@ -251,10 +370,14 @@ class Onboarding:
         if action == "discover":
             cmd = self.s.broker.enqueue(host_id, "discover", {"bot_id": bot_id, "work_id": work_id})
             return {"command_id": cmd["id"], "yielded": True}
+        if action == "declare_adapter":
+            return self._stage_adapter_declaration(host_id, bot_id, work_id, body)
+        if _DECLARATION_FIELDS & set(body):
+            raise Fault("invalid_setup_request_field", 400)
         if action not in {"configure", "credential", "delete_credential"}:
             raise Fault("invalid_setup_action")
         if action == "configure":
-            if not self.s.execution.knows_adapter(body.get("adapter"), host_id):
+            if not self.s.adapter_known(host_id, body.get("adapter")):
                 raise Fault("adapter_required")
             # Endpoint and qwen resource argv are operator/device-owned security
             # policy. A model proposal can request the adapter/auth mode only.
@@ -288,7 +411,7 @@ class Onboarding:
             raise Fault("connector_host_required")
         if action == "configure":
             adapter = body.get("adapter")
-            if not self.s.execution.knows_adapter(adapter, host_id):
+            if not self.s.adapter_known(host_id, adapter):
                 raise Fault("adapter_required")
             if body.get("auth", "existing") not in {"existing", "api_key"}:
                 raise Fault("invalid_setup_auth", 400)
@@ -332,7 +455,7 @@ class Onboarding:
         if local:
             if adapter not in ADAPTER_CATALOG:
                 raise Fault("unknown_adapter")
-        elif not self.s.execution.knows_adapter(adapter, host_id):
+        elif not self.s.adapter_known(host_id, adapter):
             raise Fault("unknown_adapter")
         validate_staged_executor(adapter, host_id, staged)
         proposal = {
@@ -560,6 +683,22 @@ class Onboarding:
         with self.store.atomic():
             req = self.checked_request(identity, "needs_approval")
             proposal = dict(req["proposal"])
+            if proposal.get("action") == "declare_adapter":
+                if body:
+                    raise Fault("invalid_setup_approval", 400)
+                if self.s.execution.hosts.get(req["host_id"], {}).get("transport") != "connector":
+                    raise Fault("connector_host_required")
+                from .adapters_file import clean_declaration
+                name = proposal.get("adapter")
+                clean = clean_declaration(name, proposal.get("adapter_row"))
+                if (clean != proposal.get("adapter_row")
+                        or proposal.get("command") != [clean["binary"], *clean["argv"]]):
+                    raise Fault("adapter_declaration_mismatch", 403)
+                payload = {"request_id": req["id"], "adapter": name, "row": clean}
+                self.s.broker.enqueue(req["host_id"], "declare_adapter", payload, req["id"])
+                req["status"] = "configuring"
+                self.store.put("setup_request", req)
+                return {"accepted": True}
             action = "configure" if proposal["action"] == "configure" else "credential_delete"
             if action == "configure":
                 # Endpoint comes from the authenticated operator UI, never from
@@ -608,9 +747,13 @@ class Onboarding:
                 if previous and previous["host_id"] != req["host_id"]:
                     raise Fault("installation_id_owned_by_other_host", 403)
                 proposal["resource_keys"] = list(previous.get("resource_keys", []))
-                # Device-declared concurrency is the capacity truth for a connector
-                # host; the catalog row covers built-ins, 1 the last resort.
-                declared_row = self.s.execution.host_declared(req["host_id"], proposal["adapter"]) or {}
+                if not self.s.adapter_known(req["host_id"], proposal["adapter"]):
+                    raise Fault("adapter_required")
+                # Approved store row, then the device's routing projection, then
+                # the built-in catalog. 1 is the last resort.
+                declared_row = (self.s.declared_row(req["host_id"], proposal["adapter"])
+                                or self.s.execution.host_declared(req["host_id"], proposal["adapter"])
+                                or {})
                 proposal["max_concurrency"] = previous.get("max_concurrency",
                                                            declared_row.get("concurrency",
                                                            ADAPTER_CATALOG.get(proposal["adapter"], {}).get("concurrency", 1)))
@@ -648,9 +791,11 @@ class Onboarding:
             self.store.put("setup_request", req)
         return {"accepted": True}
 
-    def report(self, cmd, result):
+    def report(self, cmd, result, *, apply=True):
+        if cmd["action"] in {"discover", "declare_adapter"}:
+            return self._report_bounded(cmd, result, apply=apply)
         with self.store.atomic():
-            if cmd["action"] not in {"discover", "configure", "credential_install", "credential_delete"}:
+            if cmd["action"] not in {"configure", "credential_install", "credential_delete"}:
                 return
             payload = cmd["payload"]
             req = None
@@ -658,19 +803,15 @@ class Onboarding:
                 req = self.store.get("setup_request", payload["request_id"])
             safe = {"action": cmd["action"], "host_id": cmd["host_id"]}
             if result.get("error"):
-                advice = result.get("advice") if result.get("error") == "invalid_adapter" else None
+                advice = result.get("advice") if result.get("error") in {
+                    "invalid_adapter", "invalid_adapter_declaration", "adapter_declaration_conflict"} else None
                 folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
-                safe["error"] = "invalid_adapter: " + folded if folded else "device_setup_failed"
-            elif cmd["action"] == "discover":
-                items = [{k: str(x[k])[:500] for k in ("adapter", "binary", "version") if k in x}
-                         for x in result.get("inventory", [])[:20] if isinstance(x, dict)]
-                self.store.put("inventory", {"id": cmd["host_id"], "items": items})
-                safe["inventory"] = items
+                safe["error"] = result["error"] + ": " + folded if folded else "device_setup_failed"
             else:
                 inst = result.get("installation", {})
                 if (not isinstance(inst, dict) or not all(isinstance(inst.get(k), str) for k in ("id", "host_id", "adapter"))
                         or inst.get("host_id") != cmd["host_id"]
-                        or not self.s.execution.knows_adapter(inst.get("adapter"), cmd["host_id"])):
+                        or not self.s.adapter_known(cmd["host_id"], inst.get("adapter"))):
                     raise Fault("invalid_installation_report")
                 item = {k: inst.get(k) for k in ("id", "host_id", "adapter", "cwd")}
                 candidate = copy.deepcopy(self._config())
@@ -681,9 +822,11 @@ class Onboarding:
                 if cmd["action"] == "configure":
                     adapter = payload.get("adapter")
                     target = (installation_id(adapter, cmd["host_id"], payload.get("profile"))
-                              if self.s.execution.knows_adapter(adapter, cmd["host_id"]) else None)
+                              if self.s.adapter_known(cmd["host_id"], adapter) else None)
                     expected_resources = payload.get("resource_keys", previous.get("resource_keys", []))
-                    declared_row = self.s.execution.host_declared(cmd["host_id"], adapter) or {}
+                    declared_row = (self.s.declared_row(cmd["host_id"], adapter)
+                                    or self.s.execution.host_declared(cmd["host_id"], adapter)
+                                    or {})
                     capacity = payload.get("max_concurrency", previous.get("max_concurrency",
                                  declared_row.get("concurrency",
                                  ADAPTER_CATALOG.get(adapter, {}).get("concurrency", 1))))
@@ -727,6 +870,12 @@ class Onboarding:
                 for key in ("priority", "use_when"):
                     if key in previous:
                         item[key] = previous[key]
+                if cmd["action"] == "configure" and item["adapter"] not in ADAPTER_CATALOG:
+                    declared = self.s.declared_row(cmd["host_id"], item["adapter"]) or {}
+                    for key in ("priority", "use_when"):
+                        if key not in item and key in declared:
+                            item[key] = declared[key]
+                    self.s._stamp_workspace_key(item)
                 # The approved profile is what the installation id was derived from.
                 # A rebuild that drops it makes the next configure compute a different id.
                 profile = payload.get("profile") if cmd["action"] == "configure" else None

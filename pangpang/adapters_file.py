@@ -2,10 +2,11 @@
 
 Custom rows join the built-in ADAPTER_CATALOG at the earliest startup point of
 each side (coordinator and connector read their OWN data directory — argv
-stays operator-defined, never model-defined). For a connector host this file
-is device-only: the connector reports a bounded routing projection over sync
-(validate_declared), so the cloud needs no copy. Any violation fails closed at
-startup with the file, line and field named.
+stays operator-defined, never model-defined). For a connector host the file is
+device-only: sync carries a bounded routing projection (validate_declared), and
+the connector can merge one row after the operator approves that exact row.
+The cloud does not run that command. Any violation fails closed with the file,
+line and field named.
 """
 import json
 import os
@@ -13,7 +14,7 @@ import re
 import stat
 from pathlib import Path
 
-from .store import Fault
+from .store import Fault, assert_no_txn_io
 
 MAX_FILE_BYTES = 262144
 MAX_ROWS = 64
@@ -117,7 +118,13 @@ def load(path):
         _bad(path, 0, "file", "must not be group- or world-writable")
     if info.st_size > MAX_FILE_BYTES:
         _bad(path, 0, "file", "exceeds %d bytes" % MAX_FILE_BYTES)
-    text = path.read_text(encoding="utf-8")
+    return _rows_from_text(path, path.read_text(encoding="utf-8"))
+
+
+def _rows_from_text(path, text):
+    """Content rules shared by load() and a candidate that has not been renamed into place."""
+    if len(text.encode("utf-8")) > MAX_FILE_BYTES:
+        _bad(path, 0, "file", "exceeds %d bytes" % MAX_FILE_BYTES)
     try:
         document = json.loads(text)
     except json.JSONDecodeError as error:
@@ -192,6 +199,68 @@ def validate_declared(payload):
 def _declared_bad(message, name=None):
     raise Fault("invalid_declared_adapters", 400,
                 advice="declared_adapters: %s%s" % (str(name) + ": " if name is not None else "", message))
+
+
+def clean_declaration(name, row):
+    """One custom adapter row, checked with the same rules as adapters.json.
+
+    Does not read or write a file and does not change the built-in catalog.
+    """
+    path = "<declaration>"
+    try:
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            _bad(path, 1, str(name), "adapter name must match %s" % NAME.pattern)
+        if name in _builtin_names():
+            _bad(path, 1, name, "collides with a built-in adapter; built-in rows cannot be overridden")
+        return _clean_row(path, 1, name, row)
+    except Fault as error:
+        if error.code != "invalid_adapters_file":
+            raise
+        raise Fault("invalid_adapter_declaration", 400, advice=error.advice) from None
+
+
+def declared_rows(path):
+    """Rows stored in one adapters file, in the shape a connector reports."""
+    rows = load(path)
+    return [{"adapter": name, **rows[name]} for name in sorted(rows)]
+
+
+def _write_document(path, rows):
+    path = Path(path)
+    payload = json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    # Every content rule load() enforces, before the destination is replaced.
+    _rows_from_text(path, payload)
+    tmp = path.with_name("." + path.name + ".tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except OSError as error:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        _bad(path, 0, "file", "cannot be written (%s)" % error.strerror)
+
+
+def write_merged_row(path, name, row):
+    """Merge one approved row into a device adapters file and the live catalog.
+
+    An identical stored row is left as-is. A different stored row is refused.
+    Built-in catalog rows are never replaced.
+    """
+    assert_no_txn_io("adapters_file.write_merged_row")
+    path = Path(path)
+    clean = clean_declaration(name, row)
+    current = load(path)
+    if name in current and current[name] != clean:
+        raise Fault("adapter_declaration_conflict", 409,
+                    advice="%s: %s: conflicts with an adapter row already stored" % (path, name))
+    if current.get(name) != clean:
+        current[name] = clean
+        _write_document(path, current)
+    merge(path)
+    return clean
 
 
 def merge(path):
