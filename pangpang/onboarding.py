@@ -7,6 +7,7 @@ import posixpath
 import re
 import secrets
 import shutil
+import threading
 import time
 from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
@@ -67,6 +68,28 @@ def endpoint(value):
 class Onboarding:
     def __init__(self, service):
         self.s, self.store, self.vault = service, service.store, service.vault
+        self._declare_gates_guard = threading.Lock()
+        self._declare_gates = {}
+
+    def _declare_gate(self, identity):
+        """The claim for one local declaration card. Approve and deny share it."""
+        with self._declare_gates_guard:
+            gate = self._declare_gates.get(identity)
+            if gate is None:
+                gate = threading.Lock()
+                self._declare_gates[identity] = gate
+            return gate
+
+    def _local_declare_gate(self, identity):
+        """The claim when this id is a local declare_adapter card, else None."""
+        req = self.store.get("setup_request", identity)
+        proposal = req.get("proposal") or {}
+        if proposal.get("action") != "declare_adapter":
+            return None
+        host = self.s.execution.hosts.get(req.get("host_id"), {})
+        if host.get("transport") != "local":
+            return None
+        return self._declare_gate(identity)
 
     def _config(self):
         # Includes earlier reports staged in this batch, without publishing them.
@@ -412,7 +435,10 @@ class Onboarding:
             raise Fault("operator_owned_setup_field", 400)
         if not self.s.adapter_known(host_id, body.get("adapter")):
             raise Fault("adapter_required")
-        req = self.stage_executor(bot_id, work_id, None, host, {"adapter": body.get("adapter")}, body)
+        staged = {"adapter": body.get("adapter")}
+        if body.get("cwd"):
+            staged["cwd"] = body["cwd"]
+        req = self.stage_executor(bot_id, work_id, None, host, staged, body)
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
     def operator_request(self, body):
@@ -502,6 +528,13 @@ class Onboarding:
         return req
 
     def deny(self, identity):
+        gate = self._local_declare_gate(identity)
+        if gate is None:
+            return self._deny_request(identity)
+        with gate:
+            return self._deny_request(identity)
+
+    def _deny_request(self, identity):
         with self.store.atomic():
             req = self.checked_request(identity, "needs_approval")
             req["status"] = "denied"
@@ -749,32 +782,35 @@ class Onboarding:
     def _approve_local_declaration(self, identity):
         """Write one approved row into this coordinator's adapters file.
 
-        The file write stays outside the store transaction. The request remains
-        needs_approval until that write has succeeded.
+        The card is claimed before any file write, so deny cannot commit
+        while this approval is in progress. The file write stays outside the
+        store transaction. The request remains needs_approval until that
+        write has succeeded.
         """
-        req = self.checked_request(identity, "needs_approval")
-        proposal = dict(req.get("proposal") or {})
-        host_id = req.get("host_id")
-        if self.s.execution.hosts.get(host_id, {}).get("transport") != "local":
-            raise Fault("connector_host_required")
-        from .adapters_file import clean_declaration, write_merged_row
-        name = proposal.get("adapter")
-        clean = clean_declaration(name, proposal.get("adapter_row"))
-        if (clean != proposal.get("adapter_row")
-                or proposal.get("command") != [clean["binary"], *clean["argv"]]):
-            raise Fault("adapter_declaration_mismatch", 403)
-        write_merged_row(self.s.data / "adapters.json", name, clean)
-        self.s.execution.refresh_unknown_adapters()
-        with self.store.atomic():
-            current = self.checked_request(identity, "needs_approval")
-            current_proposal = current.get("proposal") or {}
-            if (current_proposal.get("adapter_row") != clean
-                    or current_proposal.get("command") != [clean["binary"], *clean["argv"]]):
+        with self._declare_gate(identity):
+            req = self.checked_request(identity, "needs_approval")
+            proposal = dict(req.get("proposal") or {})
+            host_id = req.get("host_id")
+            if self.s.execution.hosts.get(host_id, {}).get("transport") != "local":
+                raise Fault("connector_host_required")
+            from .adapters_file import clean_declaration, write_merged_row
+            name = proposal.get("adapter")
+            clean = clean_declaration(name, proposal.get("adapter_row"))
+            if (clean != proposal.get("adapter_row")
+                    or proposal.get("command") != [clean["binary"], *clean["argv"]]):
                 raise Fault("adapter_declaration_mismatch", 403)
-            current["status"] = "done"
-            self.store.put("setup_request", current)
-            self._publish_local_declaration(current, name, clean)
-        return {"accepted": True}
+            write_merged_row(self.s.data / "adapters.json", name, clean)
+            self.s.execution.refresh_unknown_adapters()
+            with self.store.atomic():
+                current = self.checked_request(identity, "needs_approval")
+                current_proposal = current.get("proposal") or {}
+                if (current_proposal.get("adapter_row") != clean
+                        or current_proposal.get("command") != [clean["binary"], *clean["argv"]]):
+                    raise Fault("adapter_declaration_mismatch", 403)
+                current["status"] = "done"
+                self.store.put("setup_request", current)
+                self._publish_local_declaration(current, name, clean)
+            return {"accepted": True}
 
     def _publish_local_declaration(self, req, name, clean):
         """Tell the assistant the approved row was stored. No command is launched."""

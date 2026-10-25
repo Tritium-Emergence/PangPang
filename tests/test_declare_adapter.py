@@ -1,6 +1,7 @@
 """Operator approval is what lets a connector store one custom adapter row."""
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -570,6 +571,134 @@ class LocalDeclareAdapterTests(unittest.TestCase):
             self.app.onboarding.approve(opened["request_id"], {})
         self.assertEqual(ctx.exception.code, "cli_not_installed")
         self.assertNotIn("codex-host-local", self.app.execution.installations)
+
+    def test_deny_and_approve_cannot_both_commit(self):
+        denied = self.stage()
+        self.assertEqual(self.app.onboarding.deny(denied["request_id"]), {"denied": True})
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(denied["request_id"], {})
+        self.assertEqual(ctx.exception.code, "setup_request_expired_or_used")
+        self.assertEqual(self.app.store.get("setup_request", denied["request_id"])["status"], "denied")
+        self.assertFalse((self.data / "adapters.json").exists())
+        self.assertFalse(self.app.adapter_known("host-local", "dsk-claude"))
+
+        staged = self.stage()
+        identity = staged["request_id"]
+        at_write = threading.Event()
+        deny_started = threading.Event()
+        real_write = adapters_file.write_merged_row
+
+        def paused(path, name, row):
+            at_write.set()
+            self.assertTrue(deny_started.wait(3), "deny did not reach the claimed card")
+            return real_write(path, name, row)
+
+        results = {}
+
+        def approve():
+            try:
+                results["approve"] = self.app.onboarding.approve(identity, {})
+            except Exception as exc:
+                results["approve_error"] = exc
+
+        def deny():
+            deny_started.set()
+            try:
+                results["deny"] = self.app.onboarding.deny(identity)
+            except Exception as exc:
+                results["deny_error"] = exc
+
+        with patch("pangpang.adapters_file.write_merged_row", side_effect=paused):
+            worker = threading.Thread(target=approve)
+            worker.start()
+            self.assertTrue(at_write.wait(3), "approve did not reach the file write")
+            other = threading.Thread(target=deny)
+            other.start()
+            worker.join(5)
+            other.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(other.is_alive())
+        self.assertEqual(results.get("approve"), {"accepted": True})
+        self.assertNotIn("deny", results)
+        self.assertIsInstance(results.get("deny_error"), Fault)
+        self.assertEqual(results["deny_error"].code, "setup_request_expired_or_used")
+        self.assertEqual(self.app.store.get("setup_request", identity)["status"], "done")
+        stored = json.loads((self.data / "adapters.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["dsk-claude"], self.row)
+        self.assertTrue(self.app.adapter_known("host-local", "dsk-claude"))
+
+    def test_concurrent_approvals_keep_both_rows_after_reload(self):
+        first = self.stage()
+        second_row = dict(ROW)
+        second = self.app.onboarding.request("bot-main", self.work_id, {
+            "host_id": "host-local", "action": "declare_adapter", "adapter": "my-echo", **second_row})
+        barrier = threading.Barrier(2)
+        peer_in_load = threading.Event()
+        real_load = adapters_file.load
+        leader = {"id": None}
+        leader_mu = threading.Lock()
+        target = self.data / "adapters.json"
+
+        def load(path):
+            rows = real_load(path)
+            if Path(path) != target:
+                return rows
+            with leader_mu:
+                lead = leader["id"] is None
+                if lead:
+                    leader["id"] = threading.get_ident()
+            if lead:
+                peer_in_load.wait(1)
+            else:
+                peer_in_load.set()
+            return rows
+
+        boxes = ([], [])
+
+        def run(identity, box):
+            try:
+                barrier.wait(3)
+                box.append(self.app.onboarding.approve(identity, {}))
+            except Exception as exc:
+                box.append(exc)
+
+        threads = [threading.Thread(target=run, args=(item["request_id"], box))
+                   for item, box in ((first, boxes[0]), (second, boxes[1]))]
+        with patch("pangpang.adapters_file.load", side_effect=load):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        for thread in threads:
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(boxes[0], [{"accepted": True}])
+        self.assertEqual(boxes[1], [{"accepted": True}])
+        disk = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(disk["dsk-claude"], self.row)
+        self.assertEqual(disk["my-echo"], second_row)
+        for name in ("dsk-claude", "my-echo"):
+            ADAPTER_CATALOG.pop(name, None)
+            adapters_file._merged_names.discard(name)
+        adapters_file.merge(target)
+        self.assertEqual(ADAPTER_CATALOG["dsk-claude"], self.row)
+        self.assertEqual(ADAPTER_CATALOG["my-echo"], second_row)
+        self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], self.codex_argv)
+
+    def test_local_configure_keeps_the_requested_cwd(self):
+        staged = self.stage()
+        self.assertEqual(self.app.onboarding.approve(staged["request_id"], {}), {"accepted": True})
+        project = self.workspace / "project"
+        project.mkdir()
+        opened = self.app.onboarding.request("bot-main", self.work_id, {
+            "host_id": "host-local", "action": "configure", "adapter": "dsk-claude",
+            "cwd": str(project)})
+        card = self.app.store.get("setup_request", opened["request_id"])
+        self.assertEqual(card["proposal"]["action"], "executor_config")
+        self.assertEqual(card["proposal"]["draft"]["cwd"], str(project))
+        with patch("pangpang.onboarding.shutil.which", return_value="/usr/local/bin/dsk-claude"):
+            created = self.app.onboarding.approve(opened["request_id"], {})
+        installed = self.app.execution.installations[created["installation_id"]]
+        self.assertEqual(installed["cwd"], str(project.resolve()))
 
 
 if __name__ == "__main__":
