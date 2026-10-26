@@ -13,6 +13,7 @@ import time
 from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from . import coordinator_env
 from .store import Fault, digest, uid, encode
 from .execution import (ADAPTER_CATALOG, binary_matches_pin, endpoint_extra_env,
                        installation_id, validate_extra_argv, validate_profile_env,
@@ -115,6 +116,7 @@ class Onboarding:
                 "model_max_concurrency": stored_c,
                 "model_concurrency_restart_required": stored_c != live_c,
                 "capabilities": self.s.effective_capabilities(bot_id),
+                "coordinator_env": coordinator_env.projection(self.vault),
                 "requests": self.store.find("setup_request", newest=True, limit=30),
                 "inventory": self.store.find("inventory", limit=100)}
 
@@ -946,6 +948,24 @@ class Onboarding:
             req["status"] = "configuring"
             self.store.put("setup_request", req)
         return {"accepted": True}
+
+    def coordinator_env_target(self, name):
+        """Public key and AEAD context for one allowlisted coordinator env name.
+
+        The context is derived here. A client-supplied context is ignored on save.
+        """
+        return {"public_key": self.vault.public_key(), "context": coordinator_env.context_for(name),
+                "name": name}
+
+    def set_coordinator_env(self, body):
+        if not isinstance(body, dict) or set(body) != {"name", "sealed"}:
+            raise Fault("sealed_credential_required", 400)
+        return coordinator_env.install(self.vault, body.get("name"), body.get("sealed"))
+
+    def clear_coordinator_env(self, body):
+        if not isinstance(body, dict) or set(body) != {"name"}:
+            raise Fault("coordinator_env_not_allowlisted", 400)
+        return coordinator_env.clear(self.vault, body.get("name"))
 
     def secret_target(self, identity):
         req = self.checked_request(identity, "needs_secret")

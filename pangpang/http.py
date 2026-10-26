@@ -185,6 +185,12 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 if len(parts) == 3 and parts[0] == "setup" and parts[2] == "secret-target":
                     self.respond(service.onboarding.secret_target(parts[1]))
                     return
+                if parts == ["setup", "coordinator-env", "target"]:
+                    names = query.get("name") or []
+                    if len(names) != 1:
+                        raise Fault("coordinator_env_not_allowlisted", 400)
+                    self.respond(service.onboarding.coordinator_env_target(names[0]))
+                    return
                 if path == "/api/v1/snapshot":
                     # Snapshot is dashboard state, not transcript export. Pulling
                     # 1000 full Turn JSON blobs used to deserialize every model
@@ -488,6 +494,10 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     self.respond(service.onboarding.model(body)); return
                 if parts == ["setup", "model-key", "revoke"]:
                     self.respond(service.onboarding.revoke_model_key()); return
+                if parts == ["setup", "coordinator-env"]:
+                    self.respond(service.onboarding.set_coordinator_env(body)); return
+                if parts == ["setup", "coordinator-env", "clear"]:
+                    self.respond(service.onboarding.clear_coordinator_env(body)); return
                 if parts == ["setup", "pairing"]:
                     self.respond(service.onboarding.pairing_code()); return
                 if len(parts) == 3 and parts[0] == "setup":

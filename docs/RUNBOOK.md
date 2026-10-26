@@ -115,6 +115,10 @@ bot.example.com {
 
 ## 4. Optional API keys
 
+`TYPESAFE_API_KEY` 和 `TAVILY_API_KEY` 可以在 Web 状态栏保存，不必写进聊天。浏览器用协调器凭据库的公钥加密；协调器解密后只把密文放进凭据库，并写入当前进程环境。语义校验和联网搜索读的是这个进程环境，所以保存后当前进程立即生效。下次启动时，凭据库里的值会再次写入进程环境；若父进程也为同名变量提供了值，以凭据库中的值为准。
+
+只写在父进程环境、没有在 Web 里保存的值，仍然要重启协调器后才会被继承。允许保存的名字只有这两个，其他名字会被拒绝。移除已保存的值会从凭据库删除；若当前进程里的值与所存值相同，也会从本进程去掉。父进程里另有一份同名变量时，要等下次启动才会重新继承。Web 不会把这些密钥写到工作区 `.env.local`。
+
 ### Web search
 
 `web_search` 默认即可用，无需任何 key：无 key 时走 `cn.bing.com` / `html.duckduckgo.com` 互备链；`PANGPANG_SEARCH_PROVIDER=off` 可整体关闭出站，取值 `tavily|bing|duckduckgo` 可强制单一 provider。

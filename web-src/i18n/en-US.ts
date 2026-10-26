@@ -12,7 +12,7 @@ export default {
     reconfigure_model: 'The model is unusable on the current runtime path (credentials unresolved, or invalid endpoint/generation params). Reconfigure under Settings → Model.',
     pair_device: 'Generate a pairing code under Pair device, then run the connector on the target host.',
     bring_device_online: 'All paired devices are offline; start the connector on a device host.',
-    set_coordinator_env: 'Set {{var}} in the running coordinator process environment, then restart it; only values that process inherits take effect (method varies by deployment — see RUNBOOK).',
+    set_coordinator_env: 'Save {{var}} from the status bar. The browser encrypts it into the coordinator credential store; the value never enters chat. It applies to this process immediately and is loaded again on the next start. A value set only in the parent process environment still needs a restart. See RUNBOOK.',
     set_deployment_level: 'Start with --deployment-level L0, or set PANGPANG_DEPLOYMENT_LEVEL=L0 in.env.local (L0 is the personal-use tier — see SECURITY.md).',
     connect_executor: 'Connect or check an executor; review the per-item reasons, then re-probe.',
     pair_remote_executor: 'This coordinator is control-only and runs no local executor; pair a separate device as the executor.',
@@ -60,6 +60,10 @@ export default {
     model_rate_limited: 'Model rate-limited (429/quota). Retry later or check your quota.',
     model_timeout: 'The model timed out. Retry later or check whether the endpoint is reachable.',
     model_auth_failed: 'Authentication failed (401/403): the API key may be wrong or expired; a subscription login credential usually cannot be used directly as an API key; use a key issued by the API service. Verify and retry.',
+    coordinator_env_not_allowlisted: 'That name cannot be saved here. Only the coordinator keys listed in the status bar are accepted.',
+    sealed_credential_required: 'The key has to be encrypted in the browser before it is saved.',
+    sealed_credential_rejected: 'The encrypted key could not be opened. Enter it again.',
+    invalid_coordinator_env: 'That key was rejected. Use a single-line value.',
 
     invalid_output_tokens: 'Invalid output cap. Unknown models need at least 4096; lower than that truncates tool calls.',
 
@@ -251,6 +255,19 @@ export default {
     secret: 'Key', secretStorageHint: 'The browser encrypts it, then the target device decrypts and stores it. The key never enters chat or the model.',
 
     encryptAndSave: 'Encrypt and save',
+
+    coordinatorEnvTitle: 'Coordinator keys',
+    coordinatorEnvHint: 'The browser encrypts the value for this coordinator. It is stored in the credential vault and applied to this process. It never enters chat. A saved value is loaded again on the next start and replaces an inherited value for that name. A value set only in the parent environment still needs a restart.',
+    coordinatorEnvSet: 'Saved',
+    coordinatorEnvProcess: 'In this process',
+    coordinatorEnvMissing: 'Not set',
+    saveCoordinatorEnv: 'Save key',
+    updateCoordinatorEnv: 'Update key',
+    clearCoordinatorEnv: 'Remove saved key',
+    clearCoordinatorEnvConfirm: 'Remove the saved {{var}} from the credential store? This process drops it when it matches the saved value. A parent-environment value returns on the next start.',
+    coordinatorEnvDialogTitle: 'Save coordinator key',
+    coordinatorEnvPurpose: 'Save {{var}} for this coordinator. The value is encrypted in the browser and does not enter chat.',
+    coordinatorEnvStorageHint: 'Stored encrypted in this coordinator’s credential vault and applied to this process. Loaded again on the next start.',
 
   },
 

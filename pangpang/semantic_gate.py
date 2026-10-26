@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from .logs import get_logger
 from .env_compat import env_value, with_legacy_names
+from .coordinator_env import COORDINATOR_ENV_ALLOWLIST
 from .store import Fault, assert_no_txn_io, digest, encode
 
 
@@ -113,7 +114,7 @@ def secret_env_names(config):
     """Env var names holding known secrets: the always-sensitive pair plus any
     `credential_env` referenced anywhere in config. Shared by every external-Jev
     projection path so a new entry point can't bypass existing redaction."""
-    names = {"TYPESAFE_API_KEY", "PANGPANG_TOKEN"}
+    names = {"TYPESAFE_API_KEY", "PANGPANG_TOKEN", *COORDINATOR_ENV_ALLOWLIST}
     def walk(value):
         if isinstance(value, dict):
             for key, item in value.items():
