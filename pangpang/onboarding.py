@@ -564,8 +564,8 @@ class Onboarding:
     def _resolved_custom_binary(self, adapter):
         """PATH resolution of one custom catalog binary. Built-ins stay on startup discovery.
 
-        expanduser runs before which so a stored path can still match when that
-        file, or the basename of that path, is installed.
+        expanduser runs before which. Only that expanded value is looked up, so a
+        stored path cannot match a different binary of the same name on PATH.
         """
         from .adapters_file import is_merged
         if not is_merged(adapter):
@@ -575,17 +575,12 @@ class Onboarding:
         if not isinstance(name, str) or not name or "\x00" in name:
             return None
         expanded = os.path.expanduser(name)
-        base = posixpath.basename(expanded.replace("\\", "/"))
-        candidates = []
-        for candidate in (expanded, base):
-            if (candidate and candidate not in (".", "..") and "\x00" not in candidate
-                    and candidate not in candidates):
-                candidates.append(candidate)
-        for candidate in candidates:
-            found = shutil.which(candidate)
-            if found and binary_matches_pin(cat, found):
-                return found
-        return None
+        if not expanded or "\x00" in expanded:
+            return None
+        found = shutil.which(expanded)
+        if not found or not binary_matches_pin(cat, found):
+            return None
+        return found
 
     def _apply_new_routing(self, row, routing):
         """Copy priority and use_when onto a row that has no sibling yet."""

@@ -559,12 +559,12 @@ class LocalDeclareAdapterTests(unittest.TestCase):
             "host_id": "host-local", "adapter": "dsk-claude", "profile": "expanded"})
         with patch("pangpang.onboarding.shutil.which", side_effect=which_expanded) as mocked:
             created = self.app.onboarding.approve(proposed["staged"]["request_id"], {})
-        self.assertEqual(mocked.call_args_list[0].args[0], expanded)
+        self.assertEqual([call.args[0] for call in mocked.call_args_list], [expanded])
         iid = "dsk-claude-expanded-host-local"
         self.assertEqual(created["installation_id"], iid)
         self.assertEqual(self.app.execution.installations[iid]["argv"][0], expanded)
 
-    def test_configure_uses_basename_or_reports_a_missing_stored_path(self):
+    def test_configure_reports_a_missing_stored_path_without_a_basename_hit(self):
         self._declare_stored_row()
         dirty = "~/.local/bin/dsk-claude"
         ADAPTER_CATALOG["dsk-claude"] = dict(ADAPTER_CATALOG["dsk-claude"], binary=dirty)
@@ -581,18 +581,19 @@ class LocalDeclareAdapterTests(unittest.TestCase):
 
         seen = []
 
-        def which_basename(candidate):
+        def which_only_basename(candidate):
             seen.append(candidate)
             return "/usr/local/bin/dsk-claude" if candidate == "dsk-claude" else None
 
         proposed = self.app.propose_executor("bot-main", self.work_id, {
-            "host_id": "host-local", "adapter": "dsk-claude", "profile": "basename"})
-        with patch("pangpang.onboarding.shutil.which", side_effect=which_basename):
-            created = self.app.onboarding.approve(proposed["staged"]["request_id"], {})
-        self.assertEqual(seen, [expanded, "dsk-claude"])
-        iid = "dsk-claude-basename-host-local"
-        self.assertEqual(created["installation_id"], iid)
-        self.assertEqual(self.app.execution.installations[iid]["argv"][0], "/usr/local/bin/dsk-claude")
+            "host_id": "host-local", "adapter": "dsk-claude", "profile": "othername"})
+        with patch("pangpang.onboarding.shutil.which", side_effect=which_only_basename):
+            with self.assertRaises(Fault) as ctx:
+                self.app.onboarding.approve(proposed["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "cli_not_installed")
+        self.assertEqual(seen, [expanded])
+        self.assertNotIn("dsk-claude", seen)
+        self.assertNotIn("dsk-claude-othername-host-local", self.app.execution.installations)
 
     def test_builtin_protocol_and_conflict_are_refused(self):
         before = self.app.store.find("setup_request")
