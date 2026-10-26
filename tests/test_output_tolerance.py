@@ -998,6 +998,72 @@ class HarvestUnitTests(unittest.TestCase):
         names = {Path(a['path']).name for a in got}
         self.assertNotIn('leak.png', names) # dir symlink not followed
 
+    def test_venv_toolchain_noise_does_not_consume_harvest_budget(self):
+        # .venv-offline (and the same pip/venv trees outside it) is isolation
+        # noise, not a deliverable. More of those files than HARVEST_MAX_FILES
+        # sit beside a few real docs/images; harvest must return only the real
+        # files and leave the unused file slots for them.
+        from pangpang import runner
+        real = {
+            'report.docx': b'docx-bytes',
+            'chart.png': b'\x89PNG-chart',
+            'notes.md': b'# notes\n',
+            'result.txt': b'ok',
+            'script.py': b'print(1)\n',
+            'bundle.zip': b'PK\x03\x04zip',
+            'LICENSE': b'root license',
+            'docs/readme.md': b'readme',
+            'images/photo.jpg': b'\xff\xd8jpg',
+        }
+        for rel, data in real.items():
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        noise = [
+            'docs/pyvenv.cfg',
+            'loose.pyc',
+            'pyvenv.cfg',
+            'Activate.ps1',
+            'activate',
+            'activate.csh',
+            'venv/pyvenv.cfg',
+            'venv/bin/activate',
+            'site-packages/mod.py',
+            '__pycache__/x.cpython-312.pyc',
+            'widget.egg-info/PKG-INFO',
+            'widget.egg-info/SOURCES.txt',
+            'pkg-1.0.dist-info/LICENSE',
+            'pkg-1.0.dist-info/RECORD',
+            'pkg-1.0.dist-info/WHEEL',
+            'pkg-1.0.dist-info/METADATA',
+            '.venv-offline/pyvenv.cfg',
+            '.venv-offline/bin/activate',
+            '.venv-offline/bin/Activate.ps1',
+            '.venv-offline/lib/python3.12/site-packages/pkg/__init__.py',
+            '.venv-offline/lib/python3.12/site-packages/pkg/__pycache__/mod.cpython-312.pyc',
+            '.venv-offline/lib/python3.12/site-packages/pkg-1.2.dist-info/LICENSE',
+            '.venv-offline/lib/python3.12/site-packages/pkg-1.2.dist-info/RECORD',
+            '.venv-offline/lib/python3.12/site-packages/pkg-1.2.dist-info/WHEEL',
+            '.venv-offline/lib/python3.12/site-packages/pkg-1.2.dist-info/METADATA',
+        ]
+        for i in range(runner.HARVEST_MAX_FILES + 8):
+            noise.append('.venv-offline/lib/python3.12/site-packages/'
+                         'pkg-1.2.dist-info/extra-%d.txt' % i)
+        for index, rel in enumerate(noise):
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'noise-%d' % index)
+        budget = self._budget()
+        got = runner.harvest_dir(self.root, [str(self.root)], recursive=True,
+                                 source='output_dir', budget=budget, seen_digests=set())
+        root = self.root.resolve()
+        names = sorted(Path(a['path']).resolve().relative_to(root).as_posix() for a in got)
+        self.assertEqual(names, sorted(real))
+        self.assertTrue(all(a['source'] == 'output_dir' for a in got))
+        self.assertEqual(budget['files'], runner.HARVEST_MAX_FILES - len(real))
+        self.assertEqual(budget['bytes'],
+                         runner.HARVEST_MAX_TOTAL_BYTES - sum(len(v) for v in real.values()))
+
 
 class ResultNotificationTests(unittest.TestCase):
     # An executor task result is an input to the Bot, not a result for the user: it
