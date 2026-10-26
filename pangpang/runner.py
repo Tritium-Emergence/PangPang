@@ -233,6 +233,27 @@ HARVEST_FALLBACK_EXTS = {
     ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac",
     ".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".md", ".html", ".htm",
 }
+# Output-dir harvest has no deliverable-extension filter: any file the executor
+# wrote can be the product. It still skips toolchain trees created for isolation
+# (pip/venv). A `.venv-offline` would otherwise fill HARVEST_MAX_FILES with
+# packaging metadata and crowd out real deliverables. Names are matched
+# case-insensitively. `.venv*` is a prefix, so `.venv` and `.venv-offline` both
+# match. LICENSE/RECORD/WHEEL/METADATA are skipped only because they live in
+# these trees, not because those filenames are banned at the harvest root.
+_HARVEST_NOISE_DIR_NAMES = frozenset({"venv", "site-packages", "__pycache__"})
+
+
+def _harvest_noise_dir(name):
+    low = name.lower()
+    return (low.startswith(".venv")
+            or low in _HARVEST_NOISE_DIR_NAMES
+            or low.endswith(".dist-info")
+            or low.endswith(".egg-info"))
+
+
+def _harvest_noise_file(name):
+    low = name.lower()
+    return low.endswith(".pyc") or low == "pyvenv.cfg" or low.startswith("activate")
 
 
 def _harvest_one(path, roots):
@@ -287,7 +308,11 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
     budget: mutable {"files": n, "bytes": n} decremented as we accept files.
     seen_digests: set of content hashes already collected (cross-source dedupe).
     new_only_names: if given, only names NOT in this set qualify (cwd fallback).
-    exts: if given, only these lowercased suffixes qualify (cwd fallback)."""
+    exts: if given, only these lowercased suffixes qualify (cwd fallback).
+
+    Toolchain directories (`.venv*`, `venv`, `site-packages`, `__pycache__`,
+    `*.dist-info`, `*.egg-info`) are not walked, and `*.pyc` / `pyvenv.cfg` /
+    `Activate*` files are skipped. Neither spends `budget`."""
     out = []
     # Cap the number of entries we even LOOK at (independent of how many we
     # accept), and cap wall-clock, so a directory stuffed with millions of
@@ -305,7 +330,11 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
         # itself must not escape). os.walk(followlinks=False) is the guarantee.
         if recursive:
             def gen():
-                for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+                # topdown so a pruned toolchain directory is never listed. Its
+                # files therefore cannot spend the scan cap or the file budget
+                # ahead of real deliverables in a later sibling directory.
+                for dirpath, dirnames, filenames in os.walk(base, topdown=True, followlinks=False):
+                    dirnames[:] = [name for name in dirnames if not _harvest_noise_dir(name)]
                     for name in filenames:
                         yield Path(dirpath) / name
             it = gen()
@@ -323,6 +352,8 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
             except OSError:
                 continue
             if new_only_names is not None and entry.name in new_only_names:
+                continue
+            if _harvest_noise_file(entry.name):
                 continue
             if exts is not None and entry.suffix.lower() not in exts:
                 continue
@@ -2679,8 +2710,12 @@ def supervise(directory):
                 output_warnings.append({"output": str(raw)[:200], "issue": type(error).__name__ + ":" + str(error)[:120]})
         # (2) Dedicated output dir — the primary channel. Full recursive harvest;
         # anything the executor wrote to $XPP_OUTPUT_DIR is a deliverable by
-        # construction, so no extension filter here. Skipped if the dir could
-        # not be created/validated (read-only cwd, or a rejected symlink seed).
+        # construction, so no extension filter here. harvest_dir still does not
+        # walk toolchain trees (.venv*, venv, site-packages, __pycache__,
+        # *.dist-info, *.egg-info) or accept *.pyc / pyvenv.cfg / Activate*,
+        # so a venv created for isolation cannot fill the file budget.
+        # Skipped if the dir could not be created/validated (read-only cwd, or
+        # a rejected symlink seed).
         if output_dir is not None:
             artifacts += harvest_dir(output_dir, roots, recursive=True, source="output_dir",
                                      budget=budget, seen_digests=seen_digests)
