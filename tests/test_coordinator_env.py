@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from pangpang import coordinator_env
 from pangpang.coordinator_env import COORDINATOR_ENV_ALLOWLIST
 from pangpang.http import serve
 from pangpang.onboarding import empty_config
@@ -47,6 +49,77 @@ def _restore(snapshot):
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+
+def _overlap_name(name, first, second):
+    """Run `first` until it is between its vault write and its process-env write, then run `second`.
+
+    Returns whether `second` blocked on that name's lock before `first` updated the process.
+    Without the shared lock, `second` finishes in that window instead of blocking.
+    """
+    entered = threading.Event()
+    second_done = threading.Event()
+    release = threading.Event()
+    blocked = threading.Event()
+    errors = []
+    opened = {"value": False}
+    previous = coordinator_env._between_vault_and_env
+
+    def boundary(locked_name):
+        if locked_name != name or opened["value"]:
+            return
+        opened["value"] = True
+        entered.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not release.is_set():
+            if second_done.is_set():
+                return
+            if coordinator_env._name_lock(name).waiting():
+                blocked.set()
+                return
+            time.sleep(0.005)
+        if not release.is_set():
+            raise TimeoutError("overlapping coordinator env update did not arrive")
+
+    def run(fn, done):
+        try:
+            fn()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            if done is not None:
+                done.set()
+
+    first_thread = threading.Thread(target=run, args=(first, None), name="coord-env-first", daemon=True)
+    second_thread = threading.Thread(target=run, args=(second, second_done), name="coord-env-second", daemon=True)
+    coordinator_env._between_vault_and_env = boundary
+    try:
+        first_thread.start()
+        deadline = time.monotonic() + 5
+        while not entered.is_set() and time.monotonic() < deadline:
+            if errors:
+                break
+            entered.wait(0.05)
+        if not entered.is_set():
+            release.set()
+            if errors:
+                raise errors[0]
+            raise TimeoutError("coordinator env save did not reach the vault/env section")
+        second_thread.start()
+        first_thread.join(5)
+        second_thread.join(5)
+        if first_thread.is_alive() or second_thread.is_alive():
+            raise TimeoutError("coordinator env updates did not finish")
+        if errors:
+            raise errors[0]
+        return blocked.is_set()
+    finally:
+        release.set()
+        coordinator_env._between_vault_and_env = previous
+        if first_thread.is_alive():
+            first_thread.join(2)
+        if second_thread.is_alive():
+            second_thread.join(2)
 
 
 class CoordinatorEnvTests(unittest.TestCase):
@@ -199,6 +272,47 @@ class CoordinatorEnvTests(unittest.TestCase):
             self.app.onboarding.clear_coordinator_env({"name": "TYPESAFE_API_KEY", "secret": second})
         self.assertEqual(caught.exception.code, "coordinator_env_not_allowlisted")
 
+    def test_interleaved_saves_then_clear_removes_the_process_value(self):
+        name = "TYPESAFE_API_KEY"
+        first = "interleaved-save-value-one"
+        second = "interleaved-save-value-two"
+        ref = "coordinator-env:" + name
+        target = self._target(name)
+        sealed_first = _seal(target["public_key"], target["context"], first)
+        sealed_second = _seal(target["public_key"], target["context"], second)
+
+        def save(sealed):
+            self.app.onboarding.set_coordinator_env({"name": name, "sealed": sealed})
+
+        blocked = _overlap_name(name, lambda: save(sealed_first), lambda: save(sealed_second))
+        cleared = self.app.onboarding.clear_coordinator_env({"name": name})
+        self.assertEqual(cleared, {"name": name, "configured": False, "sealed": False})
+        self.assertIsNone(os.environ.get(name))
+        self.assertFalse(self.app.vault.has(ref))
+        row = next(item for item in self.app.onboarding.status()["coordinator_env"] if item["name"] == name)
+        self.assertEqual(row, {"name": name, "configured": False, "sealed": False})
+        self.assertTrue(blocked)
+        self._assert_secret_absent(first)
+        self._assert_secret_absent(second)
+
+    def test_clear_during_save_removes_the_saved_process_value(self):
+        name = "TAVILY_API_KEY"
+        secret = "clear-during-save-sealed-value"
+        ref = "coordinator-env:" + name
+        target = self._target(name)
+        sealed = _seal(target["public_key"], target["context"], secret)
+        blocked = _overlap_name(
+            name,
+            lambda: self.app.onboarding.set_coordinator_env({"name": name, "sealed": sealed}),
+            lambda: self.app.onboarding.clear_coordinator_env({"name": name}),
+        )
+        self.assertIsNone(os.environ.get(name))
+        self.assertFalse(self.app.vault.has(ref))
+        row = next(item for item in self.app.onboarding.status()["coordinator_env"] if item["name"] == name)
+        self.assertEqual(row, {"name": name, "configured": False, "sealed": False})
+        self.assertTrue(blocked)
+        self._assert_secret_absent(secret)
+
     def test_next_start_reapplies_sealed_value_over_an_inherited_one(self):
         secret = "sealed-typesafe-survives-restart"
         self._install("TYPESAFE_API_KEY", secret)
@@ -253,7 +367,8 @@ class CoordinatorEnvHttpTests(unittest.TestCase):
         self.origin = "http://127.0.0.1:" + str(self.server.server_port)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.jar = http.cookiejar.CookieJar()
+        self.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
 
     def tearDown(self):
         self.server.shutdown()
@@ -318,6 +433,49 @@ class CoordinatorEnvHttpTests(unittest.TestCase):
         self.assertEqual(payload["code"], "coordinator_env_not_allowlisted")
         self.assertNotIn(rotated.encode(), (self.root / "data" / "vault" / "secrets.db").read_bytes())
         self.assertNotIn(rotated.encode(), (self.root / "data" / "bots.db").read_bytes())
+
+    def _cookie(self):
+        for cookie in self.jar:
+            if cookie.name == "pangpang":
+                return cookie.value
+        self.fail("missing session cookie")
+
+    def _post(self, path, body, key):
+        request = urllib.request.Request(
+            self.origin + "/api/v1/" + path,
+            data=json.dumps(body).encode(),
+            headers={
+                "Origin": self.origin,
+                "Content-Type": "application/json",
+                "Idempotency-Key": key,
+                "Cookie": "pangpang=" + self._cookie(),
+            },
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+
+    def test_http_interleaved_saves_then_clear_removes_the_process_value(self):
+        name = "TYPESAFE_API_KEY"
+        first = "http-interleaved-value-one"
+        second = "http-interleaved-value-two"
+        ref = "coordinator-env:" + name
+        self._login()
+        with self._request("setup/coordinator-env/target?name=" + name) as response:
+            target = json.load(response)
+        sealed_first = _seal(target["public_key"], target["context"], first)
+        sealed_second = _seal(target["public_key"], target["context"], second)
+
+        def save(sealed, key):
+            self._post("setup/coordinator-env", {"name": name, "sealed": sealed}, key)
+
+        blocked = _overlap_name(name, lambda: save(sealed_first, "overlap-a"), lambda: save(sealed_second, "overlap-b"))
+        cleared = self._post("setup/coordinator-env/clear", {"name": name}, "overlap-clear")
+        self.assertEqual(cleared, {"name": name, "configured": False, "sealed": False})
+        self.assertIsNone(os.environ.get(name))
+        self.assertFalse(self.app.vault.has(ref))
+        self.assertTrue(blocked)
+        self.assertNotIn(first.encode(), (self.root / "data" / "vault" / "secrets.db").read_bytes())
+        self.assertNotIn(second.encode(), (self.root / "data" / "vault" / "secrets.db").read_bytes())
 
     def test_target_rejects_unknown_names_and_requires_login(self):
         with self.assertRaises(urllib.error.HTTPError) as anon:

@@ -8,8 +8,14 @@ A sealed value is applied again on the next process start and replaces an
 inherited value for that name. An inherited value is left alone until a
 sealed value is saved. Clearing removes the vault entry and drops the
 process value only when it still matches what was stored.
+
+Save and clear for one name share a lock that covers both the vault update
+and the process-env update. Those two stay paired: a clear cannot delete
+the vault row and leave the saved value only in this process.
 """
+import contextlib
 import os
+import threading
 
 from .logs import get_logger
 from .store import Fault, encode
@@ -25,6 +31,64 @@ COORDINATOR_ENV_ALLOWLIST = (
 
 _FORBIDDEN_CHARS = "\r\n\x00"
 
+# One lock per allowlisted name. Install and clear take it across the vault
+# mutation and the matching os.environ mutation so the two cannot tear.
+_guard = threading.Lock()
+_locks = {}
+
+
+class _NameLock:
+    """A lock plus the count of threads blocked in acquire.
+
+    The count is the number of callers that have announced themselves and
+    not yet entered. It stays raised while a caller waits, and drops once
+    that caller holds the lock.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._meta = threading.Lock()
+        self._waiting = 0
+
+    def acquire(self):
+        with self._meta:
+            self._waiting += 1
+        try:
+            self._lock.acquire()
+        finally:
+            with self._meta:
+                self._waiting -= 1
+
+    def release(self):
+        self._lock.release()
+
+    def waiting(self):
+        with self._meta:
+            return self._waiting
+
+
+def _name_lock(name):
+    with _guard:
+        lock = _locks.get(name)
+        if lock is None:
+            lock = _NameLock()
+            _locks[name] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _section(name):
+    lock = _name_lock(name)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _between_vault_and_env(name):
+    """Inside the name lock, after the vault update and before the process env update."""
+    return None
 
 def is_allowlisted(name):
     return isinstance(name, str) and name in COORDINATOR_ENV_ALLOWLIST
@@ -46,11 +110,12 @@ def projection(vault):
     rows = []
     for name in COORDINATOR_ENV_ALLOWLIST:
         ref = ref_for(name)
-        rows.append({
-            "name": name,
-            "configured": bool(os.environ.get(name)),
-            "sealed": bool(vault.has(ref)),
-        })
+        with _section(name):
+            rows.append({
+                "name": name,
+                "configured": bool(os.environ.get(name)),
+                "sealed": bool(vault.has(ref)),
+            })
     return rows
 
 
@@ -68,17 +133,18 @@ def apply_sealed(vault):
     """
     for name in COORDINATOR_ENV_ALLOWLIST:
         ref = ref_for(name)
-        try:
-            if not vault.has(ref):
+        with _section(name):
+            try:
+                if not vault.has(ref):
+                    continue
+                value = vault.get(ref)
+            except Exception:
+                log.warning("coordinator_env_unreadable name=%s", name)
                 continue
-            value = vault.get(ref)
-        except Exception:
-            log.warning("coordinator_env_unreadable name=%s", name)
-            continue
-        if not _usable(value):
-            log.warning("coordinator_env_unreadable name=%s", name)
-            continue
-        os.environ[name] = value
+            if not _usable(value):
+                log.warning("coordinator_env_unreadable name=%s", name)
+                continue
+            os.environ[name] = value
 
 
 def _require_sealed(sealed):
@@ -99,24 +165,32 @@ def install(vault, name, sealed):
         raise Fault("sealed_credential_rejected", 400) from None
     if not _usable(value):
         raise Fault("invalid_coordinator_env", 400)
-    vault.set(ref_for(name), value)
-    os.environ[name] = value
-    return {"name": name, "configured": True, "sealed": True}
+    ref = ref_for(name)
+    with _section(name):
+        vault.set(ref, value)
+        _between_vault_and_env(name)
+        os.environ[name] = value
+        return {"name": name, "configured": True, "sealed": True}
 
 
 def clear(vault, name):
     ref = ref_for(name)
-    previous = None
-    if vault.has(ref):
-        try:
-            previous = vault.get(ref)
-        except Exception:
-            previous = None
-        vault.delete(ref)
-    if isinstance(previous, str) and previous and os.environ.get(name) == previous:
-        os.environ.pop(name, None)
-    return {
-        "name": name,
-        "configured": bool(os.environ.get(name)),
-        "sealed": False,
-    }
+    with _section(name):
+        previous = None
+        if vault.has(ref):
+            try:
+                previous = vault.get(ref)
+            except Exception:
+                previous = None
+            vault.delete(ref)
+        # The name lock is still held. The live value is the one this row
+        # stored, or a different parent value that returns on the next start.
+        # Drop only the stored value.
+        _between_vault_and_env(name)
+        if isinstance(previous, str) and previous and os.environ.get(name) == previous:
+            os.environ.pop(name, None)
+        return {
+            "name": name,
+            "configured": bool(os.environ.get(name)),
+            "sealed": False,
+        }
