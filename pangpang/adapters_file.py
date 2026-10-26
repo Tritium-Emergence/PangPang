@@ -11,7 +11,9 @@ it. That write does not launch the binary. Any violation fails closed with
 the file, line and field named.
 """
 import json
+import ntpath
 import os
+import posixpath
 import re
 import stat
 import threading
@@ -77,6 +79,15 @@ def _line_of(text, needle):
     return 1 + text.count("\n", 0, index) if index >= 0 else 1
 
 
+def _path_basename(binary):
+    """True when binary is one PATH segment, not a directory, drive, or tilde."""
+    if not binary or binary in (".", ".."):
+        return False
+    if "~" in binary or "/" in binary or "\\" in binary:
+        return False
+    return ntpath.basename(binary) == binary and posixpath.basename(binary) == binary
+
+
 def _clean_row(path, line, name, row):
     if not isinstance(row, dict):
         _bad(path, line, name, "row must be an object")
@@ -90,6 +101,8 @@ def _clean_row(path, line, name, row):
     binary = row["binary"]
     if not isinstance(binary, str) or not binary or "\x00" in binary or len(binary) > MAX_BINARY_CHARS:
         _bad(path, line, name, "binary must be a non-empty string")
+    if not _path_basename(binary):
+        _bad(path, line, name, "binary must be a single PATH basename (no '~', '/', or '\\')")
     argv = row["argv"]
     if not isinstance(argv, list) or len(argv) > MAX_ARGV_ITEMS:
         _bad(path, line, name, "argv must be a list of at most %d strings" % MAX_ARGV_ITEMS)

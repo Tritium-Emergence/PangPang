@@ -209,6 +209,13 @@ class CustomAdapterBypassTests(unittest.TestCase):
         ADAPTER_CATALOG.pop("open-exec", None)
         self.adapters_file._merged_names.discard("open-exec")
 
+    @staticmethod
+    def _restore_path(old):
+        if old is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = old
+
     def _track(self, app):
         self.closers.append(app)
         return app
@@ -221,7 +228,14 @@ class CustomAdapterBypassTests(unittest.TestCase):
         data.mkdir()
         stub = root / "stub.py"
         stub.write_text(BYPASS_STUB, encoding="utf-8")
-        row = {"binary": sys.executable, "argv": [str(stub), BYPASS_FLAG],
+        bindir = root / "bin"
+        bindir.mkdir()
+        launcher = bindir / "open-exec"
+        launcher.symlink_to(sys.executable)
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(bindir) + os.pathsep + (old_path or "")
+        self.addCleanup(self._restore_path, old_path)
+        row = {"binary": "open-exec", "argv": [str(stub), BYPASS_FLAG],
                "concurrency": 1, "priority": 80,
                "use_when": "Run the recorded command with the sandbox bypass flag."}
         path = data / "adapters.json"
@@ -234,7 +248,8 @@ class CustomAdapterBypassTests(unittest.TestCase):
         registered = app.ensure_local_host(str(workspace), discover=True)
         self.assertIn("inst-local-open-exec", registered["installations"])
         inst = app.execution.installations["inst-local-open-exec"]
-        self.assertEqual(inst["argv"], [sys.executable, str(stub), BYPASS_FLAG])
+        resolved = str(launcher)
+        self.assertEqual(inst["argv"], [resolved, str(stub), BYPASS_FLAG])
         self.assertEqual(Path(inst["cwd"]).resolve(), workspace)
         app.probe("inst-local-open-exec")
         sent = app.send("bot-main", {"text": "run", "allow_write": True}, "bypass")
@@ -246,7 +261,7 @@ class CustomAdapterBypassTests(unittest.TestCase):
         spec = app.execution.spec(task)
         self.assertNotIn("stdin_protocol", spec)
         launched = runner.executor_argv(spec, task["prompt"])
-        self.assertEqual(launched, [sys.executable, str(stub), BYPASS_FLAG])
+        self.assertEqual(launched, [str(root / "bin" / "open-exec"), str(stub), BYPASS_FLAG])
         self.assertNotIn("app-server", launched)
         app.approve(task["id"], {"spec_digest": task["spec_digest"]})
         deadline = time.monotonic() + 20

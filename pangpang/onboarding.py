@@ -3,6 +3,7 @@ import base64
 import copy
 import hashlib
 import ntpath
+import os
 import posixpath
 import re
 import secrets
@@ -561,7 +562,11 @@ class Onboarding:
         return [binary, *argv]
 
     def _resolved_custom_binary(self, adapter):
-        """PATH resolution of one custom catalog binary. Built-ins stay on startup discovery."""
+        """PATH resolution of one custom catalog binary. Built-ins stay on startup discovery.
+
+        expanduser runs before which so a stored path can still match when that
+        file, or the basename of that path, is installed.
+        """
         from .adapters_file import is_merged
         if not is_merged(adapter):
             return None
@@ -569,10 +574,18 @@ class Onboarding:
         name = cat.get("binary")
         if not isinstance(name, str) or not name or "\x00" in name:
             return None
-        found = shutil.which(name)
-        if not found or not binary_matches_pin(cat, found):
-            return None
-        return found
+        expanded = os.path.expanduser(name)
+        base = posixpath.basename(expanded.replace("\\", "/"))
+        candidates = []
+        for candidate in (expanded, base):
+            if (candidate and candidate not in (".", "..") and "\x00" not in candidate
+                    and candidate not in candidates):
+                candidates.append(candidate)
+        for candidate in candidates:
+            found = shutil.which(candidate)
+            if found and binary_matches_pin(cat, found):
+                return found
+        return None
 
     def _apply_new_routing(self, row, routing):
         """Copy priority and use_when onto a row that has no sibling yet."""
@@ -612,7 +625,10 @@ class Onboarding:
         else:
             binary = self._resolved_custom_binary(adapter)
             if not binary:
-                raise Fault("cli_not_installed")
+                stored = (ADAPTER_CATALOG.get(adapter) or {}).get("binary")
+                label = stored if isinstance(stored, str) and stored and "\x00" not in stored else (adapter or "unknown")
+                raise Fault("cli_not_installed",
+                            advice="executable %s is not installed on PATH" % str(label)[:200])
         host = self.s.execution.hosts.get(host_id, {})
         from . import runner
         try:
