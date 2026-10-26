@@ -288,11 +288,17 @@ export function SetupPanel({store}: {store: Store}) {
 function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; onSecret: (t: SecretTarget) => void}) {
   const {t} = useTranslation();
   const [endpoint, setEndpoint] = useState('');
+  const [fault, setFault] = useState('');
   const p = (req.proposal || {}) as Record<string, any>;
   const asksEndpoint = p.action === 'configure' || (p.action === 'executor_config' && !p.installation_id);
   const declaring = p.action === 'declare_adapter';
   const host = store.snapshot!.hosts.find((h) => h.id === req.host_id);
   const command = Array.isArray(p.command) ? p.command.map(String).join(' ') : '';
+  const showFault = (error: unknown) => {
+    const text = friendlyError(error) || t('setup.operationFailed');
+    setFault(text);
+    store.setNotice(text);
+  };
   return (
     <div className="mini mt-2 rounded-lg border border-line bg-raised p-3">
       <h3 className="font-medium">{req.status === 'needs_secret' ? t('setup.needsSecretTitle'): req.status === 'configuring' ? t('setup.configuringTitle'): t('setup.confirmSetupTitle')}</h3>
@@ -326,22 +332,26 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
 ): null}
           <div className="mt-2 flex gap-2">
             <button className="rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={async () => {
+              setFault('');
               try { await api('setup/' + req.id + '/approve', asksEndpoint ? {endpoint: endpoint.trim()}: {}); await store.refresh(); }
-              catch (e: any) { store.setNotice(e?.message || t('setup.operationFailed')); }
+              catch (e: unknown) { showFault(e); }
             }}>{t('setup.applySettings')}</button>
             <button className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={async () => {
+              setFault('');
               try { await api('setup/' + req.id + '/deny', {}); await store.refresh(); }
-              catch (e: any) { store.setNotice(e?.message || t('setup.operationFailed')); }
+              catch (e: unknown) { showFault(e); }
             }}>{t('setup.denySettings')}</button>
           </div>
         </>
 ): null}
       {req.status === 'needs_secret' ? (
         <button className="mt-2 rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={async () => {
+          setFault('');
           try { const target = await api<SecretTarget>('setup/' + req.id + '/secret-target'); onSecret(target); }
-          catch (e: any) { store.setNotice(e?.message || t('setup.cannotOpen')); }
+          catch (e: unknown) { showFault(e); }
         }}>{t('setup.openSecretWindow')}</button>
 ): null}
+      {fault ? <p className="setup-fault mt-2 text-xs text-warn" role="alert">{fault}</p>: null}
     </div>
 );
 }

@@ -93,7 +93,7 @@ python -m pangpang.cli connector \
 - 本机传输上，`setup_agent` 的 `declare_adapter` 只打开一张批准卡。卡片展示将写入的完整命令和整行。操作者批准后，协调器把这一行合并进自己数据目录的 `adapters.json`，并纳入本机目录。未批准时不写文件。未知名称的 configure 仍然失败。这一步不启动该命令。
 - 已配对的连接器上，同一张批准卡由设备把这一行合并进设备自己的 `adapters.json`。协调器按主机记下获批的那一行，不写自己的 `adapters.json`，也不执行该命令。未批准时，未知名称的 configure 仍然失败。发现上报里的其他行不会被记入。
 
-- 格式：JSON 对象，键为自定义 adapter 名（小写字母数字连字符），值为 `{binary, argv, concurrency, priority, use_when, secret_env?, extra_env?}`。`binary` 为 PATH 中的可执行文件名，`argv` 为参数模板（字符串数组），`concurrency` 1–64，`priority` 0–1000，`use_when` 为模型可见的派单说明。
+- 格式：JSON 对象，键为自定义 adapter 名（小写字母数字连字符），值为 `{binary, argv, concurrency, priority, use_when, secret_env?, extra_env?}`。`binary` 为 PATH 中的单个可执行文件名（路径会在写入和读取时被拒绝），`argv` 为参数模板（字符串数组），`concurrency` 1–64，`priority` 0–1000，`use_when` 为模型可见的派单说明。
 - **argv 由获批的那一行决定**：模型不能自行写文件。写入只发生在操作者批准卡片上的整行之后。本机写入协调器数据目录；连接器由设备写入自己的文件。协调器下发的 configure 不含 argv，设备按自己目录里的行组装命令。
 - 自定义行**禁止**携带 `pinned`、`stdin_protocol`、`session_protocol`、`resume_protocol`、`interjection_tier`、`permission_bridge`、`models_json` 等内置协议/信任字段；未知字段一律拒启。自定义 CLI 只承诺通用 stdin 任务的可执行与回执，mid-turn inject、会话恢复、权限桥是内置 runner 的显式协议能力，加数据行不会自动获得。
 - 启动时严格校验（JSON 合法性、大小/条数/argv 长度上限、env 键格式、文件属主与权限）；任何违规**拒启**并指明文件、行号与字段。
