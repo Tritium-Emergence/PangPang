@@ -154,9 +154,14 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
 );
 }
 
-function CapabilityList({rows}: {rows: Capability[]}) {
+function CapabilityList({rows, envRows, onSealEnv, onClearEnv}: {
+  rows: Capability[];
+  envRows: {name: string; configured: boolean; sealed: boolean}[];
+  onSealEnv: (name: string) => void;
+  onClearEnv: (name: string) => void;
+}) {
   const {t, i18n} = useTranslation();
-  if (!rows.length) return null;
+  if (!rows.length && !envRows.length) return null;
   // Never render row.operator_action (backend's Chinese prose). Map the stable
   // operator_action_code to a localized string; set_coordinator_env interpolates the
   // env var from detail. Unknown codes fall back to a generic hint + the raw code.
@@ -190,7 +195,9 @@ function CapabilityList({rows}: {rows: Capability[]}) {
           // Jev/semantic check is optional. unconfigured must not look like a fault.
           // enforce without a key stays blocked and keeps the operator action.
           const optionalGate = row.capability === 'semantic_gate' && row.state === 'unconfigured';
-          const showAction = !!action && (row.state === 'blocked' || row.state === 'unconfigured') && !optionalGate;
+          const envVar = typeof row.detail?.env_var === 'string' ? row.detail.env_var : '';
+          const canSeal = row.operator_action_code === 'set_coordinator_env' && !!envVar;
+          const showAction = !!action && (row.state === 'blocked' || row.state === 'unconfigured') && !optionalGate && !canSeal;
           return (
             <li
               key={row.capability} data-capability={row.capability} data-state={row.state}
@@ -201,12 +208,37 @@ function CapabilityList({rows}: {rows: Capability[]}) {
               <span className="cap-dot h-1.5 w-1.5 shrink-0 rounded-full" aria-hidden="true" />
               <span className="font-medium text-ink">{label}</span>
               <span className="text-muted">{state}</span>
+              {canSeal ? (
+                <button type="button" className="cap-seal rounded border border-line px-1.5 py-0.5 text-warn" data-env-var={envVar} onClick={() => onSealEnv(envVar)}>
+                  {t('setup.saveCoordinatorEnv')}
+                </button>
+              ): null}
               {showAction ? <span className="cap-action text-warn">· {action}</span>: null}
               {optionalGate ? <span className="text-muted">· {t('setup.optionalGate')}</span>: null}
             </li>
 );
         })}
       </ul>
+      {envRows.length ? (
+        <div id="coordinator-env" className="mt-2">
+          <p className="text-xs font-medium text-ink">{t('setup.coordinatorEnvTitle')}</p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {envRows.map((env) => (
+              <li key={env.name} data-env={env.name} data-configured={env.configured ? 'true': 'false'} data-sealed={env.sealed ? 'true': 'false'} className="flex flex-wrap items-center gap-2 text-xs">
+                <code>{env.name}</code>
+                <span className="text-muted">{env.sealed ? t('setup.coordinatorEnvSet'): env.configured ? t('setup.coordinatorEnvProcess'): t('setup.coordinatorEnvMissing')}</span>
+                <button type="button" id={'coordinator-env-open-' + env.name} className="rounded border border-line px-1.5 py-0.5" onClick={() => onSealEnv(env.name)}>
+                  {env.sealed ? t('setup.updateCoordinatorEnv'): t('setup.saveCoordinatorEnv')}
+                </button>
+                {env.sealed ? (
+                  <button type="button" className="text-warn" onClick={() => onClearEnv(env.name)}>{t('setup.clearCoordinatorEnv')}</button>
+                ): null}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-xs text-muted">{t('setup.coordinatorEnvHint')}</p>
+        </div>
+      ): null}
       </details>
     </section>
 );
@@ -220,10 +252,17 @@ export function SetupPanel({store}: {store: Store}) {
   const setup = store.snapshot!.setup;
   const requests = (setup.requests || []).filter((r) => ['needs_approval', 'needs_secret', 'configuring'].includes(r.status));
   const [secretReq, setSecretReq] = useState<{id: string; target: SecretTarget} | null>(null);
+  const [envName, setEnvName] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const capabilities = setup.capabilities || [];
+  const envRows = setup.coordinator_env || [];
   const onboarding = !setup.model.configured || requests.length > 0;
-  if (!onboarding && capabilities.length === 0) return null;
+  const clearEnv = async (name: string) => {
+    if (!confirm(t('setup.clearCoordinatorEnvConfirm', {var: name}))) return;
+    try { await api('setup/coordinator-env/clear', {name}); await store.refresh(); }
+    catch (e: unknown) { store.setNotice(friendlyError(e)); }
+  };
+  if (!onboarding && capabilities.length === 0 && envRows.length === 0) return null;
   return (
     <>
       {onboarding ? (
@@ -238,9 +277,10 @@ export function SetupPanel({store}: {store: Store}) {
           {requests.map((req) => <RequestRow key={req.id} req={req} store={store} onSecret={(t) => setSecretReq({id: req.id, target: t})} />)}
         </section>
 ): null}
-      <CapabilityList rows={capabilities} />
+      <CapabilityList rows={capabilities} envRows={envRows} onSealEnv={setEnvName} onClearEnv={(name) => void clearEnv(name)} />
       {showSettings ? <SettingsDialog store={store} onClose={() => setShowSettings(false)} />: null}
       {secretReq ? <SecretDialog store={store} reqId={secretReq.id} target={secretReq.target} onClose={() => setSecretReq(null)} />: null}
+      {envName ? <CoordinatorEnvDialog store={store} name={envName} onClose={() => setEnvName(null)} />: null}
     </>
 );
 }
@@ -304,6 +344,44 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
 ): null}
     </div>
 );
+}
+
+function CoordinatorEnvDialog({store, name, onClose}: {store: Store; name: string; onClose: () => void}) {
+  const {t} = useTranslation();
+  const [value, setValue] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  return (
+    <Modal id="coordinator-env-dialog" title={t('setup.coordinatorEnvDialogTitle')} onClose={() => { setValue(''); onClose(); }} className="secret-modal">
+      <form id="coordinator-env-form" onSubmit={async (e) => {
+        e.preventDefault();
+        const secret = value;
+        setValue('');
+        setSaving(true);
+        setError('');
+        try {
+          const target = await api<SecretTarget>('setup/coordinator-env/target?name=' + encodeURIComponent(name));
+          const sealed = await sealCredential(secret, target);
+          await api('setup/coordinator-env', {name, sealed});
+          onClose();
+          await store.refresh();
+        } catch (err: unknown) {
+          setError(friendlyError(err));
+          setSaving(false);
+        }
+      }}>
+        <h2 className="text-lg font-semibold">{t('setup.coordinatorEnvDialogTitle')}</h2>
+        <p id="coordinator-env-purpose" className="mt-1 text-sm text-muted">{t('setup.coordinatorEnvPurpose', {var: name})}</p>
+        <label className="mt-3 block text-sm">{t('setup.secret')}<input id="coordinator-env-secret" type="password" autoComplete="new-password" required value={value} onChange={(e) => setValue(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
+        <p className="mt-1 text-xs text-muted">{t('setup.coordinatorEnvStorageHint')}</p>
+        {error ? <p id="coordinator-env-error" role="alert" className="mt-1 text-xs text-warn">{error}</p>: null}
+        <div className="mt-3 flex justify-end gap-2">
+          <button type="button" id="coordinator-env-close" className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={() => { setValue(''); onClose(); }}>{t('setup.cancel')}</button>
+          <button id="coordinator-env-save" className="rounded-lg bg-brand px-3 py-1.5 text-sm text-white disabled:opacity-50" disabled={saving}>{t('setup.encryptAndSave')}</button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
 function SecretDialog({store, reqId, target, onClose}: {store: Store; reqId: string; target: SecretTarget; onClose: () => void}) {

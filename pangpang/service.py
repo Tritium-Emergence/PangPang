@@ -539,8 +539,12 @@ class Service:
         set_strict_txn_io(True)
         from .vault import Vault
         from .onboarding import Onboarding
+        from .coordinator_env import apply_sealed
         self.vault = Vault(self.data / "vault")
         self.store.on_close = self.vault.close
+        # Sealed coordinator keys survive restart. Inherited values stay until a
+        # sealed value exists for that name.
+        apply_sealed(self.vault)
         # Revision of settings/managed this process has published (0 = none yet).
         # Every managed-config write goes through commit_managed_config (G).
         self.config_revision = 0
@@ -3541,14 +3545,17 @@ class Service:
             return fault.code
 
     def _env_action(self, var):
-        """Stable operator action for a capability gated on a coordinator env var. We
-        deliberately do NOT ship a per-OS recipe (systemd EnvironmentFile vs container
-        env vs Windows service vs shell differ even within one OS); the stable
-        operator_action_code lets the UI/RUNBOOK render the exact deployment steps. The
-        one invariant worth stating in the hint: only the environment of the CURRENTLY
-        running coordinator counts."""
-        return ("在当前运行的协调器进程环境中设置 %s 后重启协调器；只有该进程继承到的值生效"
-                "（具体设置方式随部署而定，见 RUNBOOK）。" % var)
+        """Stable operator action for a capability gated on a coordinator env var.
+
+        The Web status bar saves an allowlisted name through the sealed credential
+        envelope. That value is stored in the vault and applied to this process
+        immediately, then loaded again on the next start. A value that exists only
+        in the parent process environment still has to be inherited, which means a
+        restart. The UI maps operator_action_code; this sentence is the self-check
+        hint and must not contain a secret."""
+        return ("在 Web 状态栏保存 %s：浏览器加密后写入协调器凭据库，明文不进入聊天，"
+                "当前进程立即生效，下次启动会从凭据库再加载。"
+                "只写在父进程环境中、未在 Web 保存的值仍需重启后才被继承。见 RUNBOOK。" % var)
 
     def _supervision_unverified_action(self, rejected):
         """Operator hint when every executor is blocked on supervision.
@@ -3738,7 +3745,7 @@ class Service:
         elif gate.mode == "enforce" or self.task_result_gate.mode == "enforce":
             sg = {"state": "blocked", "reason": "gate_key_missing_enforce",
                   "operator_action_code": "set_coordinator_env", "operator_action": self._env_action("TYPESAFE_API_KEY"),
-                  "restart_required": True, "detail": {"env_var": "TYPESAFE_API_KEY"}}
+                  "restart_required": False, "detail": {"env_var": "TYPESAFE_API_KEY"}}
         elif self.continuation_router() == "local_model":
             sg = {"state": "ready", "reason": "continuation_local_model",
                   "operator_action_code": None, "operator_action": None, "restart_required": False}
@@ -3749,7 +3756,7 @@ class Service:
             sg = {"state": "unconfigured",
                   "reason": "continuation_key_missing" if gate.continuation_routing else "gate_key_missing_optional",
                   "operator_action_code": "set_coordinator_env", "operator_action": self._env_action("TYPESAFE_API_KEY"),
-                  "restart_required": True, "detail": {"env_var": "TYPESAFE_API_KEY"}}
+                  "restart_required": False, "detail": {"env_var": "TYPESAFE_API_KEY"}}
         out.append({"capability": "semantic_gate", "provider": "typesafe",
                     "detail": {"mode": gate.mode, "task_result_gate_mode": self.task_result_gate.mode,
                                "continuation_routing": gate.continuation_routing,

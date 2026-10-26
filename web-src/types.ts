@@ -147,6 +147,7 @@ export interface Setup {
   model_max_concurrency?: number;
   model_concurrency_restart_required?: boolean;
   capabilities: Capability[]; // effective capability truth — read, never guess readiness
+  coordinator_env?: {name: string; configured: boolean; sealed: boolean}[];
   requests: SetupRequest[];
   inventory: unknown[];
 }
