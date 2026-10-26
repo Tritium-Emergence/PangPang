@@ -3,6 +3,7 @@ import base64
 import copy
 import hashlib
 import ntpath
+import os
 import posixpath
 import re
 import secrets
@@ -561,7 +562,11 @@ class Onboarding:
         return [binary, *argv]
 
     def _resolved_custom_binary(self, adapter):
-        """PATH resolution of one custom catalog binary. Built-ins stay on startup discovery."""
+        """PATH resolution of one custom catalog binary. Built-ins stay on startup discovery.
+
+        expanduser runs before which. Only that expanded value is looked up, so a
+        stored path cannot match a different binary of the same name on PATH.
+        """
         from .adapters_file import is_merged
         if not is_merged(adapter):
             return None
@@ -569,7 +574,10 @@ class Onboarding:
         name = cat.get("binary")
         if not isinstance(name, str) or not name or "\x00" in name:
             return None
-        found = shutil.which(name)
+        expanded = os.path.expanduser(name)
+        if not expanded or "\x00" in expanded:
+            return None
+        found = shutil.which(expanded)
         if not found or not binary_matches_pin(cat, found):
             return None
         return found
@@ -612,7 +620,10 @@ class Onboarding:
         else:
             binary = self._resolved_custom_binary(adapter)
             if not binary:
-                raise Fault("cli_not_installed")
+                stored = (ADAPTER_CATALOG.get(adapter) or {}).get("binary")
+                label = stored if isinstance(stored, str) and stored and "\x00" not in stored else (adapter or "unknown")
+                raise Fault("cli_not_installed",
+                            advice="executable %s is not installed on PATH" % str(label)[:200])
         host = self.s.execution.hosts.get(host_id, {})
         from . import runner
         try:

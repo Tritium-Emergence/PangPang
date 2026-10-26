@@ -1,5 +1,6 @@
 """Operator approval is what lets a connector store one custom adapter row."""
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -524,6 +525,75 @@ class LocalDeclareAdapterTests(unittest.TestCase):
         routed = self.app.route("bot-main", {"id": self.work_id}, {"installation_id": "dsk-claude"})
         self.assertEqual(routed["selected"]["installation_id"], iid)
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], self.codex_argv)
+
+    def test_declare_rejects_a_path_binary_before_writing(self):
+        before = self.app.store.find("setup_request")
+        for binary in ("~/.local/bin/dsk-claude", "/usr/local/bin/dsk-claude", "bin/dsk-claude",
+                       ".\\dsk-claude"):
+            with self.subTest(binary=binary):
+                with self.assertRaises(Fault) as ctx:
+                    self.stage(binary=binary)
+                self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
+                self.assertIn("PATH basename", ctx.exception.advice)
+                self.assertIn("dsk-claude", ctx.exception.advice)
+        self.assertEqual(self.app.store.find("setup_request"), before)
+        self.assertFalse((self.data / "adapters.json").exists())
+        self.assertNotIn("dsk-claude", ADAPTER_CATALOG)
+
+    def _declare_stored_row(self):
+        accepted = self.app.onboarding.approve(self.stage()["request_id"], {})
+        self.assertEqual(accepted, {"accepted": True})
+
+    def test_configure_resolves_a_stored_path_after_expanduser(self):
+        self._declare_stored_row()
+        dirty = "~/.local/bin/dsk-claude"
+        ADAPTER_CATALOG["dsk-claude"] = dict(ADAPTER_CATALOG["dsk-claude"], binary=dirty)
+        expanded = os.path.expanduser(dirty)
+        self.assertNotEqual(expanded, dirty)
+        self.assertNotIn("~", expanded)
+
+        def which_expanded(candidate):
+            return expanded if candidate == expanded else None
+
+        proposed = self.app.propose_executor("bot-main", self.work_id, {
+            "host_id": "host-local", "adapter": "dsk-claude", "profile": "expanded"})
+        with patch("pangpang.onboarding.shutil.which", side_effect=which_expanded) as mocked:
+            created = self.app.onboarding.approve(proposed["staged"]["request_id"], {})
+        self.assertEqual([call.args[0] for call in mocked.call_args_list], [expanded])
+        iid = "dsk-claude-expanded-host-local"
+        self.assertEqual(created["installation_id"], iid)
+        self.assertEqual(self.app.execution.installations[iid]["argv"][0], expanded)
+
+    def test_configure_reports_a_missing_stored_path_without_a_basename_hit(self):
+        self._declare_stored_row()
+        dirty = "~/.local/bin/dsk-claude"
+        ADAPTER_CATALOG["dsk-claude"] = dict(ADAPTER_CATALOG["dsk-claude"], binary=dirty)
+        expanded = os.path.expanduser(dirty)
+        missing = self.app.propose_executor("bot-main", self.work_id, {
+            "host_id": "host-local", "adapter": "dsk-claude", "profile": "absent"})
+        with patch("pangpang.onboarding.shutil.which", return_value=None):
+            with self.assertRaises(Fault) as ctx:
+                self.app.onboarding.approve(missing["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "cli_not_installed")
+        self.assertIn(dirty, ctx.exception.advice)
+        self.assertIn("PATH", ctx.exception.advice)
+        self.assertNotIn("dsk-claude-absent-host-local", self.app.execution.installations)
+
+        seen = []
+
+        def which_only_basename(candidate):
+            seen.append(candidate)
+            return "/usr/local/bin/dsk-claude" if candidate == "dsk-claude" else None
+
+        proposed = self.app.propose_executor("bot-main", self.work_id, {
+            "host_id": "host-local", "adapter": "dsk-claude", "profile": "othername"})
+        with patch("pangpang.onboarding.shutil.which", side_effect=which_only_basename):
+            with self.assertRaises(Fault) as ctx:
+                self.app.onboarding.approve(proposed["staged"]["request_id"], {})
+        self.assertEqual(ctx.exception.code, "cli_not_installed")
+        self.assertEqual(seen, [expanded])
+        self.assertNotIn("dsk-claude", seen)
+        self.assertNotIn("dsk-claude-othername-host-local", self.app.execution.installations)
 
     def test_builtin_protocol_and_conflict_are_refused(self):
         before = self.app.store.find("setup_request")

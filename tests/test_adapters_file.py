@@ -134,6 +134,35 @@ class AdaptersFileUnitTests(unittest.TestCase):
             adapters_file.merge(self.write({"opencode-test": dict(ROW, priority=99)}, name="b.json"))
         self.assertIn("conflicts", ctx.exception.advice)
 
+    def test_binary_must_be_a_single_path_basename(self):
+        path = self.write({"opencode-test": dict(ROW, binary="dsk-claude")})
+        self.assertEqual(adapters_file.merge(path), ["opencode-test"])
+        self.assertEqual(ADAPTER_CATALOG["opencode-test"]["binary"], "dsk-claude")
+        accepted = self.write({"opencode-test": dict(ROW, binary="dsk-claude.exe")}, name="exe.json")
+        self.assertEqual(adapters_file.load(accepted)["opencode-test"]["binary"], "dsk-claude.exe")
+        for binary in ("~/.local/bin/dsk-claude", "/usr/local/bin/dsk-claude", "bin/dsk-claude",
+                       ".\\dsk-claude", "dsk~claude", ".", "..", "C:dsk-claude"):
+            with self.subTest(binary=binary):
+                with self.assertRaises(Fault) as ctx:
+                    adapters_file.load(self.write({"opencode-test": {**ROW, "binary": binary}},
+                                                  name="path.json"))
+                self.assertEqual(ctx.exception.code, "invalid_adapters_file")
+                self.assertIn("binary", ctx.exception.advice)
+                self.assertIn("PATH basename", ctx.exception.advice)
+                self.assertEqual(ADAPTER_CATALOG["opencode-test"]["binary"], "dsk-claude")
+
+    def test_write_rejects_a_path_binary_and_leaves_the_file(self):
+        path = self.write({"opencode-test": ROW})
+        before = path.read_text(encoding="utf-8")
+        with self.assertRaises(Fault) as ctx:
+            adapters_file.write_merged_row(path, "other-cli",
+                                           {**ROW, "binary": "~/.local/bin/dsk-claude"})
+        self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
+        self.assertIn("PATH basename", ctx.exception.advice)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+        self.assertFalse(path.with_name(".adapters.json.tmp").exists())
+        self.assertNotIn("other-cli", ADAPTER_CATALOG)
+
 
 class CustomAdapterStartupTests(unittest.TestCase):
     def setUp(self):
