@@ -216,6 +216,31 @@ class UploadDeliveryTests(unittest.TestCase):
         self.assertEqual(replay["task_id"], result["task_id"])
         self.assertEqual(len(self.receives), 1)
 
+    def test_frozen_host_constraint_is_not_delivered_to_the_current_work_host(self):
+        sent = self._work("frozen-host")
+        work = self.app.store.get("work", sent["work_id"])
+        work["required_host_id"] = "device"
+        self.app.store.put("work", work)
+        turn = self.app.store.get("turn", sent["turn_id"])
+        frozen = {"grant_write": True, "required_host_id": "local"}
+        turn["authorization"] = frozen
+        root_id = turn.get("accounted_root_request_id")
+        root = self.app.store.get("root_request", root_id)
+        root["authorization"] = dict(frozen)
+        self.app.store.put("root_request", root)
+        self.app.store.put("turn", turn)
+        runtime = Runtime(self.app)
+        tool_call = call(
+            "submit_task", prompt="read the attached notes",
+            artifact_refs=[self.upload["id"]],
+        )["tool_calls"][0]
+        result = runtime.durable_tool({"id": sent["turn_id"]}, tool_call)
+        self.assertEqual(result["error"], "authorization_constraint_conflict")
+        self.assertEqual(self.receives, [])
+        self.assertEqual(self.app.store.find("task"), [])
+        placed = [a for a in self.app.store.find("artifact") if a.get("host_id") == "device"]
+        self.assertEqual(placed, [])
+
     def test_tool_submit_reports_a_refused_receive(self):
         def refuse(host_id, action, payload):
             assert_no_txn_io("broker.request")

@@ -761,7 +761,10 @@ class Runtime:
         if name == "submit_task":
             # Device I/O cannot run inside store.once. Place chat uploads first;
             # submit_task only records the device-local path.
-            self.service.stage_task_uploads(turn["bot_id"], turn["work_id"], body)
+            self.service.stage_task_uploads(
+                turn["bot_id"], turn["work_id"], body,
+                root_request_id=turn.get("accounted_root_request_id"),
+                authorization=turn.get("authorization"))
         if not injecting:
             if expected_digest is None:
                 return self.store.once(scope, call["id"], call, lambda: self.invoke(turn, name, body))

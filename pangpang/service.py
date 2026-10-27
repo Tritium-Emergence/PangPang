@@ -1157,6 +1157,17 @@ class Service:
         root = self.store.get("root_request", root_id) if root_id else {}
         return self._authority(work, root.get("authorization"), authorization)
 
+    def _work_for_route(self, work, root_request_id=None, authorization=None):
+        """Work plus the root and turn restrictions this submission admits under.
+
+        Returns (routed work, authority snapshot). Upload delivery and
+        submit_task both route on the routed work, so a chat upload is not
+        copied onto a device the submission is not allowed to use. The snapshot
+        is the restriction set stored on the task.
+        """
+        authority = self._request_authority(work, root_request_id, authorization)
+        return dict(work, **authority), authority
+
     # --- four-layer budgets ------------------------
     # All counters live on the RootRequest and are monotonic (never decrement, so
     # create->cancel->create cannot reset a budget). Must be called inside a store
@@ -4445,9 +4456,8 @@ class Service:
         return result
 
     def submit_task(self, bot_id, work_id, body, *, root_request_id=None, route_quality=None, authorization=None):
-        work = self.store.get("work", work_id)
-        authority = self._request_authority(work, root_request_id, authorization)
-        work = dict(work, **authority)
+        work, authority = self._work_for_route(
+            self.store.get("work", work_id), root_request_id, authorization)
         if work["owner_bot_id"] != bot_id:
             raise Fault("wrong_work_owner", 403)
         if work.get("cancel_requested") or work.get("status") in {"cancelled", "delivered", "failed", "linked"}:
@@ -5582,11 +5592,12 @@ class Service:
             raise Fault("host_no_workspace", 400)
         return self.execution.inspect_file(dict(host, allowed_roots=roots), path, "list")
 
-    def stage_task_uploads(self, bot_id, work_id, body):
+    def stage_task_uploads(self, bot_id, work_id, body, *, root_request_id=None, authorization=None):
         """Copy chat uploads onto the executor host this submission will select.
 
-        Runs before the durable-tool transaction. submit_task routes again and
-        records the device-local path; it does not copy while a transaction is open.
+        Uses the same root and turn restrictions as submit_task. Runs before the
+        durable-tool transaction. submit_task routes again and records the
+        device-local path; it does not copy while a transaction is open.
         """
         from .store import in_transaction
         if in_transaction() or not isinstance(body, dict):
@@ -5598,6 +5609,7 @@ class Service:
             work = self.store.get("work", work_id)
         except Fault:
             return
+        work, _ = self._work_for_route(work, root_request_id, authorization)
         if work.get("owner_bot_id") != bot_id:
             return
         if work.get("cancel_requested") or work.get("status") in {"cancelled", "delivered", "failed", "linked"}:
