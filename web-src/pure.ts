@@ -28,6 +28,9 @@ export function unwrapFrame(content: unknown): unknown {
 
 // Clipboard text for one reply: the same unwrapped body the bubble shows, as
 // plain text. Structured payloads stay JSON text; nothing here is rendered HTML.
+// After a successful copy the control shows a check for this long, then the label returns.
+export const COPY_FEEDBACK_MS = 3000;
+
 export function messagePlainText(content: unknown): string {
   const value = unwrapFrame(content);
   if (typeof value === 'string') return value;

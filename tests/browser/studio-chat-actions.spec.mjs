@@ -45,8 +45,26 @@ test('copy writes the assistant plain text; reply chains the tapped work', async
   await expect(page.getByTestId('assistant-msg')).toHaveCount(3);
   await expect(page.locator('.bubble.user').getByTestId('msg-copy')).toHaveCount(0);
   const framed = page.getByTestId('assistant-msg').filter({hasText: '真正的答复'});
-  await framed.getByTestId('msg-copy').click();
+  const copy = framed.getByTestId('msg-copy');
+  await expect(copy).toHaveText('拷贝');
+  await copy.click();
+  await expect(copy).toHaveText('✓');
+  await expect(copy).toHaveAttribute('data-copied', 'true');
+  await expect(copy).toHaveAttribute('aria-label', '拷贝');
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('真正的答复');
+
+  await page.evaluate(() => {
+    navigator.clipboard.writeText = () => Promise.reject(new Error('denied'));
+  });
+  const failed = page.getByTestId('assistant-msg').filter({hasText: '第二段答复'}).getByTestId('msg-copy');
+  await expect(failed).toHaveText('拷贝');
+  await failed.click();
+  await failed.evaluate(() => new Promise((resolve) => setTimeout(resolve, 250)));
+  await expect(failed).toHaveText('拷贝');
+  await expect(failed).toHaveAttribute('data-copied', 'false');
+
+  await expect(copy).toHaveText('拷贝', {timeout: 4500});
+  await expect(copy).toHaveAttribute('data-copied', 'false');
 
   const unbound = page.getByTestId('assistant-msg').filter({hasText: '没有工作'});
   await expect(unbound.getByTestId('msg-reply')).toBeDisabled();

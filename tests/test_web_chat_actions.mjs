@@ -2,7 +2,11 @@
 // web-src/pure.ts — the same module the React shell uses.
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {messagePlainText, orderBots} from '../web-src/pure.ts';
+import {COPY_FEEDBACK_MS, messagePlainText, orderBots} from '../web-src/pure.ts';
+
+test('a successful copy check stays up for three seconds', () => {
+  assert.equal(COPY_FEEDBACK_MS, 3000);
+});
 
 test('messagePlainText copies the unwrapped reply body', () => {
   const frame = JSON.stringify({kind: 'assistant', source: 'bot-x', content: '真正的答复', work_id: 'w1'});

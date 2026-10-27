@@ -1,9 +1,10 @@
+import {useEffect, useState} from 'react';
 import type {Message, Snapshot} from '../types';
 import {useTranslation} from 'react-i18next';
 import {Markdown, unwrapFrame} from '../markdown';
 import {MediaPreview} from './MediaPreview';
 import {clock, dateTime, exchangeLabel} from '../display';
-import {messagePlainText} from '../pure';
+import {COPY_FEEDBACK_MS, messagePlainText} from '../pure';
 import {Value, hasValue} from './Facts';
 
 // One message bubble. Assistant messages carry data-testid="assistant-msg" (the
@@ -51,12 +52,10 @@ export function MessageBubble({m, snap, botName, onReply}: {
 ): null}
       {isAssistant ? (
         <div className="msg-actions flex max-w-[80%] items-center gap-1">
+          <CopyControl text={messagePlainText(m.content)} label={t('msg.copy')} />
           <button
-            type="button" data-testid="msg-copy" className="msg-action text-muted hover:text-ink"
-            onClick={() => { void navigator.clipboard?.writeText(messagePlainText(m.content)).catch(() => {}); }}
-          >{t('msg.copy')}</button>
-          <button
-            type="button" data-testid="msg-reply" className="msg-action text-muted hover:text-ink disabled:opacity-40"
+            type="button" data-testid="msg-reply" aria-label={t('msg.reply')}
+            className="msg-action text-muted hover:text-ink disabled:opacity-40"
             disabled={!m.work_id}
             onClick={() => { if (m.work_id) onReply?.(m.work_id); }}
           >{t('msg.reply')}</button>
@@ -64,6 +63,29 @@ export function MessageBubble({m, snap, botName, onReply}: {
 ): null}
     </div>
 );
+}
+
+function CopyControl({text, label}: {text: string; label: string}) {
+  const [ack, setAck] = useState(0);
+  const copied = ack !== 0;
+  useEffect(() => {
+    if (!ack) return;
+    const id = window.setTimeout(() => setAck(0), COPY_FEEDBACK_MS);
+    return () => window.clearTimeout(id);
+  }, [ack]);
+  return (
+    <button
+      type="button" data-testid="msg-copy" data-copied={copied ? 'true' : 'false'}
+      aria-label={label}
+      className={`msg-action hover:text-ink ${copied ? 'text-good' : 'text-muted'}`}
+      onClick={() => {
+        let pending: Promise<void> | undefined;
+        try { pending = navigator.clipboard?.writeText(text); } catch { return; }
+        if (!pending) return;
+        void pending.then(() => setAck((n) => n + 1), () => {});
+      }}
+    >{copied ? '✓' : label}</button>
+  );
 }
 
 function parse(content: Message['content']): Record<string, any> | null {
