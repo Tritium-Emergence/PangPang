@@ -168,6 +168,23 @@ ROUTE_ERROR = {
 }
 
 
+def portable_upload(artifact):
+    """A chat upload may be copied onto the executor's device.
+
+    upload_file records source user_upload. A workspace reference, a task
+    output, or a copy already placed on a device must already be on the
+    executor's host; those records are not moved.
+    """
+    return isinstance(artifact, dict) and artifact.get("source") == "user_upload"
+
+
+UPLOAD_LOCATION_ADVICE = (
+    "The referenced file is not on the executor's device. A chat upload is copied "
+    "there automatically; a workspace reference or an earlier task output is not. "
+    "Choose an executor on the device that already has the file, or drop that reference."
+)
+
+
 def text(value, limit=16000):
     if not isinstance(value, str) or not value.strip() or len(value.encode()) > limit:
         raise Fault("invalid_text", 400)
@@ -4314,6 +4331,9 @@ class Service:
     def route(self, bot_id, work, body, *, quiet=False, placement=True):
         body = self._resolve_executor_intent(body)
         candidates, rejected = [], []
+        # Hosts of chat uploads on this request. Used after the loop so an
+        # unnamed submission keeps an executor that already has the file.
+        portable_hosts = set()
         for e in self.execution.installations.values():
             reason = None
             if e.get("enabled") is False:
@@ -4356,7 +4376,11 @@ class Service:
                 reason = "connector_offline"
             for ref in body.get("artifact_refs", []):
                 artifact = self.evidence(bot_id, ref, work)
-                if artifact.get("host_id") != e["host_id"]:
+                # A chat upload is copied onto the selected device at submit.
+                # Any other artifact must already be on that device.
+                if portable_upload(artifact) and artifact.get("host_id"):
+                    portable_hosts.add(artifact["host_id"])
+                elif artifact.get("host_id") != e["host_id"]:
                     reason = "files_on_other_host"
             # Retired SSH is not a candidate. A constraint that already excluded
             # this host stays, so an unconstrained local/connector host can still
@@ -4378,6 +4402,17 @@ class Service:
             explicit = bool(body.get("host_id") or body.get("installation_id")
                             or work.get("required_host_id") or work.get("required_installation_id"))
             facts = None if explicit or body.get("intent_ambiguity") else self._route_affinity(work)
+            # Unnamed auto-pick stays on a device that already has the upload
+            # when one of its executors is eligible. A named device, or a work
+            # already pinned to a host, still receives a copy at submit.
+            pinned_elsewhere = bool(facts and (facts.get("host_id") or facts.get("conflict")))
+            if not explicit and portable_hosts and candidates and not pinned_elsewhere:
+                stayed = [c for c in candidates if c["host_id"] in portable_hosts]
+                if stayed:
+                    for candidate in candidates:
+                        if candidate["host_id"] not in portable_hosts:
+                            rejected.append(dict(candidate, reason="files_on_other_host"))
+                    candidates = stayed
             if facts and facts.get("artifact_host") and not facts.get("conflict"):
                 pinned = facts["artifact_host"]
                 kept = []
@@ -4453,13 +4488,25 @@ class Service:
                 # supervision failed.
                 _, hint = self._supervision_unverified_action(rejected)
                 raise Fault(code, advice=hint)
+            if code == "artifact_location_conflict":
+                raise Fault(code, advice=UPLOAD_LOCATION_ADVICE)
+            if code == "executor_host_offline" and self._uploads_need_delivery(bot_id, work, body, pool):
+                host_id = next((r.get("host_id") for r in pool if r.get("reason") == "connector_offline"), None)
+                host = self.execution.hosts.get(host_id, {}) if host_id else {}
+                raise Fault(code, advice=self._upload_delivery_advice(Fault("connector_offline"), host))
             raise Fault(code)
         selected = route["selected"]
         e = self.execution.installations[selected["installation_id"]]
         inputs = []
         for ref in body.get("artifact_refs", []):
             artifact = self.evidence(bot_id, ref, work)
-            inputs.append({"artifact_id": ref, "path": artifact["path"], "digest": artifact["digest"]})
+            if artifact.get("host_id") != e["host_id"]:
+                if portable_upload(artifact):
+                    artifact = self._ensure_upload_on_host(artifact, e["host_id"])
+                else:
+                    raise Fault("artifact_location_conflict", advice=UPLOAD_LOCATION_ADVICE)
+            inputs.append({"artifact_id": artifact["id"], "path": artifact["path"],
+                           "digest": artifact["digest"]})
         outputs = body.get("outputs", [])
         # Same relative-path admission as required_outputs (one predicate).
         # Empty is allowed: the field is optional. A bad string is not injected.
@@ -5534,6 +5581,124 @@ class Service:
         if not roots:
             raise Fault("host_no_workspace", 400)
         return self.execution.inspect_file(dict(host, allowed_roots=roots), path, "list")
+
+    def stage_task_uploads(self, bot_id, work_id, body):
+        """Copy chat uploads onto the executor host this submission will select.
+
+        Runs before the durable-tool transaction. submit_task routes again and
+        records the device-local path; it does not copy while a transaction is open.
+        """
+        from .store import in_transaction
+        if in_transaction() or not isinstance(body, dict):
+            return
+        refs = body.get("artifact_refs")
+        if not isinstance(refs, list) or not refs:
+            return
+        try:
+            work = self.store.get("work", work_id)
+        except Fault:
+            return
+        if work.get("owner_bot_id") != bot_id:
+            return
+        if work.get("cancel_requested") or work.get("status") in {"cancelled", "delivered", "failed", "linked"}:
+            return
+        routed = self.route(bot_id, work, body, quiet=True)
+        selected = routed.get("selected")
+        if not selected:
+            return
+        host_id = selected["host_id"]
+        for ref in refs:
+            artifact = self.evidence(bot_id, ref, work)
+            if portable_upload(artifact) and artifact.get("host_id") != host_id:
+                self._ensure_upload_on_host(artifact, host_id)
+
+    def _uploads_need_delivery(self, bot_id, work, body, pool):
+        hosts = {r.get("host_id") for r in pool if r.get("host_id")}
+        refs = body.get("artifact_refs") if isinstance(body, dict) else None
+        if not isinstance(refs, list):
+            return False
+        for ref in refs:
+            try:
+                artifact = self.evidence(bot_id, ref, work)
+            except Fault:
+                continue
+            if portable_upload(artifact) and artifact.get("host_id") not in hosts:
+                return True
+        return False
+
+    def _upload_delivery_advice(self, error, host):
+        code = error.code if isinstance(error, Fault) else "delivery_failed"
+        label = (host or {}).get("name") or (host or {}).get("id") or "the target device"
+        if code == "local_file_receive_disabled":
+            return ("The chat upload is on the coordinator, and %s refused to receive files "
+                    "(allow_file_receive is off). Ask the operator to allow file receive on that "
+                    "device, then submit again, or choose an executor on the device that already "
+                    "has the file." % label)
+        if code == "connector_offline":
+            return ("The chat upload is on the coordinator, and %s is offline, so the file cannot "
+                    "be delivered. Wait until that device is connected and submit again, or choose "
+                    "an executor on a device that is online." % label)
+        if code == "upload_not_staged":
+            return ("The chat upload is not on %s yet. Submit the task again so it can be delivered."
+                    % label)
+        return ("The chat upload could not be delivered to %s (%s). Choose an executor on the "
+                "device that already has the file, or retry when that device is online and allows "
+                "file receive." % (label, code))
+
+    def _placed_upload(self, artifact, host_id):
+        """A prior placement of this upload on host_id, or the upload itself."""
+        if artifact.get("host_id") == host_id:
+            return artifact
+        digest_hex = artifact.get("digest")
+        owner = artifact.get("owner_bot_id")
+        for row in self._all("artifact", host_id=host_id):
+            if (row.get("source") == artifact.get("id")
+                    and row.get("digest") == digest_hex
+                    and row.get("owner_bot_id") == owner
+                    and (artifact.get("size") is None or row.get("size") == artifact.get("size"))
+                    and isinstance(row.get("path"), str) and row["path"]):
+                return row
+        return None
+
+    def _ensure_upload_on_host(self, artifact, host_id):
+        placed = self._placed_upload(artifact, host_id)
+        if placed:
+            return placed
+        from .store import in_transaction
+        if in_transaction():
+            host = self.execution.hosts.get(host_id, {})
+            raise Fault("artifact_delivery_failed",
+                        advice=self._upload_delivery_advice(Fault("upload_not_staged"), host))
+        return self._copy_upload_to_host(artifact, host_id)
+
+    def _copy_upload_to_host(self, artifact, host_id):
+        """Read the upload, re-check its digest, and receive it on host_id.
+
+        Same receive action as upload_file: the device picks an inbox path.
+        The bytes are checked again against the digest the device reports.
+        """
+        from .store import assert_no_txn_io
+        assert_no_txn_io("deliver_upload")
+        host = self.execution.hosts.get(host_id)
+        if not host:
+            raise Fault("host_not_found", 404)
+        source = self.execution.read_artifact(artifact)
+        raw = artifact_bytes(artifact, source)
+        name = artifact.get("name") if isinstance(artifact.get("name"), str) and artifact["name"].strip() else Path(str(artifact.get("path") or "")).name
+        try:
+            info = self.execution.inspect_file(host, (name or "upload")[:200], "receive", source.get("data"))
+        except Fault as error:
+            raise Fault("artifact_delivery_failed",
+                        advice=self._upload_delivery_advice(error, host)) from error
+        if (info.get("digest") != artifact["digest"]
+                or hashlib.sha256(raw).hexdigest() != artifact["digest"]):
+            raise Fault("transfer_digest_mismatch")
+        placed = dict(info, id=uid("artifact"), owner_bot_id=artifact["owner_bot_id"],
+                      host_id=host_id, work_id=None, source=artifact["id"],
+                      name=Path(info["path"]).name, size=len(raw))
+        placed = self.store.put("artifact", placed)
+        log.info("delivered upload %s to host %s as %s", artifact["id"], host_id, placed["id"])
+        return placed
 
     def transfer(self, artifact_id, body):
         artifact = self.store.get("artifact", artifact_id)

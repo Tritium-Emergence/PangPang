@@ -75,8 +75,8 @@ PLANNER_SYSTEM_TAIL = (
     "packet.trigger gives this turn's trigger source, received_at, and effective_timezone; "
     "scheduled/relative time goes by trigger.effective_timezone and received_at (e.g. a routine uses its own timezone, not the default). "
     # (c3) Attachments: go by evidence_manifest; do not say 'no attachment'.
-    "packet.evidence_manifest lists files attached to this turn/this work (ref/name/size/host); when present, do not say 'no attachment', "
-    "and to handle a file use read_evidence by ref, keeping host_id consistent (do not hand a machine-A file to a machine-B executor), and do not edit the wrong same-named file. "
+    "packet.evidence_manifest lists files attached to this turn/this work (ref/name/size/host/source); when present, do not say 'no attachment', "
+    "and to handle a file use read_evidence by ref. Pass a chat upload (source user_upload) in submit_task artifact_refs even when the executor is on another device; the system copies it onto that device and the task reads the device-local path. Any other artifact must already be on the executor's device. Do not edit the wrong same-named file. "
     # Files already in the workspace are not chat attachments. An empty evidence_manifest does not mean there are no materials.
     "evidence_manifest lists only chat attachments, not project files already present in the executor's working directory. "
     "When the user refers to existing materials (e.g. these notes, files in the workspace), or wants the result saved as a file in the workspace, use submit_task to have the executor read and write them; "
