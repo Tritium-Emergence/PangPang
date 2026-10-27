@@ -226,6 +226,7 @@ export default {
   },
   msg: {
     you: '你', sentTo: '已发送给 {{name}}', from: '消息来自 {{name}}', exchange: '往来',
+    copy: '拷贝', reply: '回复',
     handoffDetails: '工作交接详情', resultEvidence: '结果与证据', botReportNotVerified: 'Bot 自述，未经独立核验',
     mode: { deliverToUser: '交付给用户', returnToSender: '回交发起方' },
     field: {

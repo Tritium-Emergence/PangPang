@@ -45,6 +45,7 @@ async function seed(page) {
 test('discovered executor is not labeled ready until execution_verified', async ({page}) => {
   await seed(page);
   await login(page);
+  await page.locator('[data-view="hosts"]').click();
   const list = page.locator('#capability-list');
   const executor = list.locator('[data-capability="executor"]');
   const model = list.locator('[data-capability="model"]');

@@ -19,6 +19,7 @@ test('capability rows and a new Work phase render in Chinese; codes stay inspect
     s.work = [work('fresh', {goal: '新工作', checkpoint: {phase: 'new', summary: '刚收到的要求'}})];
   });
   await login(page);
+  await page.locator('[data-view="hosts"]').click();
   const list = page.locator('#capability-list');
   // Capability pills: label + state text, with a state-colored dot (data-state).
   const model = list.locator('[data-capability="model"]');

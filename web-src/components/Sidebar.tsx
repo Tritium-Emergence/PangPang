@@ -4,6 +4,7 @@ import {useTranslation} from 'react-i18next';
 import type {Bot} from '../types';
 import type {Store as StoreType} from '../store';
 import {api} from '../api';
+import {orderBots} from '../pure';
 import mark from '../mark.png';
 
 // Left rail. On >=sm it is a static column; on mobile it is an off-canvas drawer.
@@ -13,7 +14,7 @@ export function Sidebar({store, pane, setPane, navOpen, onClose}: {
 }) {
   const {t} = useTranslation();
   const snap = store.snapshot!;
-  const bots = snap.bots.filter((b) => b.lifecycle !== 'archived');
+  const bots = orderBots(snap.bots.filter((b) => b.lifecycle !== 'archived'), snap.turns || []);
   const [editing, setEditing] = useState<Bot | null | undefined>(undefined);
   const unreadFor = (botId: string) => (snap.notifications || []).filter((n) => n.bot_id === botId && !n.read).length;
 

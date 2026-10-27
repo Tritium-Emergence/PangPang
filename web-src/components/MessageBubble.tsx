@@ -3,12 +3,18 @@ import {useTranslation} from 'react-i18next';
 import {Markdown, unwrapFrame} from '../markdown';
 import {MediaPreview} from './MediaPreview';
 import {clock, dateTime, exchangeLabel} from '../display';
+import {messagePlainText} from '../pure';
 import {Value, hasValue} from './Facts';
 
 // One message bubble. Assistant messages carry data-testid="assistant-msg" (the
 // streaming→final handoff contract counts these). handoff/result payloads render as
 // labelled sections; plain assistant/user text renders as safe markdown.
-export function MessageBubble({m, snap, botName}: {m: Message; snap: Snapshot; botName: (id?: string) => string}) {
+// Copy writes that plain body. Reply binds the composer to this message's work
+// id — the id on the row, with no other candidate.
+export function MessageBubble({m, snap, botName, onReply}: {
+  m: Message; snap: Snapshot; botName: (id?: string) => string;
+  onReply?: (workId: string) => void;
+}) {
   const {t} = useTranslation();
   const mine = m.from === 'user';
   const isAssistant = m.kind === 'assistant';
@@ -41,6 +47,19 @@ export function MessageBubble({m, snap, botName}: {m: Message; snap: Snapshot; b
       {refs.length ? (
         <div className="msg-media mt-1 flex max-w-[80%] flex-wrap gap-2">
           {refs.map((a) => <MediaPreview key={a.id} artifact={a} />)}
+        </div>
+): null}
+      {isAssistant ? (
+        <div className="msg-actions flex max-w-[80%] items-center gap-1">
+          <button
+            type="button" data-testid="msg-copy" className="msg-action text-muted hover:text-ink"
+            onClick={() => { void navigator.clipboard?.writeText(messagePlainText(m.content)).catch(() => {}); }}
+          >{t('msg.copy')}</button>
+          <button
+            type="button" data-testid="msg-reply" className="msg-action text-muted hover:text-ink disabled:opacity-40"
+            disabled={!m.work_id}
+            onClick={() => { if (m.work_id) onReply?.(m.work_id); }}
+          >{t('msg.reply')}</button>
         </div>
 ): null}
     </div>

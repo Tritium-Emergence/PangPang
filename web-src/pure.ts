@@ -26,6 +26,46 @@ export function unwrapFrame(content: unknown): unknown {
   return content;
 }
 
+// Clipboard text for one reply: the same unwrapped body the bubble shows, as
+// plain text. Structured payloads stay JSON text; nothing here is rendered HTML.
+export function messagePlainText(content: unknown): string {
+  const value = unwrapFrame(content);
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try { return JSON.stringify(value); } catch { return ''; }
+}
+
+export interface BotListItem {id: string; kind?: string}
+export interface ConversationStamp {bot_id?: string; created?: number}
+
+// Sidebar order. The steward is the bot the server marks kind "main" and stays
+// first. Everyone else sorts by the newest snapshot turn created time
+// (descending). A bot with no finite turn time follows the timed ones, keeping
+// the incoming order.
+export function orderBots<B extends BotListItem>(bots: readonly B[], turns: readonly ConversationStamp[]): B[] {
+  const last = new Map<string, number>();
+  for (const turn of turns) {
+    const id = turn.bot_id;
+    const at = turn.created;
+    if (!id || typeof at !== 'number' || !Number.isFinite(at)) continue;
+    const prev = last.get(id);
+    if (prev === undefined || at > prev) last.set(id, at);
+  }
+  return bots.map((bot, index) => ({bot, index})).sort((a, b) => {
+    const aMain = a.bot.kind === 'main' ? 0 : 1;
+    const bMain = b.bot.kind === 'main' ? 0 : 1;
+    if (aMain !== bMain) return aMain - bMain;
+    const aAt = last.get(a.bot.id);
+    const bAt = last.get(b.bot.id);
+    const aTimed = aAt !== undefined;
+    const bTimed = bAt !== undefined;
+    if (aTimed !== bTimed) return aTimed ? -1 : 1;
+    if (aTimed && bTimed && aAt !== bAt) return (bAt as number) - (aAt as number);
+    return a.index - b.index;
+  }).map((row) => row.bot);
+}
+
 const MEDIA_EXT: Record<string, string[]> = {
   image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'],
   video: ['mp4', 'webm', 'mov'],
