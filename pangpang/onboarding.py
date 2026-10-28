@@ -289,22 +289,27 @@ class Onboarding:
     def _project_declared(self, host_id, reported, expected_name, expected_row):
         """The rows a matching declare report would store. Does not write.
 
-        Every reported row is checked. Only the approved name is kept; sibling
-        names are not imported. A mismatch stores nothing.
+        Only the approved name is validated and kept. Sibling rows are not
+        imported, so a legacy absolute-path sibling does not reject this row.
+        A mismatch stores nothing.
         """
         from .adapters_file import MAX_ROWS, clean_declaration
         if not isinstance(reported, list) or len(reported) > MAX_ROWS:
-            raise Fault("invalid_declared_adapters", 400)
+            raise Fault("invalid_declared_adapters", 400,
+                        advice="declared_adapters must be a list of at most %d rows" % MAX_ROWS)
         expected = clean_declaration(expected_name, expected_row)
-        rows = {}
+        matched = None
         for item in reported:
             if not isinstance(item, dict):
-                raise Fault("invalid_declared_adapters", 400)
-            name = item.get("adapter")
+                raise Fault("invalid_declared_adapters", 400,
+                            advice="each declared_adapters entry must be an object")
+            if item.get("adapter") != expected_name:
+                continue
             body = {k: v for k, v in item.items() if k != "adapter"}
-            rows[name] = clean_declaration(name, body)
-        if rows.get(expected_name) != expected:
-            raise Fault("adapter_declaration_mismatch", 403)
+            matched = clean_declaration(expected_name, body)
+        if matched != expected:
+            raise Fault("adapter_declaration_mismatch", 403,
+                        advice="the reported adapter row does not match the approved declaration")
         try:
             previous = dict(self.store.get("declared_adapters", host_id).get("rows") or {})
         except Fault as error:
@@ -365,6 +370,34 @@ class Onboarding:
     _BOUNDED_REPORT_FAULTS = {"adapter_declaration_mismatch", "invalid_declared_adapters",
                               "invalid_adapter_declaration"}
 
+    def same_bounded_result(self, stored, projected):
+        """True when a repeated declare or discover report matches what was stored.
+
+        A fault recorded before advice was appended is the bare code. The same
+        report now projects ``code: advice``. That pair is one outcome.
+        """
+        if stored == projected:
+            return True
+        if not isinstance(stored, dict) or not isinstance(projected, dict):
+            return False
+        if set(stored) != set(projected):
+            return False
+        for key, value in stored.items():
+            other = projected[key]
+            if value == other:
+                continue
+            if key != "error" or not self._bare_fault_error(value, other):
+                return False
+        return True
+
+    def _bare_fault_error(self, stored, projected):
+        if not isinstance(stored, str) or stored not in self._BOUNDED_REPORT_FAULTS:
+            return False
+        if not isinstance(projected, str):
+            return False
+        prefix = stored + ": "
+        return projected.startswith(prefix) and len(projected) > len(prefix)
+
     def _report_bounded(self, cmd, result, *, apply):
         """Persist discover and declare_adapter as the checked projection only."""
         try:
@@ -372,7 +405,10 @@ class Onboarding:
         except Fault as error:
             if error.code not in self._BOUNDED_REPORT_FAULTS:
                 raise
-            safe = {"action": cmd["action"], "host_id": cmd["host_id"], "error": error.code}
+            advice = error.advice
+            folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
+            text = error.code + ": " + folded if folded else error.code
+            safe = {"action": cmd["action"], "host_id": cmd["host_id"], "error": text}
         if not apply:
             return safe
         with self.store.atomic():

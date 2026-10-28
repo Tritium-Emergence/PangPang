@@ -294,7 +294,9 @@ class Broker:
                 bounded = cmd["action"] in {"discover", "declare_adapter"}
                 if bounded and cmd["status"] == "done":
                     projected = self.service.onboarding.report(cmd, result, apply=False)
-                    if cmd.get("result") != projected:
+                    # A bare fault code stored before advice was appended matches
+                    # the same report's ``code: advice`` projection.
+                    if not self.service.onboarding.same_bounded_result(cmd.get("result"), projected):
                         raise Fault("command_result_conflict")
                 elif not bounded and cmd["status"] == "done" and cmd.get("result") != result:
                     # A superseded pending start may still have a late report only
