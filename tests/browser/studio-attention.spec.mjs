@@ -59,30 +59,31 @@ test('narrow screens: the 待处理 count is one button that opens the Work pane
   await expect(page.locator('#work-view')).toBeVisible();
 });
 
-// 待办 inbox: an unread result bound to a Work lists as a clickable "done, unread"
-// item that jumps to its Bot's chat and marks the notification read (the follow-up
-// entry the old dead count never gave). work_id-less unread stays in the Bot badge.
-test('an unread result item opens its Bot and marks the notification read', async ({page}) => {
+// Unread completed results and peer messages are not 待处理 cards. They stay on
+// the bot-list badge. The panel lists only items the user must act on.
+test('unread results stay off 待处理 and on the bot badge', async ({page}) => {
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await login(page);
   const panel = page.getByTestId('attention-panel');
+  await expect(panel).toBeVisible();
   const live = await snapshot(page);
-  const nf = (live.notifications || []).find(x => !x.read && x.kind === 'result' && x.work_id);
-  expect(nf, 'fixture provides a work-bound unread result').toBeTruthy();
-  const item = panel.locator(`[data-notification="${nf.id}"]`);
-  await expect(item).toBeVisible();
-  await expect(item).toContainText(nf.title);
-  const posts = [];
-  page.on('request', r => { if (r.method() === 'POST' && r.url().includes(`/notifications/${nf.id}/read`)) posts.push(r.url()); });
-  await item.click();
-  // Jumps into that Bot's chat.
-  const owner = live.bots.find(b => b.id === nf.bot_id).name;
-  await expect(page.locator('#bot-name')).toHaveText(owner);
-  await expect(page.getByTestId('chat-log')).toBeVisible();
-  // Marks it read (best-effort POST fired) and the item leaves the inbox after refresh.
-  await expect.poll(() => posts.length).toBeGreaterThan(0);
-  await expect(panel.locator(`[data-notification="${nf.id}"]`)).toHaveCount(0);
+  const unread = (live.notifications || []).filter(x => !x.read && (x.kind === 'result' || x.kind === 'peer_message'));
+  expect(unread.length).toBeGreaterThan(0);
+  const bound = unread.filter(x => x.work_id);
+  expect(bound.length, 'fixture provides a work-bound unread result').toBeGreaterThan(0);
+
+  await expect(panel.locator('[data-notification]')).toHaveCount(0);
+  await expect(panel).not.toContainText('已完成待看');
+  for (const nf of bound) await expect(panel).not.toContainText(nf.title);
+
+  await expect(panel.locator('[data-work]').first()).toBeVisible();
+  await expect(panel.locator('[data-routine]').first()).toBeVisible();
+
+  const botId = bound[0].bot_id;
+  const bot = live.bots.find(b => b.id === botId);
+  const count = (live.notifications || []).filter(n => n.bot_id === botId && !n.read).length;
+  await expect(page.locator('#bot-list .bot-item', {hasText: bot.name}).locator('.unread-count')).toHaveText(String(count));
   expect(errors).toEqual([]);
 });
 

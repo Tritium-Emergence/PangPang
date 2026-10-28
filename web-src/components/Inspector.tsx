@@ -27,7 +27,7 @@ const ATTN_TONE: Record<AttentionState, string> = {
 export function Inspector({store, botId, goto}: {store: Store; botId?: string; goto: Goto}) {
   const {t} = useTranslation();
   const snap = store.snapshot!;
-  if (!botId) return <aside className="hidden w-72 shrink-0 flex-col border-l border-line bg-raised lg:flex"><AttentionPanel snap={snap} goto={goto} store={store} /></aside>;
+  if (!botId) return <aside className="hidden w-72 shrink-0 flex-col border-l border-line bg-raised lg:flex"><AttentionPanel snap={snap} goto={goto} /></aside>;
 
   const curId = store.continueTarget?.id || currentWorkId(botId, store.messages);
   const activity = conversationActivity(snap, botId, curId);
@@ -61,7 +61,7 @@ export function Inspector({store, botId, goto}: {store: Store; botId?: string; g
 
   return (
     <aside className="hidden w-72 shrink-0 flex-col border-l border-line bg-raised lg:flex">
-      <AttentionPanel snap={snap} goto={goto} store={store} />
+      <AttentionPanel snap={snap} goto={goto} />
       <div id="work-inspector" data-testid="work-inspector" className="flex min-h-0 flex-1 flex-col">
         <div className="border-b border-line px-4 py-3 text-xs font-semibold tracking-widest text-muted">{t('inspector.currentWork')}</div>
         <div className="flex-1 overflow-auto p-3">

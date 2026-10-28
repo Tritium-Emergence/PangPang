@@ -44,4 +44,6 @@ test('AttentionBar is a server-driven 待办 inbox (counts stay server-owned)', 
   assert.match(bar, /\.attention\b/, 'inbox must read work.attention (server projection)');
   // It must not inspect raw turns/tasks to derive state (same red line).
   assert.doesNotMatch(bar, /\bturns\b|\btasks\b/, 'AttentionBar must not inspect turns/tasks');
+  // Unread completed results and peer messages stay on the bot-list badge.
+  assert.doesNotMatch(bar, /data-notification|attention2\.doneUnread|unreadResults/, 'inbox must not list unread result or peer cards');
 });
