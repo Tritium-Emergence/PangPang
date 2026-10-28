@@ -10,7 +10,10 @@ const msg = (id, created, content, extra = {}) => ({
 
 let errors;
 test.beforeEach(async ({page}) => { errors = []; page.on('pageerror', (e) => errors.push(e.message)); });
-test.afterEach(async () => { expect(errors).toEqual([]); });
+test.afterEach(async ({page}) => {
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+  expect(errors).toEqual([]);
+});
 
 test('discover and other setup_result payloads stay out of the chat timeline', async ({page}) => {
   await project(page, (s) => { s.tasks = []; }, [
@@ -49,4 +52,5 @@ test('discover and other setup_result payloads stay out of the chat timeline', a
   await expect(log).not.toContainText('/usr/local/bin/claude');
   await expect(log).not.toContainText('host-2aac39ed29c8796f');
   await expect(log).not.toContainText('"inventory"');
+  await page.unrouteAll({behavior: 'ignoreErrors'});
 });
