@@ -370,6 +370,34 @@ class Onboarding:
     _BOUNDED_REPORT_FAULTS = {"adapter_declaration_mismatch", "invalid_declared_adapters",
                               "invalid_adapter_declaration"}
 
+    def same_bounded_result(self, stored, projected):
+        """True when a repeated declare or discover report matches what was stored.
+
+        A fault recorded before advice was appended is the bare code. The same
+        report now projects ``code: advice``. That pair is one outcome.
+        """
+        if stored == projected:
+            return True
+        if not isinstance(stored, dict) or not isinstance(projected, dict):
+            return False
+        if set(stored) != set(projected):
+            return False
+        for key, value in stored.items():
+            other = projected[key]
+            if value == other:
+                continue
+            if key != "error" or not self._bare_fault_error(value, other):
+                return False
+        return True
+
+    def _bare_fault_error(self, stored, projected):
+        if not isinstance(stored, str) or stored not in self._BOUNDED_REPORT_FAULTS:
+            return False
+        if not isinstance(projected, str):
+            return False
+        prefix = stored + ": "
+        return projected.startswith(prefix) and len(projected) > len(prefix)
+
     def _report_bounded(self, cmd, result, *, apply):
         """Persist discover and declare_adapter as the checked projection only."""
         try:

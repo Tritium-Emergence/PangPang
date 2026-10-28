@@ -270,6 +270,86 @@ class DeclareAdapterTests(unittest.TestCase):
                  if item.get("kind") == "setup_result"]
         self.assertEqual(noted[-1]["error"], stored["error"])
 
+    def test_pre_upgrade_bare_fault_replay_allows_a_new_basename_declare(self):
+        cases = (
+            ("adapter_declaration_mismatch",
+             {"declared_adapters": [{"adapter": "my-echo", **dict(ROW, argv=["--swapped"])}]},
+             "other-cli"),
+            ("invalid_adapter_declaration",
+             {"declared_adapters": [{"adapter": "my-echo", **dict(ROW, binary="/usr/local/bin/my-echo")}]},
+             "next-cli"),
+        )
+        replay_id = None
+        for code, raw_old, fresh_name in cases:
+            with self.subTest(code=code):
+                failed = self.request()
+                self.app.onboarding.approve(failed["request_id"], {})
+                old = self._declare_command(failed["request_id"])
+                self.sync_report(old, raw_old)
+                self.assertTrue(self.app.store.get("command", old["id"])["result"]["error"].startswith(code + ": "))
+                bare = self.app.store.get("command", old["id"])
+                bare["result"] = {"action": "declare_adapter", "host_id": self.host_id, "error": code}
+                self.app.store.put("command", bare)
+                fresh_row = {"binary": fresh_name, "argv": ["--stdio"], "concurrency": 1,
+                             "priority": 20, "use_when": "echo a line"}
+                fresh = self.request(adapter=fresh_name, binary=fresh_name)
+                self.app.onboarding.approve(fresh["request_id"], {})
+                new = self._declare_command(fresh["request_id"])
+                self.assertEqual(new["status"], "pending")
+                self.assertEqual(self.app.store.get("setup_request", fresh["request_id"])["status"], "configuring")
+                device = self.app.store.get("device", self.host_id)
+                acked = self.app.broker.sync(self.host_id, {
+                    "instance_id": device["instance_id"],
+                    "supported_contract_version": 3,
+                    "reports": [
+                        {"id": old["id"], "result": raw_old},
+                        {"id": new["id"], "result": {"declared_adapters": [
+                            {"adapter": fresh_name, **fresh_row}]}},
+                    ],
+                    "receipts": [],
+                })
+                self.assertEqual(acked["ack"], [old["id"], new["id"]])
+                self.assertEqual(self.app.store.get("command", old["id"])["result"]["error"], code)
+                self.assertEqual(self.app.store.get("setup_request", failed["request_id"])["status"], "failed")
+                self.assertEqual(self.app.store.get("command", new["id"])["status"], "done")
+                self.assertEqual(self.app.store.get("setup_request", fresh["request_id"])["status"], "done")
+                rows = self.app.store.get("declared_adapters", self.host_id)["rows"]
+                self.assertEqual(rows[fresh_name], fresh_row)
+                self.assertNotIn("my-echo", rows)
+                self.assertNotIn("/usr/local/bin", json.dumps(rows))
+                self.assertTrue(self.app.adapter_known(self.host_id, fresh_name))
+                self.assertFalse(self.app.adapter_known(self.host_id, "my-echo"))
+                replay_id = old["id"]
+
+        blocked_row = {"binary": "blocked-cli", "argv": ["--stdio"], "concurrency": 1,
+                       "priority": 20, "use_when": "echo a line"}
+        blocked = self.request(adapter="blocked-cli", binary="blocked-cli")
+        self.app.onboarding.approve(blocked["request_id"], {})
+        blocked_cmd = self._declare_command(blocked["request_id"])
+        old = self.app.store.get("command", replay_id)
+        with self.assertRaises(Fault) as ctx:
+            device = self.app.store.get("device", self.host_id)
+            self.app.broker.sync(self.host_id, {
+                "instance_id": device["instance_id"],
+                "supported_contract_version": 3,
+                "reports": [
+                    {"id": old["id"], "result": {"declared_adapters": [{"adapter": "my-echo", **ROW}]}},
+                    {"id": blocked_cmd["id"], "result": {"declared_adapters": [
+                        {"adapter": "blocked-cli", **blocked_row}]}},
+                ],
+                "receipts": [],
+            })
+        self.assertEqual(ctx.exception.code, "command_result_conflict")
+        self.assertEqual(self.app.store.get("command", blocked_cmd["id"])["status"], "pending")
+        self.assertEqual(self.app.store.get("setup_request", blocked["request_id"])["status"], "configuring")
+        self.assertNotIn("blocked-cli", self.app.store.get("declared_adapters", self.host_id)["rows"])
+
+    def _declare_command(self, request_id):
+        matches = [cmd for cmd in self.commands()
+                   if (cmd.get("payload") or {}).get("request_id") == request_id]
+        self.assertEqual(len(matches), 1)
+        return matches[0]
+
     def test_sibling_report_is_not_imported(self):
         staged = self.request()
         self.app.onboarding.approve(staged["request_id"], {})
