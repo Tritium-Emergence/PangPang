@@ -213,6 +213,63 @@ class DeclareAdapterTests(unittest.TestCase):
                 "host_id": self.host_id, "action": "configure", "adapter": "my-echo"})
         self.assertEqual(ctx.exception.code, "adapter_required")
 
+    def test_legacy_absolute_path_sibling_does_not_block_basename_row(self):
+        staged = self.request()
+        self.app.onboarding.approve(staged["request_id"], {})
+        command = self.commands()[0]
+        absolute = {"binary": "/usr/local/bin/other-cli", "argv": ["--kept"], "concurrency": 1,
+                    "priority": 30, "use_when": "legacy absolute-path sibling"}
+        tilde = {"binary": "~/.local/bin/tilde-cli", "argv": ["--kept"], "concurrency": 1,
+                 "priority": 30, "use_when": "legacy absolute-path sibling"}
+        raw = {"declared_adapters": [
+            {"adapter": "other-cli", **absolute},
+            {"adapter": "my-echo", **ROW},
+            {"adapter": "tilde-cli", **tilde}]}
+        self.sync_report(command, raw)
+        stored = self.app.store.get("command", command["id"])["result"]
+        blob = json.dumps(stored)
+        self.assertNotIn("other-cli", blob)
+        self.assertNotIn("tilde-cli", blob)
+        self.assertNotIn("/usr/local/bin", blob)
+        self.assertNotIn("~/.local/bin", blob)
+        self.assertEqual([item["adapter"] for item in stored["declared_adapters"]], ["my-echo"])
+        self.assertEqual(stored["declared_adapters"][0]["binary"], "my-echo")
+        self.assertEqual(set(self.app.store.get("declared_adapters", self.host_id)["rows"]), {"my-echo"})
+        self.assertTrue(self.app.adapter_known(self.host_id, "my-echo"))
+        self.assertFalse(self.app.adapter_known(self.host_id, "other-cli"))
+        self.assertFalse(self.app.adapter_known(self.host_id, "tilde-cli"))
+        self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "done")
+
+    def test_absolute_path_declaration_is_rejected_at_staging(self):
+        before = self.app.store.find("setup_request")
+        for binary in ("/usr/local/bin/my-echo", "~/.local/bin/my-echo"):
+            with self.subTest(binary=binary):
+                with self.assertRaises(Fault) as ctx:
+                    self.request(binary=binary)
+                self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
+                self.assertIn("PATH basename", ctx.exception.advice)
+        self.assertEqual(self.app.store.find("setup_request"), before)
+        self.assertEqual(self.commands(), [])
+
+    def test_reported_absolute_path_keeps_declaration_advice(self):
+        staged = self.request()
+        self.app.onboarding.approve(staged["request_id"], {})
+        command = self.commands()[0]
+        raw = {"declared_adapters": [
+            {"adapter": "my-echo", **dict(ROW, binary="/usr/local/bin/my-echo")}]}
+        self.sync_report(command, raw)
+        stored = self.app.store.get("command", command["id"])["result"]
+        blob = json.dumps(stored)
+        self.assertNotIn("/usr/local/bin/my-echo", blob)
+        self.assertTrue(stored["error"].startswith("invalid_adapter_declaration: "))
+        self.assertIn("PATH basename", stored["error"])
+        self.assertNotEqual(stored["error"], "invalid_adapter_declaration")
+        self.assertEqual(self.app.store.find("declared_adapters"), [])
+        self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "failed")
+        noted = [item["content"] for item in self.app.store.find("message")
+                 if item.get("kind") == "setup_result"]
+        self.assertEqual(noted[-1]["error"], stored["error"])
+
     def test_sibling_report_is_not_imported(self):
         staged = self.request()
         self.app.onboarding.approve(staged["request_id"], {})
@@ -268,7 +325,8 @@ class DeclareAdapterTests(unittest.TestCase):
         self.assertNotIn("secret-value", blob)
         self.assertNotIn("legacy-private-cli", blob)
         self.assertNotIn("declared_adapters", stored)
-        self.assertEqual(stored["error"], "adapter_declaration_mismatch")
+        self.assertEqual(stored["error"],
+                         "adapter_declaration_mismatch: the reported adapter row does not match the approved declaration")
         self.assertEqual(self.app.store.find("declared_adapters"), [])
         self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "failed")
         self.sync_report(command, raw)
