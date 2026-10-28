@@ -8,6 +8,19 @@ from .runner import checked, probe
 from .store import Fault, digest
 
 
+def _missing_cli_advice(adapter):
+    """Name the catalog binary when configure cannot discover it."""
+    cat = ADAPTER_CATALOG.get(adapter) if isinstance(adapter, str) else None
+    binary = (cat or {}).get("binary")
+    if isinstance(binary, str) and binary and "\x00" not in binary:
+        label = binary
+    elif isinstance(adapter, str) and adapter and "\x00" not in adapter:
+        label = adapter
+    else:
+        label = "unknown"
+    return "executable %s is not installed on PATH" % str(label)[:200]
+
+
 class LocalSetup:
     def __init__(self, connector):
         self.c = connector
@@ -75,7 +88,7 @@ class LocalSetup:
         adapter = body["adapter"]
         found = next((x for x in self.discover()["inventory"] if x["adapter"] == adapter), None)
         if not found:
-            raise Fault("cli_not_installed")
+            raise Fault("cli_not_installed", advice=_missing_cli_advice(adapter))
         host = self.c.execution.hosts[self.c.host_id]
         from .runner import check_control_separation
         check_control_separation(host["allowed_roots"], [self.c.data])

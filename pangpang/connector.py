@@ -523,7 +523,8 @@ class Connector:
             result = {"error": error.code if isinstance(error, Fault) else "local_operation_failed"}
             if (action in {"discover", "configure", "credential_install", "credential_delete", "declare_adapter"}
                     and isinstance(error, Fault)
-                    and error.code in {"invalid_adapter", "invalid_adapter_declaration", "adapter_declaration_conflict"}
+                    and error.code in {"invalid_adapter", "invalid_adapter_declaration",
+                                       "adapter_declaration_conflict", "cli_not_installed"}
                     and isinstance(error.advice, str)):
                 folded = " ".join(error.advice.split())[:500]
                 if folded:

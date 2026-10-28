@@ -380,6 +380,46 @@ class DeclareAdapterTests(unittest.TestCase):
         self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "failed")
         self.assertEqual(self.app.store.find("declared_adapters"), [])
         self.assertFalse((self.cloud_data / "adapters.json").exists())
+        noted = [item["content"] for item in self.app.store.find("message", work_id=self.work_id)
+                 if item.get("kind") == "setup_result" and item["content"].get("error")]
+        visible = noted[-1]["error"]
+        self.assertNotEqual(visible, "device_setup_failed")
+        self.assertIn("adapter_declaration_conflict", visible)
+        self.assertIn("conflicts with an adapter row already stored", visible)
+        self.assertIn("adapters.json", visible)
+        self.assertIn("my-echo", visible)
+
+    def test_declaration_conflict_stays_visible_when_advice_is_absent(self):
+        staged = self.request()
+        self.app.onboarding.approve(staged["request_id"], {})
+        command = self.commands()[0]
+        self.app.onboarding.report(command, {"error": "adapter_declaration_conflict"})
+        self.assertEqual(self.app.store.get("setup_request", staged["request_id"])["status"], "failed")
+        self.assertEqual(self.app.store.find("declared_adapters"), [])
+        noted = [item["content"] for item in self.app.store.find("message", work_id=self.work_id)
+                 if item.get("kind") == "setup_result" and item["content"].get("error")]
+        visible = noted[-1]["error"]
+        self.assertEqual(visible, "adapter_declaration_conflict: conflicts with an adapter row already stored")
+
+    def test_generic_setup_fault_replay_still_acks(self):
+        staged = self.request()
+        self.app.onboarding.approve(staged["request_id"], {})
+        command = self.commands()[0]
+        raw = {"error": "cli_not_installed"}
+        projected = self.app.onboarding.report(command, raw, apply=False)
+        self.assertTrue(projected["error"].startswith("cli_not_installed"))
+        self.assertIn("PATH", projected["error"])
+        self.assertNotEqual(projected["error"], "device_setup_failed")
+        command.update(status="done", result={
+            "action": "declare_adapter", "host_id": self.host_id, "error": "device_setup_failed"})
+        self.app.store.put("command", command)
+        acked = self.sync_report(command, raw)
+        self.assertEqual(acked["ack"], [command["id"]])
+        self.assertEqual(self.app.store.get("command", command["id"])["result"]["error"], "device_setup_failed")
+        with self.assertRaises(Fault) as ctx:
+            self.sync_report(command, {"declared_adapters": [{"adapter": "my-echo", **ROW}]})
+        self.assertEqual(ctx.exception.code, "command_result_conflict")
+        self.assertEqual(self.app.store.find("declared_adapters"), [])
 
     def sync_report(self, command, result):
         device = self.app.store.get("device", self.host_id)

@@ -67,6 +67,36 @@ def endpoint(value):
     return value.rstrip("/")
 
 
+# A device fault code. Free-form text is not copied into the setup result.
+_SETUP_FAULT_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+
+# Advice is operator-facing text we already attach to these faults. Other
+# structured codes stay visible as the code alone.
+_SETUP_ADVICE_CODES = {
+    "invalid_adapter",
+    "invalid_adapter_declaration",
+    "adapter_declaration_conflict",
+    "cli_not_installed",
+}
+
+# Used when the device reports the code and does not send advice.
+_DEFAULT_SETUP_ADVICE = {
+    "cli_not_installed": "executable is not installed on PATH",
+    "adapter_declaration_conflict": "conflicts with an adapter row already stored",
+}
+
+
+def _visible_setup_error(code, advice):
+    """setup_result text for one device fault. Free-form text is not copied."""
+    if not isinstance(code, str) or _SETUP_FAULT_CODE.fullmatch(code) is None:
+        return "device_setup_failed"
+    text = advice if code in _SETUP_ADVICE_CODES and isinstance(advice, str) else None
+    if not isinstance(text, str) or not text.strip():
+        text = _DEFAULT_SETUP_ADVICE.get(code)
+    folded = " ".join(text.split())[:500] if isinstance(text, str) else ""
+    return code + ": " + folded if folded else code
+
+
 class Onboarding:
     def __init__(self, service):
         self.s, self.store, self.vault = service, service.store, service.vault
@@ -337,10 +367,7 @@ class Onboarding:
         safe = {"action": cmd["action"], "host_id": cmd["host_id"]}
         payload = cmd.get("payload") or {}
         if result.get("error"):
-            advice = result.get("advice") if result.get("error") in {
-                "invalid_adapter", "invalid_adapter_declaration", "adapter_declaration_conflict"} else None
-            folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
-            safe["error"] = result["error"] + ": " + folded if folded else "device_setup_failed"
+            safe["error"] = _visible_setup_error(result.get("error"), result.get("advice"))
             return safe
         if cmd["action"] == "discover":
             items = [{k: str(x[k])[:500] for k in ("adapter", "binary", "version") if k in x}
@@ -374,7 +401,8 @@ class Onboarding:
         """True when a repeated declare or discover report matches what was stored.
 
         A fault recorded before advice was appended is the bare code. The same
-        report now projects ``code: advice``. That pair is one outcome.
+        report now projects ``code: advice``. A setup fault recorded as
+        ``device_setup_failed`` is the same report once its code is preserved.
         """
         if stored == projected:
             return True
@@ -391,12 +419,15 @@ class Onboarding:
         return True
 
     def _bare_fault_error(self, stored, projected):
-        if not isinstance(stored, str) or stored not in self._BOUNDED_REPORT_FAULTS:
+        if not isinstance(stored, str) or not isinstance(projected, str):
             return False
-        if not isinstance(projected, str):
+        if stored in self._BOUNDED_REPORT_FAULTS:
+            prefix = stored + ": "
+            return projected.startswith(prefix) and len(projected) > len(prefix)
+        if stored != "device_setup_failed" or projected == "device_setup_failed":
             return False
-        prefix = stored + ": "
-        return projected.startswith(prefix) and len(projected) > len(prefix)
+        code = projected.split(": ", 1)[0]
+        return _SETUP_FAULT_CODE.fullmatch(code) is not None
 
     def _report_bounded(self, cmd, result, *, apply):
         """Persist discover and declare_adapter as the checked projection only."""
@@ -1035,10 +1066,7 @@ class Onboarding:
                 req = self.store.get("setup_request", payload["request_id"])
             safe = {"action": cmd["action"], "host_id": cmd["host_id"]}
             if result.get("error"):
-                advice = result.get("advice") if result.get("error") in {
-                    "invalid_adapter", "invalid_adapter_declaration", "adapter_declaration_conflict"} else None
-                folded = " ".join(advice.split())[:500] if isinstance(advice, str) else ""
-                safe["error"] = result["error"] + ": " + folded if folded else "device_setup_failed"
+                safe["error"] = _visible_setup_error(result.get("error"), result.get("advice"))
             else:
                 inst = result.get("installation", {})
                 if (not isinstance(inst, dict) or not all(isinstance(inst.get(k), str) for k in ("id", "host_id", "adapter"))
