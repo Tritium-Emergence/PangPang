@@ -442,7 +442,7 @@ export default {
 
   attention2: {
 
-    title: 'Pending', needsDecision: 'Needs my decision', blocked: 'Blocked', doneUnread: 'Done, unread',
+    title: 'Pending', needsDecision: 'Needs my decision', blocked: 'Blocked',
 
     noGoal: '(no goal)', routinePending: 'Routine awaiting approval',
 

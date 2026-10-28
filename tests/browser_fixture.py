@@ -200,9 +200,9 @@ def run_studio():
     app.notification("bot-main", "result", "你的周报草稿已生成，待查看。")
     app.notification("bot-main", "result", "本周数据汇总已就绪。")
     app.notification("bot-main", "result", "后台刷新触发用占位通知。")
-    # One unread result bound to a Work: the 待办 inbox lists it as a clickable
-    # "done, unread" item (jump to the Bot + mark read). The work_id-less ones above
-    # stay in the Bot badge only (the inbox filters on work_id).
+    # One unread result bound to a Work. The 待处理 panel does not list it;
+    # unread stays on the bot-list badge until an explicit mark-read. The
+    # work_id-less ones above stay on that badge too.
     app.notification("bot-main", "result", "进度梳理已完成，待查看。", work_id=scroll_work)
     # Pending Routine (approval + standing-authority + dual-render specs).
     turn, _ = user_turn("bot-main", "以后每天上午九点给我出一份日报", "seed-routine")
