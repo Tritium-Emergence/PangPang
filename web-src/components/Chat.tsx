@@ -7,6 +7,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
+import {visibleChatMessages} from '../pure';
 import {conversationActivity, currentWorkId} from '../scope';
 
 // Chat log. RCB-critical:
@@ -24,12 +25,8 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
 
-  // Visible messages: hide execution_result rows already folded into a delivered turn
-  // (mirrors the old conversation() visibility rule).
-  const completedTurnIds = new Set(store.messages.filter((a) => a.turn_id && !a.interim).map((a) => a.turn_id));
-  const visible = store.messages.filter(
-    (m) => m.kind !== 'execution_result' || (!m.consumed_by_delivery_id && !completedTurnIds.has(m.consumed_by_turn_id!)),
-);
+  // setup_result stays stored for the model. The timeline omits that payload.
+  const visible = visibleChatMessages(store.messages);
 
   // Approval cards for this bot's work (inline, chat-ordered). Only tasks still waiting
   // for the user: an approved task's record lives with the task (Inspector / Work), not
