@@ -39,6 +39,27 @@ export function messagePlainText(content: unknown): string {
   try { return JSON.stringify(value); } catch { return ''; }
 }
 
+// Rows the main chat timeline renders. setup_result rows (discover,
+// declare_adapter, configure, and the other device setup reports) stay
+// stored for the model. The timeline omits them, so the steward's written
+// reply is what the chat shows. An execution_result already folded into a
+// delivered turn is omitted too: a non-interim message shares its turn id,
+// or a delivery id has consumed the row.
+export interface ChatTimelineMessage {
+  kind?: string;
+  turn_id?: string;
+  interim?: boolean;
+  consumed_by_delivery_id?: string;
+  consumed_by_turn_id?: string;
+}
+
+export function visibleChatMessages<M extends ChatTimelineMessage>(messages: readonly M[]): M[] {
+  const completedTurnIds = new Set(messages.filter((a) => a.turn_id && !a.interim).map((a) => a.turn_id));
+  return messages.filter((m) => m.kind !== 'setup_result' && (
+    m.kind !== 'execution_result' || (!m.consumed_by_delivery_id && !completedTurnIds.has(m.consumed_by_turn_id))
+  ));
+}
+
 export interface BotListItem {id: string; kind?: string}
 export interface ConversationStamp {bot_id?: string; created?: number}
 
