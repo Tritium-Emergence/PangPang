@@ -352,7 +352,9 @@ class StoredUnknownAdapterTests(unittest.TestCase):
             })
         missing = connector.store.get("local_command", "cmd-missing-cli")["result"]
         self.assertEqual(missing["error"], "cli_not_installed")
-        self.assertNotIn("advice", missing)
+        self.assertIn("codex", missing["advice"])
+        self.assertIn("not installed on PATH", missing["advice"])
+        self.assertNotIn("\n", missing["advice"])
 
     def test_configure_probe_exception_completes_setup(self):
         connector = self._open_legacy_connector()

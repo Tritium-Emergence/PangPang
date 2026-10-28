@@ -942,6 +942,7 @@ class ConnectorProposalTests(unittest.TestCase):
         }, {"error": "invalid_adapter", "advice": "   "})
         self.assertEqual(self.app.store.get("setup_request", blank)["status"], "failed")
 
+        missing = "executable codex is not installed on PATH"
         other = "setup-other-error"
         self.app.store.put("setup_request", {
             "id": other, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
@@ -950,7 +951,34 @@ class ConnectorProposalTests(unittest.TestCase):
         self.app.onboarding.report({
             "id": "cmd-other", "action": "configure", "host_id": "pc",
             "payload": {"request_id": other},
-        }, {"error": "cli_not_installed", "advice": "ignore this advice " + ("x" * 50)})
+        }, {"error": "cli_not_installed", "advice": " \n" + missing + " \n"})
+        bare = "setup-bare-cli"
+        self.app.store.put("setup_request", {
+            "id": bare, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-bare-cli", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": bare},
+        }, {"error": "cli_not_installed"})
+        busy = "setup-busy"
+        self.app.store.put("setup_request", {
+            "id": busy, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-busy", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": busy},
+        }, {"error": "device_busy_configuration_waits", "advice": "LEAKED_BUSY_ADVICE"})
+        noisy = "setup-noisy-error"
+        self.app.store.put("setup_request", {
+            "id": noisy, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
+            "status": "configuring", "proposal": {"action": "configure"},
+        })
+        self.app.onboarding.report({
+            "id": "cmd-noisy", "action": "configure", "host_id": "pc",
+            "payload": {"request_id": noisy},
+        }, {"error": "LEAKED_SETUP_TEXT", "advice": "LEAKED_SETUP_ADVICE"})
         long_id = "setup-long-advice"
         self.app.store.put("setup_request", {
             "id": long_id, "host_id": "pc", "bot_id": "bot-main", "work_id": self.work,
@@ -964,9 +992,18 @@ class ConnectorProposalTests(unittest.TestCase):
                     if m.get("kind") == "setup_result"]
         by_action = {m["error"]: m for m in contents if m.get("error")}
         self.assertEqual(by_action["invalid_adapter: " + advice]["error"], "invalid_adapter: " + advice)
-        self.assertIn("device_setup_failed", by_action)
+        self.assertEqual(by_action["invalid_adapter"]["error"], "invalid_adapter")
+        self.assertEqual(by_action["cli_not_installed: " + missing]["action"], "configure")
+        self.assertEqual(by_action["cli_not_installed: executable is not installed on PATH"]["error"],
+                         "cli_not_installed: executable is not installed on PATH")
+        self.assertEqual(by_action["device_busy_configuration_waits"]["error"], "device_busy_configuration_waits")
+        self.assertEqual(by_action["device_setup_failed"]["error"], "device_setup_failed")
         self.assertEqual(by_action["invalid_adapter: " + ("a" * 500)]["error"], "invalid_adapter: " + ("a" * 500))
-        self.assertFalse(any("ignore this advice" in (m.get("error") or "") for m in contents))
+        self.assertFalse(any("LEAKED_SETUP_TEXT" in (m.get("error") or "") for m in contents))
+        self.assertFalse(any("LEAKED_SETUP_ADVICE" in (m.get("error") or "") for m in contents))
+        self.assertFalse(any("LEAKED_BUSY_ADVICE" in (m.get("error") or "") for m in contents))
+        self.assertEqual(self.app.store.get("setup_request", other)["status"], "failed")
+        self.assertEqual(self.app.store.get("setup_request", bare)["status"], "failed")
         self.assertNotIn("codex-notes-pc", self.app.execution.installations)
 
 
