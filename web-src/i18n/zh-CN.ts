@@ -267,7 +267,7 @@ export default {
     pickPrompt: '在上面的工作目录里点选一个文件。', cancel: '取消', reference: '引用文件',
   },
   attention2: {
-    title: '待处理', needsDecision: '需要我决定', blocked: '受阻', doneUnread: '已完成待看',
+    title: '待处理', needsDecision: '需要我决定', blocked: '受阻',
     noGoal: '(无目标)', routinePending: '例行任务待批准',
     more: '另有 {{n}} 项，去「工作与产物」查看', empty: '没有需要你处理的事项。',
   },
