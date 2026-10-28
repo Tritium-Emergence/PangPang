@@ -11,7 +11,7 @@ import {Composer} from './components/Composer';
 import {Inspector} from './components/Inspector';
 import {WorkPane} from './components/WorkPane';
 import {HostsView} from './components/HostsView';
-import {SetupPanel} from './components/Setup';
+import {SetupPanel, StatusStrip} from './components/Setup';
 
 // The #activity pill is a SYSTEM-WIDE status read from server truth. attention_summary
 // is global (not per-bot), so this is labelled as the whole workspace's state, not the
@@ -110,6 +110,7 @@ export function App() {
           <PendingPill snap={store.snapshot} open={goto.pane} />
         </header>
         <SetupPanel store={store} />
+        {pane === 'hosts' ? <StatusStrip store={store} /> : null}
         {store.notice ? (
           <div id="notice" role="status" className="flex items-center gap-2 border-b border-warn/40 bg-warn/5 px-5 py-2 text-sm text-warn">
             <span className="notice-msg">{store.notice}</span>

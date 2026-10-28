@@ -35,6 +35,7 @@ test.afterEach(async ({page}) => { await page.unrouteAll({behavior: 'wait'}); ex
 test('en-US first paint: capability rows and known phase in English; raw codes stay inspectable', async ({page}) => {
   await seed(page);
   await loginAt(page, 'en-US');
+  await page.locator('[data-view="hosts"]').click();
   const list = page.locator('#capability-list');
   const m = list.locator('[data-capability="model"]');
   await expect(m).toContainText('Chat model'); await expect(m).toContainText('Ready');
@@ -53,6 +54,7 @@ test('en-US first paint: capability rows and known phase in English; raw codes s
 test('zh-CN first paint: the same projection renders in Chinese', async ({page}) => {
   await seed(page);
   await loginAt(page, 'zh-CN');
+  await page.locator('[data-view="hosts"]').click();
   const list = page.locator('#capability-list');
   const m = list.locator('[data-capability="model"]');
   await expect(m).toContainText('对话模型'); await expect(m).toContainText('就绪');
@@ -66,6 +68,7 @@ test('zh-CN first paint: the same projection renders in Chinese', async ({page})
 test('header language toggle flips the shell live and persists', async ({page}) => {
   await seed(page);
   await loginAt(page, 'zh-CN');
+  await page.locator('[data-view="hosts"]').click();
   const list = page.locator('#capability-list');
   const toggle = page.locator('#lang-toggle');
   await expect(list.locator('[data-capability="model"]')).toContainText('对话模型');

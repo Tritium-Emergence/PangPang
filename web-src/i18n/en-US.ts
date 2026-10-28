@@ -360,6 +360,8 @@ export default {
 
     you: 'You', sentTo: 'Sent to {{name}}', from: 'Message from {{name}}', exchange: 'Exchange',
 
+    copy: 'Copy', reply: 'Reply',
+
     handoffDetails: 'Handoff details', resultEvidence: 'Result & evidence', botReportNotVerified: "Bot's own report, not independently verified",
 
     mode: { deliverToUser: 'Deliver to user', returnToSender: 'Return to sender' },

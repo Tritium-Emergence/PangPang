@@ -245,41 +245,51 @@ function CapabilityList({rows, envRows, onSealEnv, onClearEnv}: {
 }
 
 // The pending setup requests (needs_approval / needs_secret / configuring), shown
-// above the chat like the old setup-panel. The capability list is the same
-// onboarding.status().capabilities projection, on the home view as well.
+// above the chat like the old setup-panel. The capability status strip is not
+// part of this surface; StatusStrip hosts that same projection.
 export function SetupPanel({store}: {store: Store}) {
   const {t} = useTranslation();
   const setup = store.snapshot!.setup;
   const requests = (setup.requests || []).filter((r) => ['needs_approval', 'needs_secret', 'configuring'].includes(r.status));
   const [secretReq, setSecretReq] = useState<{id: string; target: SecretTarget} | null>(null);
-  const [envName, setEnvName] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const onboarding = !setup.model.configured || requests.length > 0;
+  if (!onboarding) return null;
+  return (
+    <>
+      <section id="setup-panel" className="border-b border-line bg-warn/5 px-5 py-3">
+        {!setup.model.configured ? (
+          <div className="mini">
+            <h3 className="font-medium">{t('setup.connectModelTitle')}</h3>
+            <p className="text-sm text-muted">{t('setup.connectModelDesc')}</p>
+            <button className="mt-2 rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={() => setShowSettings(true)}>{t('setup.setupModel')}</button>
+          </div>
+): null}
+        {requests.map((req) => <RequestRow key={req.id} req={req} store={store} onSecret={(target) => setSecretReq({id: req.id, target})} />)}
+      </section>
+      {showSettings ? <SettingsDialog store={store} onClose={() => setShowSettings(false)} />: null}
+      {secretReq ? <SecretDialog store={store} reqId={secretReq.id} target={secretReq.target} onClose={() => setSecretReq(null)} />: null}
+    </>
+);
+}
+
+// The same capability status strip Setup used to render on the home shell.
+// App mounts it only on the computers page.
+export function StatusStrip({store}: {store: Store}) {
+  const {t} = useTranslation();
+  const setup = store.snapshot!.setup;
   const capabilities = setup.capabilities || [];
   const envRows = setup.coordinator_env || [];
-  const onboarding = !setup.model.configured || requests.length > 0;
+  const [envName, setEnvName] = useState<string | null>(null);
   const clearEnv = async (name: string) => {
     if (!confirm(t('setup.clearCoordinatorEnvConfirm', {var: name}))) return;
     try { await api('setup/coordinator-env/clear', {name}); await store.refresh(); }
     catch (e: unknown) { store.setNotice(friendlyError(e)); }
   };
-  if (!onboarding && capabilities.length === 0 && envRows.length === 0) return null;
+  if (!capabilities.length && !envRows.length) return null;
   return (
     <>
-      {onboarding ? (
-        <section id="setup-panel" className="border-b border-line bg-warn/5 px-5 py-3">
-          {!setup.model.configured ? (
-            <div className="mini">
-              <h3 className="font-medium">{t('setup.connectModelTitle')}</h3>
-              <p className="text-sm text-muted">{t('setup.connectModelDesc')}</p>
-              <button className="mt-2 rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={() => setShowSettings(true)}>{t('setup.setupModel')}</button>
-            </div>
-): null}
-          {requests.map((req) => <RequestRow key={req.id} req={req} store={store} onSecret={(t) => setSecretReq({id: req.id, target: t})} />)}
-        </section>
-): null}
       <CapabilityList rows={capabilities} envRows={envRows} onSealEnv={setEnvName} onClearEnv={(name) => void clearEnv(name)} />
-      {showSettings ? <SettingsDialog store={store} onClose={() => setShowSettings(false)} />: null}
-      {secretReq ? <SecretDialog store={store} reqId={secretReq.id} target={secretReq.target} onClose={() => setSecretReq(null)} />: null}
       {envName ? <CoordinatorEnvDialog store={store} name={envName} onClose={() => setEnvName(null)} />: null}
     </>
 );

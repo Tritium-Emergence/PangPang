@@ -89,7 +89,10 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   const botName = (id?: string) => snap.bots.find((b) => b.id === id)?.name || id || t('chat.botFallback');
   const pendingSends = store.pendingSends.filter((p) => p.botId === botId);
   const timeline = [
-...visible.map((m) => ({key: 'message-' + m.id, at: m.created || 0, node: <MessageBubble m={m} snap={snap} botName={botName} />})),
+...visible.map((m) => ({key: 'message-' + m.id, at: m.created || 0, node: <MessageBubble m={m} snap={snap} botName={botName} onReply={(workId) => {
+    const goal = snap.work.find((w) => w.id === workId)?.goal || '';
+    store.setContinueTarget({id: workId, goal});
+  }} />})),
 ...taskCards.map((task) => ({key: 'approval-' + task.id, at: task.created || 0, node: <TaskCard task={task} store={store} />})),
 ...pendingSends.map((p) => ({key: 'pending-' + p.id, at: p.created || 0, node: <div data-testid="pending-msg"><MessageBubble m={{id: p.id, kind: 'user', from: 'user', content: p.text, created: p.created}} snap={snap} botName={botName} /></div>})),
   ].sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
