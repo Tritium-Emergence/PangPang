@@ -76,12 +76,14 @@ _SETUP_ADVICE_CODES = {
     "invalid_adapter",
     "invalid_adapter_declaration",
     "adapter_declaration_conflict",
+    "adapter_not_in_catalog",
     "cli_not_installed",
 }
 
 # Used when the device reports the code and does not send advice.
 _DEFAULT_SETUP_ADVICE = {
     "cli_not_installed": "executable is not installed on PATH",
+    "adapter_not_in_catalog": "adapter is not in this host's live catalog",
     "adapter_declaration_conflict": "conflicts with an adapter row already stored",
 }
 

@@ -662,13 +662,26 @@ def declared_for_host(declared_adapters, host_id):
     return (declared_adapters or {}).get(host_id) or {}
 
 
-def known_adapter(adapter, host_id, declared_adapters):
-    """Membership for one host: built-in (and locally merged) catalog ∪ the
-    adapter rows that this host's connector declared. Non-connector hosts
-    never carry a declaration, so their membership is the catalog alone."""
-    if adapter in ADAPTER_CATALOG:
+def known_adapter(adapter, host_id, declared_adapters, hosts=None):
+    """Whether this host may configure or run the adapter.
+
+    Built-in catalog rows are known on every host. A row merged into this
+    process's catalog belongs to hosts whose transport is local, and does not
+    become known on a connector or any other host. A connector knows a custom
+    adapter only from the declaration recorded for that same host.
+    """
+    if adapter in ADAPTER_CATALOG and _catalog_counts_for_host(adapter, host_id, hosts):
         return True
     return adapter in declared_for_host(declared_adapters, host_id)
+
+
+def _catalog_counts_for_host(adapter, host_id, hosts):
+    """Built-ins count everywhere. Merged rows count only on a local host."""
+    from .adapters_file import is_merged
+    if not is_merged(adapter):
+        return True
+    host = hosts.get(host_id) if isinstance(hosts, dict) else None
+    return isinstance(host, dict) and host.get("transport") == "local"
 
 
 def execution_for_stored_candidate(candidate, stored_config, data, declared_adapters=None):
@@ -677,20 +690,24 @@ def execution_for_stored_candidate(candidate, stored_config, data, declared_adap
     Unknown-adapter rows identical to that document stay in the file and out of
     routing. A new or different unknown-adapter row is rejected with advice.
     Direct Execution() still rejects every unknown adapter. A row the device
-    declared for that host is known and is not an unknown adapter.
+    declared for that host is known on that host only. A row merged from this
+    process's adapters file is known on a local host, not on a connector.
     """
     declared_adapters = declared_adapters or {}
-    installations = candidate.get("installations") if isinstance(candidate, dict) else None
+    hosts = {}
+    installations = None
+    if isinstance(candidate, dict):
+        installations = candidate.get("installations")
+        hosts = {h.get("id"): h for h in (candidate.get("hosts") or []) if isinstance(h, dict)}
     if not isinstance(installations, list):
         return Execution(candidate, data, declared_adapters=declared_adapters)
     unknown = [row for row in installations
                if isinstance(row, dict)
-               and not known_adapter(row.get("adapter"), row.get("host_id"), declared_adapters)]
+               and not known_adapter(row.get("adapter"), row.get("host_id"), declared_adapters, hosts)]
     if not unknown:
         return Execution(candidate, data, declared_adapters=declared_adapters)
     stored_rows = stored_config.get("installations") if isinstance(stored_config, dict) else None
     stored = {row.get("id"): row for row in (stored_rows or []) if isinstance(row, dict)}
-    hosts = {h.get("id"): h for h in (candidate.get("hosts") or []) if isinstance(h, dict)}
     for row in unknown:
         if stored.get(row.get("id")) != row:
             raise Fault("invalid_adapter", 400,
@@ -706,9 +723,13 @@ class Execution:
 
         ``tolerate_unknown_adapters`` is for a stored config loaded at process
         start, and for a write that keeps unknown-adapter rows identical to the
-        stored document. An adapter outside the built-in catalog and adapters.json
-        stays in the document, is marked unavailable, and is left out of routing.
-        A direct Execution() leaves the flag false and still raises ``invalid_adapter``.
+        stored document. An adapter that this host does not know stays in the
+        document, is marked unavailable, and is left out of routing. A direct
+        Execution() leaves the flag false and still raises ``invalid_adapter``.
+
+        Built-in catalog rows are known on every host. A custom row merged from
+        this process's adapters file is known on local hosts only. A connector
+        does not inherit that file.
 
         ``declared_adapters`` is {host_id: {name: {concurrency, priority,
         use_when}}} as reported by each connector host; an adapter declared by a
@@ -773,7 +794,7 @@ class Execution:
             self.installations[e["id"]] = e
 
     def knows_adapter(self, adapter, host_id):
-        return known_adapter(adapter, host_id, self.declared_adapters)
+        return known_adapter(adapter, host_id, self.declared_adapters, self.hosts)
 
     def _unknown_entry(self, e):
         connector = self.hosts.get(e.get("host_id"), {}).get("transport") == "connector"

@@ -251,19 +251,26 @@ class CustomAdapterEndToEndTests(unittest.TestCase):
             path.write_text(json.dumps({"opencode-test": ROW}), encoding="utf-8")
             path.chmod(0o644)
         local = config(self.root)
-        local["installations"][0].update(adapter="opencode-test", enabled=True)
+        local["installations"][0].update(id="opencode-test-local", adapter="opencode-test", enabled=True)
         local.update(host_id="local", cloud_url="http://127.0.0.1:1",
                      credential_env="TEST_DEVICE_KEY")
         self.connector = Connector(local, device_data)
         cloud = config(self.root)
         cloud["hosts"][0].update(transport="connector", credential_env="TEST_DEVICE_KEY")
-        cloud["installations"][0]["adapter"] = "opencode-test"
+        # The cloud copy of adapters.json must not make this connector host known.
+        # The device's own declaration, reported on sync, is what registers the row.
+        cloud["installations"] = []
         self.app = Service(cloud, cloud_data)
+        self.app._auto_probe_installation = lambda installation_id: None
+        self.assertIn("opencode-test", ADAPTER_CATALOG)
+        self.assertFalse(self.app.adapter_known("local", "opencode-test"))
         self.connector.request = lambda body: self.app.broker.sync("local", body)
         self.connector.tick()
-        probe = self.connector.execution.probe("codex-local")
-        probe.update(id="codex-local", at=time.time(),
-                     policy_digest=policy_digest(self.connector.config, "codex-local"))
+        self.assertTrue(self.app.adapter_known("local", "opencode-test"))
+        self.assertIn("opencode-test-local", self.app.execution.installations)
+        probe = self.connector.execution.probe("opencode-test-local")
+        probe.update(id="opencode-test-local", at=time.time(),
+                     policy_digest=policy_digest(self.connector.config, "opencode-test-local"))
         self.app.store.put("probe", probe)
 
     def tearDown(self):
@@ -280,6 +287,11 @@ class CustomAdapterEndToEndTests(unittest.TestCase):
         m = self.app.send("bot-main", {"text": "制作结果", "allow_write": True}, "custom-work")
         r = self.app.submit_task("bot-main", m["work_id"],
                                  {"prompt": "中文内容", "outputs": ["result.txt"]})
+        self.app.task_step()
+        task = self.app.store.get("task", r["task_id"])
+        self.assertEqual(task["installation_id"], "opencode-test-local")
+        self.assertEqual(task["status"], "awaiting_approval")
+        self.app.approve(task["id"], {"spec_digest": task["spec_digest"]})
         self.app.task_step()
         task = self.app.store.get("task", r["task_id"])
         command = [c for c in self.app.store.find("command", action="start", limit=1000)

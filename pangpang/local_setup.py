@@ -8,17 +8,27 @@ from .runner import checked, probe
 from .store import Fault, digest
 
 
+def _adapter_label(adapter):
+    if isinstance(adapter, str) and adapter and "\x00" not in adapter:
+        return str(adapter)[:200]
+    return "unknown"
+
+
 def _missing_cli_advice(adapter):
-    """Name the catalog binary when configure cannot discover it."""
+    """Name the catalog binary when configure cannot find it on PATH."""
     cat = ADAPTER_CATALOG.get(adapter) if isinstance(adapter, str) else None
     binary = (cat or {}).get("binary")
     if isinstance(binary, str) and binary and "\x00" not in binary:
-        label = binary
-    elif isinstance(adapter, str) and adapter and "\x00" not in adapter:
-        label = adapter
+        label = str(binary)[:200]
     else:
-        label = "unknown"
-    return "executable %s is not installed on PATH" % str(label)[:200]
+        label = _adapter_label(adapter)
+    return "executable %s is not installed on PATH" % label
+
+
+def _not_in_catalog_advice(adapter):
+    """The name is not a known adapter on this host, so PATH is not the cause."""
+    return ("adapter %s is not in this host's live catalog; "
+            "declare it on this computer before configuring it" % _adapter_label(adapter))
 
 
 class LocalSetup:
@@ -86,6 +96,8 @@ class LocalSetup:
         if any(k in body for k in ("slot_acquire_args", "slot_release_args")):
             raise Fault("operator_owned_setup_field", 400)
         adapter = body["adapter"]
+        if adapter not in ADAPTER_CATALOG:
+            raise Fault("adapter_not_in_catalog", advice=_not_in_catalog_advice(adapter))
         found = next((x for x in self.discover()["inventory"] if x["adapter"] == adapter), None)
         if not found:
             raise Fault("cli_not_installed", advice=_missing_cli_advice(adapter))
