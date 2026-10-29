@@ -5,10 +5,10 @@
 <key>ProgramArguments</key><array>
 <string>/usr/bin/env</string><string>python3</string><string>-m</string><string>pangpang.cli</string>
 <string>connector</string><string>--data</string>
-<string>/Users/REPLACE/Library/Application Support/pangpang-connector</string>
+<string>/Users/[username]/Library/Application Support/pangpang-connector</string>
 </array>
-<key>WorkingDirectory</key><string>/Users/REPLACE/Library/Application Support/pangpang-connector</string>
-<!-- Pair interactively once before loading this plist. Device credentials stay in the connector vault under --data. -->
+<key>WorkingDirectory</key><string>/Users/[username]/Library/Application Support/pangpang-connector</string>
+<!-- Pair interactively once before loading this plist. Device credentials stay in the connector vault inside the data directory. -->
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 <key>AbandonProcessGroup</key><true/>

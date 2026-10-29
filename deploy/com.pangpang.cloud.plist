@@ -5,9 +5,9 @@
 <key>ProgramArguments</key><array>
 <string>/usr/bin/env</string><string>python3</string><string>-m</string><string>pangpang.cli</string>
 <string>cloud</string><string>--data</string>
-<string>/Users/REPLACE/Library/Application Support/pangpang</string>
+<string>/Users/[username]/Library/Application Support/pangpang</string>
 </array>
-<key>WorkingDirectory</key><string>/Users/REPLACE/Library/Application Support/pangpang</string>
+<key>WorkingDirectory</key><string>/Users/[username]/Library/Application Support/pangpang</string>
 <!-- Set PANGPANG_TOKEN in the launchd environment, not in this file. An origin value disables POSIX L0 inference. -->
 <!-- Optional port argument, for example 8790. -->
 <!-- Optional allow-local-exec argument registers this machine as a local execution host: the CLI runs as this account in the workspace, outside a sandbox, with the configured API key injected. -->
