@@ -524,7 +524,8 @@ class Connector:
             if (action in {"discover", "configure", "credential_install", "credential_delete", "declare_adapter"}
                     and isinstance(error, Fault)
                     and error.code in {"invalid_adapter", "invalid_adapter_declaration",
-                                       "adapter_declaration_conflict", "cli_not_installed"}
+                                       "adapter_declaration_conflict", "adapter_not_in_catalog",
+                                       "cli_not_installed"}
                     and isinstance(error.advice, str)):
                 folded = " ".join(error.advice.split())[:500]
                 if folded:

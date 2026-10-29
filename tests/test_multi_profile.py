@@ -308,6 +308,15 @@ class OnboardingProfileTests(unittest.TestCase):
             ADAPTER_CATALOG.pop("opencode-test", None)
             adapters_file._merged_names.discard("opencode-test")
         self.addCleanup(drop_custom)
+        self.assertIn("opencode-test", ADAPTER_CATALOG)
+        self.assertFalse(self.app.adapter_known(host_id, "opencode-test"))
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.request(
+                "bot-main", work["work_id"],
+                {"host_id": host_id, "action": "configure", "adapter": "opencode-test"})
+        self.assertEqual(ctx.exception.code, "adapter_required")
+        self.app.execution.set_declared_adapters(host_id, {
+            "opencode-test": {"concurrency": 1, "priority": 15, "use_when": "自定义行。"}})
         custom = self.app.onboarding.request(
             "bot-main", work["work_id"], {"host_id": host_id, "action": "configure", "adapter": "opencode-test"})
         self.assertEqual(custom["status"], "needs_approval")
