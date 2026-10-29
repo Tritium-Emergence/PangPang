@@ -27,7 +27,7 @@ def tool_description(name):
     return next(item["function"]["description"] for item in TOOLS if item["function"]["name"] == name)
 
 
-class Issue147TierRoutingTests(unittest.TestCase):
+class TierRoutingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

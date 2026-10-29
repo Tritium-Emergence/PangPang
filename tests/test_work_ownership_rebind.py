@@ -63,7 +63,7 @@ def assistant_messages(app, work_id, content=None):
     return [m for m in rows if m.get("content") == content]
 
 
-class Issue116OwnershipTests(unittest.TestCase):
+class OwnershipRebindTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

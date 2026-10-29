@@ -15,7 +15,7 @@ from pangpang.runner import checked
 from pangpang.service import Service
 
 
-class Issue120CancelOutputDirTests(unittest.TestCase):
+class CancelOutputDirTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

@@ -41,7 +41,7 @@ def tool_results(turn):
     return out
 
 
-class Issue118TargetBusyAdviceTests(unittest.TestCase):
+class TargetBusyAdviceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

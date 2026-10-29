@@ -121,11 +121,11 @@ class AdaptersFileUnitTests(unittest.TestCase):
         name = _removed_adapter_name()
         self.assertNotIn(name, ADAPTER_CATALOG)
         row = dict(ROW, binary=name, argv=["-p"], concurrency=2, priority=10,
-                   use_when="迁移后的私人执行器。")
+                   use_when="迁移后的执行器。")
         path = self.write({name: row})
         self.assertEqual(adapters_file.merge(path), [name])
         self.assertEqual(ADAPTER_CATALOG[name]["argv"], ["-p"])
-        self.assertEqual(ADAPTER_CATALOG[name]["use_when"], "迁移后的私人执行器。")
+        self.assertEqual(ADAPTER_CATALOG[name]["use_when"], "迁移后的执行器。")
 
     def test_conflicting_second_file_refuses(self):
         self.write({"opencode-test": ROW}, name="a.json")

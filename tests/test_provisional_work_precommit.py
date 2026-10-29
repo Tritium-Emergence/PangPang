@@ -53,7 +53,7 @@ def assistant_messages(app, work_id, content):
             if m.get("kind") == "assistant" and m.get("content") == content]
 
 
-class Issue116Tests(unittest.TestCase):
+class ProvisionalWorkPrecommitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

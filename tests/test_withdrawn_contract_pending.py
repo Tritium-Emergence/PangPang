@@ -17,7 +17,7 @@ from test_bot_runtime import config
 from pangpang.service import Service
 
 
-class Issue123CancelledContractTests(unittest.TestCase):
+class CancelledContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

@@ -21,11 +21,11 @@ class LostReceiptTests(unittest.TestCase):
         self.app = Service(config(workspace), self.root / 'data')
         self.app.store.put('probe', {'id': 'codex-local', 'available': True,
                                    'supervision': 'linux-cgroup-cooperative'})
-        msg = self.app.send('bot-main', {'text': 'research', 'allow_write': True}, 'i69')
+        msg = self.app.send('bot-main', {'text': 'research', 'allow_write': True}, 'i-stop-evidence')
         result = self.app.submit_task('bot-main', msg['work_id'], {'prompt': 'research'})
         self.task = self.app.store.get('task', result['task_id'])
         self.task.update(status='unknown', error='execution_state_unknown', started=1,
-                         attempt_uuid='attempt-issue69', supervision_floor='linux-cgroup-cooperative')
+                         attempt_uuid='attempt-stop-evidence', supervision_floor='linux-cgroup-cooperative')
         self.app.store.put('task', self.task)
         self.directory = Path(self.app.execution.directory(self.app.execution.hosts['local'], self.task['execution_id']))
         self.directory.mkdir(parents=True, exist_ok=True)

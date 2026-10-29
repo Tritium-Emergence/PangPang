@@ -37,7 +37,7 @@ def _run_inject(directory, payload, extra_env=None):
     return proc
 
 
-class Issue169InjectEncodingTests(unittest.TestCase):
+class InjectEncodingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)

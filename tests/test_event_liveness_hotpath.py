@@ -649,7 +649,7 @@ class CapabilityTests(ServiceCase):
 
 
 @unittest.skipUnless((Path(__file__).resolve().parents[1] / "scripts" / "tls-bridge.py").exists(),
-                     "tls-bridge.py stays in the private repo")
+                     "tls-bridge.py is not part of this distribution")
 class TlsBridgeTests(unittest.TestCase):
     """N2: an idle pre-handshake connection cannot stall the bridge."""
 

@@ -134,7 +134,7 @@ Concurrent local installation edits fail with conflict rather than silently over
 
 ### Login and pairing rate limits
 
-The coordinator binds loopback only. `/api/v1/login` (5 failures / 60 s) and `/api/v1/pair` (10 requests / 60 s, successful ones included) are keyed by the TCP peer address. Behind a reverse proxy or the self-use LAN TLS bridge that peer is always the proxy, so each limit is one **global** bucket: anyone who can reach the entry can exhaust it and block new logins (existing 12 h sessions are unaffected) for up to 60 s. This is deliberate fail-closed behaviour; `X-Forwarded-For` is not trusted and PROXY protocol is not supported. The supported LAN entry is a trusted HTTPS reverse proxy with its own connection and login-rate limits (RUNBOOK); `scripts/tls-bridge.py` is a self-use helper excluded from the public snapshot.
+The coordinator binds loopback only. `/api/v1/login` (5 failures / 60 s) and `/api/v1/pair` (10 requests / 60 s, successful ones included) are keyed by the TCP peer address. Behind a reverse proxy or the self-use LAN TLS bridge that peer is always the proxy, so each limit is one **global** bucket: anyone who can reach the entry can exhaust it and block new logins (existing 12 h sessions are unaffected) for up to 60 s. This is deliberate fail-closed behaviour; `X-Forwarded-For` is not trusted and PROXY protocol is not supported. The supported LAN entry is a trusted HTTPS reverse proxy with its own connection and login-rate limits (RUNBOOK).
 
 ### Connector trust
 

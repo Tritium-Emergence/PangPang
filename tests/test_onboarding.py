@@ -114,7 +114,7 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(command["payload"]["endpoint_source"],"operator")
             from pangpang.execution import ADAPTER_CATALOG
             migrated = {"binary": "legacy-executor", "argv": ["-p"], "concurrency": 2, "priority": 10,
-                        "use_when": "迁移后的私人执行器。"}
+                        "use_when": "迁移后的执行器。"}
             ADAPTER_CATALOG["legacy-executor"] = dict(migrated)
             try:
                 with patch.object(LocalSetup,"discover",return_value={"inventory":[{"adapter":"legacy-executor","binary":sys.executable}]}), \
@@ -125,7 +125,7 @@ class SetupTests(unittest.TestCase):
                     LocalSetup(c).configure({"adapter":"legacy-executor","uses_qwen":True})
                 # Capacity is the generic max_concurrency from the adapter row. A private
                 # adapter name does not create a product resource.
-                self.assertFalse([r for r in c.config.get("resources",[]) if r["key"]=="qwen-shared"])
+                self.assertFalse([r for r in c.config.get("resources",[]) if r["key"]=="shared-slot"])
                 inst=c.execution.installations["legacy-executor-"+c.host_id]
                 self.assertEqual(inst.get("resource_keys",[]),[])
                 self.assertEqual(inst["max_concurrency"],2)

@@ -124,8 +124,8 @@ class LocalSetup:
         if extra_argv:
             e["extra_argv"] = list(extra_argv)
         # SIS: executor capacity is the GENERIC max_concurrency,
-        # not a product-level qwen special case. PangPang does not hardcode "qwen must
-        # hold qwen-shared". A real shared external device lock is legitimate but must
+        # not a product-level qwen special case. PangPang does not hardcode adapter
+        # names to shared resource slots. A real shared external device lock is legitimate but must
         # come from operator/device policy as explicit resource_keys (preserved above
         # from `old`), never inferred from the adapter name.
         extra = endpoint_extra_env(adapter, self.c.data, body.get("endpoint"),

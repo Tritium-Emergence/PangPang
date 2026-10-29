@@ -1,11 +1,11 @@
 {
   "cloud_url": "https://REPLACE_WITH_CLOUD_ORIGIN",
-  "host_id": "linux-gpu",
+  "host_id": "example-host",
   "credential_env": "PANGPANG_DEVICE_TOKEN",
   "allow_file_receive": false,
   "hosts": [
     {
-      "id": "linux-gpu",
+      "id": "example-host",
       "os": "Linux",
       "transport": "local",
       "allowed_roots": [
@@ -15,8 +15,8 @@
   ],
   "installations": [
     {
-      "id": "claude-code-linux-gpu",
-      "host_id": "linux-gpu",
+      "id": "claude-code-example-host",
+      "host_id": "example-host",
       "adapter": "claude-code",
       "enabled": false,
       "argv": [
@@ -35,8 +35,8 @@
       "timeout_s": 3600
     },
     {
-      "id": "codex-linux-gpu",
-      "host_id": "linux-gpu",
+      "id": "codex-example-host",
+      "host_id": "example-host",
       "adapter": "codex",
       "enabled": false,
       "argv": [
@@ -58,7 +58,7 @@
   ],
   "resources": [
     {
-      "key": "qwen-shared",
+      "key": "shared-slot",
       "acquire_argv": [
         "/REPLACE_WITH_VERIFIED_SLOT_ACQUIRE"
       ],
