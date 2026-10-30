@@ -9,6 +9,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual run builds every artifact and uploads them as workflow artifacts,
+  # but publishes nothing: a rehearsal for the tag-triggered release.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -33,6 +36,7 @@ jobs:
           node-version: "22"
 
       - name: Tag must match the version single source of truth
+        if: github.event_name == 'push'
         run: |
           VERSION=$(python -c "import sys; sys.path.insert(0, 'tools'); import build_release; print(build_release.read_version())")
           TAG="${GITHUB_REF_NAME#v}"
@@ -67,6 +71,7 @@ jobs:
           if-no-files-found: error
 
   github-release:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +92,7 @@ jobs:
             "${args[@]}"
 
   pypi:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     steps:
