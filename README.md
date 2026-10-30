@@ -136,7 +136,7 @@ PangPang's current focus is **managing work reliably** — not claiming universa
 
 ## 06 · Getting started
 
-The current release is **0.9.0 RC**; 1.0 is not out. Start in a controlled environment and follow the [install guide](docs/INSTALL.md).
+The current release is **0.9.1**; 1.0 is not out. Start in a controlled environment and follow the [install guide](docs/INSTALL.md).
 
 ### Launch the supervisor
 
@@ -209,7 +209,7 @@ PangPang operates real files on real machines. So we care less about demonstrati
 - A sentence in chat, including a person's statement that something "finished" or that an unknown process "has stopped", is not kernel evidence and does not close an unknown attempt. Unknown closes only on a confirmed terminal receipt or a recorded manual resolve (`confirmed_never_started` or `confirmed_stopped`, with operator evidence). There is no automatic business-acceptance engine.
 - Cross-device or remote deployments must use trusted HTTPS and restrict execution per the runbook. Two packages that print the same version are not the same rollback artifact; compare the baked commit and the release asset SHA256.
 
-**Release and acceptance status (0.9.0 RC):**
+**Release and acceptance status (0.9.1):**
 
 | Platform | Current boundary |
 | --- | --- |
