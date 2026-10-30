@@ -1,0 +1,106 @@
+# Publish one version everywhere: push tag vX.Y.Z.
+#
+# One Linux job assembles every platform artifact (the Bun and pi binaries are
+# digest-pinned downloads, so the build host does not have to match a target
+# platform), then the GitHub Release gets 14 assets and PyPI gets the sdist
+# plus 6 wheels through OpenID Connect — no API token lives anywhere here.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Tag must match the version single source of truth
+        run: |
+          VERSION=$(python -c "import sys; sys.path.insert(0, 'tools'); import build_release; print(build_release.read_version())")
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "tag v$TAG does not match pangpang/__init__.py version $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip setuptools wheel build twine
+
+      - name: Build source zip, 6 platform zips and 6 wheels
+        run: python tools/build_release.py --with-runtime
+
+      - name: Build sdist
+        run: python -m build --sdist
+
+      - name: Rewrite SHA256SUMS over the shipped artifacts
+        run: python tools/sha256sums.py
+
+      - name: Validate metadata
+        run: python -m twine check dist/pangpang-*.tar.gz dist/pangpang-*.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: |
+            dist/*.zip
+            dist/*.whl
+            dist/pangpang-*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Create the GitHub Release with all assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          args=()
+          for f in dist/*; do args+=("$f"); done
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "PangPang $GITHUB_REF_NAME" \
+            --notes "Install guide: docs/INSTALL.md. SHA256SUMS covers the 13 platform artifacts; verify with \`sha256sum -c SHA256SUMS\`." \
+            "${args[@]}"
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install twine
+        run: python -m pip install --upgrade twine
+
+      - name: Upload sdist and wheels (PyPI Trusted Publishing, no token)
+        run: python -m twine upload dist/pangpang-*.tar.gz dist/pangpang-*.whl
