@@ -208,6 +208,7 @@ export default {
     workingComplex: '这个有点复杂，我正在处理，稍候给你结果…',
     delegatedTo: '已交给 {{name}}：{{text}}，执行中…', dispatchedTo: '已派 {{executor}} 执行：{{prompt}}，进行中…',
     awaitingResult: '正在等待执行结果…', awaitingApprovalLabel: '待你批准', needsConfirm: '⏸ 需你确认后才执行',
+    progressLastLog: '最后日志 {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
     executorPrefix: '执行器 {{id}}', approve: '批准执行', approveOnce: '仅此一次', approveAlways: '始终允许', cancel: '取消', needsAttention: '需要处理',
     runDevice: '设备 {{name}}', runCommand: '命令 {{command}}', runCwd: '工作目录 {{cwd}}',
     runRoots: '允许的目录 {{roots}}', runTruncated: '命令或目录已截断',

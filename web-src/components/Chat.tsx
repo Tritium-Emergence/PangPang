@@ -7,7 +7,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
-import {visibleChatMessages} from '../pure';
+import {CHAT_PROGRESS_REFRESH_MS, chatActivityLine, chatProgressRefreshDue, pickChatProgressTask, visibleChatMessages} from '../pure';
 import {conversationActivity, currentWorkId} from '../scope';
 
 // Chat log. RCB-critical:
@@ -105,42 +105,69 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   const recovering = snap.turns.some((t) => activity.scope.has(t.work_id || '') && t.recovery_dispatched && activity.tasks.some((task) => task.id === t.recovery_dispatched));
   // Describe durable activity facts. Work badges and attention remain server-owned.
   const delegate = exchange ? {bot: exchange.target_bot_id, text: exchange.request || exchange.summary}: delegated ? {bot: delegated.owner_bot_id, text: delegated.goal}: null;
-  const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): activity.tasks.length ? t('chat.dispatchedTo', {executor: activity.tasks[0].installation_id || t('chat.executorFallback'), prompt: (activity.tasks[0].prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
+  // A streaming preview still suppresses this whole bubble. The dispatched sentence
+  // names the same task as the denseline, not whichever row the snapshot listed first.
+  const progressTask = pickChatProgressTask(activity.tasks)?.task;
+  const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): progressTask ? t('chat.dispatchedTo', {executor: progressTask.installation_id || t('chat.executorFallback'), prompt: (progressTask.prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
+  const progressLine = progress ? chatActivityLine(activity.tasks, t) : null;
+  const hasProgressWork = !!progressWork;
+  const activeTaskCount = activity.tasks.length;
+  const refreshSnapshot = store.refresh;
+
+  // Re-read the snapshot while this chat has active work and the tab is visible.
+  // The run log can grow without a status change, and that growth does not emit
+  // an event, so the poll is what lets the denseline move.
+  useEffect(() => {
+    if (!hasProgressWork && activeTaskCount === 0) return;
+    let timer = 0;
+    const stop = () => { window.clearInterval(timer); timer = 0; };
+    const arm = () => {
+      stop();
+      if (!chatProgressRefreshDue({visible: document.visibilityState === 'visible', hasProgressWork, activeTaskCount})) return;
+      timer = window.setInterval(() => { void refreshSnapshot('snapshot'); }, CHAT_PROGRESS_REFRESH_MS);
+    };
+    arm();
+    document.addEventListener('visibilitychange', arm);
+    return () => { stop(); document.removeEventListener('visibilitychange', arm); };
+  }, [hasProgressWork, activeTaskCount, refreshSnapshot]);
 
   return (
     <div
       id="messages"
       data-testid="chat-log"
       ref={scrollRef}
-      aria-live="polite"
       className="scroll-none flex-1 overflow-auto px-5 py-4"
     >
-      {visible.length === 0 && taskCards.length === 0 && unknownTasks.length === 0 && !pendingSends.length && !progress && !livePreviews.length ? (
-        <div className="grid h-full place-items-center text-center text-muted">
-          <div>
-            <h2 className="text-lg font-medium text-ink">{t('chat.emptyTitle')}</h2>
-            <p className="mt-1 text-sm">{t('chat.emptyHint', {name: botName(botId)})}</p>
+      <div aria-live="polite">
+        {visible.length === 0 && taskCards.length === 0 && unknownTasks.length === 0 && !pendingSends.length && !progress && !livePreviews.length ? (
+          <div className="grid h-full place-items-center text-center text-muted">
+            <div>
+              <h2 className="text-lg font-medium text-ink">{t('chat.emptyTitle')}</h2>
+              <p className="mt-1 text-sm">{t('chat.emptyHint', {name: botName(botId)})}</p>
+            </div>
           </div>
-        </div>
 ): null}
 
-      {timeline.map((item) => <div key={item.key} data-timeline={item.key} data-created={item.at}>{item.node}</div>)}
+        {timeline.map((item) => <div key={item.key} data-timeline={item.key} data-created={item.at}>{item.node}</div>)}
 
-      {unknownTasks.map((t: Task) => (
-        <RecoveryCard key={t.id} task={t} snap={snap} store={store} />
+        {unknownTasks.map((task: Task) => (
+          <RecoveryCard key={task.id} task={task} snap={snap} store={store} />
 ))}
 
-      {progress ? <div className="bubble thinking my-2 max-w-[80%] text-sm" role="status">
-        {/* One Bot timeline can hold several live Works, so a Work-scoped bubble names its Work. */}
-        <div className="source truncate text-xs text-muted">{botName(botId)}{!active.length && progressWork ? ` · ${progressWork.goal}`: ''}</div>
-        <div className="body mt-1 rounded-2xl bg-raised px-4 py-2 text-muted shadow-sm">{progress}</div>
-      </div>: null}
-      {livePreviews.map(([turnId, p]) => (
-        <div key={'preview-' + turnId} data-testid="stream-preview" data-turn={turnId} className="my-2 max-w-[80%]">
-          <div className="text-xs text-muted">{botName(botId)}</div>
-          <div className="body mt-1 whitespace-pre-wrap rounded-2xl bg-raised px-4 py-2 text-ink shadow-sm">{p.text}</div>
-        </div>
+        {progress ? <div className="bubble thinking my-2 max-w-[80%] text-sm" role="status">
+          {/* One Bot timeline can hold several live Works, so a Work-scoped bubble names its Work. */}
+          <div className="source truncate text-xs text-muted">{botName(botId)}{!active.length && progressWork ? ` · ${progressWork.goal}`: ''}</div>
+          <div className="body mt-1 rounded-2xl bg-raised px-4 py-2 text-muted shadow-sm">{progress}</div>
+        </div>: null}
+        {livePreviews.map(([turnId, p]) => (
+          <div key={'preview-' + turnId} data-testid="stream-preview" data-turn={turnId} className="my-2 max-w-[80%]">
+            <div className="text-xs text-muted">{botName(botId)}</div>
+            <div className="body mt-1 whitespace-pre-wrap rounded-2xl bg-raised px-4 py-2 text-ink shadow-sm">{p.text}</div>
+          </div>
 ))}
+      </div>
+      {/* Outside the live region: the clock changes on each poll and must not be announced. */}
+      {progress && progressLine ? <div data-testid="chat-progress-line" aria-hidden="true" className="-mt-1 mb-2 max-w-[80%] px-4 text-xs text-muted">{progressLine}</div>: null}
     </div>
 );
 }
