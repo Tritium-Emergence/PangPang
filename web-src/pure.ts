@@ -131,6 +131,31 @@ export function mergeRefreshScope(pending: 'all' | 'messages', eventType: string
   return eventType === 'message.changed' ? pending : 'all';
 }
 
+export type RefreshScope = 'all' | 'messages' | 'snapshot';
+
+export interface RefreshWant {
+  snapshot: boolean;
+  messages: boolean;
+}
+
+// What one refresh call needs. Snapshot-only is the chat progress poll: the
+// dashboard projection already carries task activity, so the transcript stays put.
+export function refreshWant(scope: RefreshScope): RefreshWant {
+  return {
+    snapshot: scope === 'all' || scope === 'snapshot',
+    messages: scope === 'all' || scope === 'messages',
+  };
+}
+
+// Collapse a burst that arrives while a refresh is in flight into one follow-up.
+export function mergeRefreshWant(pending: RefreshWant, scope: RefreshScope): RefreshWant {
+  const next = refreshWant(scope);
+  return {
+    snapshot: pending.snapshot || next.snapshot,
+    messages: pending.messages || next.messages,
+  };
+}
+
 export const PER_PAGE = 10;
 
 export interface ActivitySummaryTask {
@@ -192,6 +217,93 @@ export function activitySummary(task: ActivitySummaryTask | null | undefined, tr
     || outputs.some((item) => item && item.present);
   if (!observed) parts.push(tr('workpane.activityNone'));
   return parts.join(' · ');
+}
+
+// Closed set mirrored from pangpang/activity.py. Names outside it are not shown.
+const CHAT_PROGRESS_TOOLS = new Set(['read', 'write', 'edit', 'delete', 'move', 'search', 'execute', 'fetch', 'list']);
+
+// How often Chat re-reads the snapshot while its scope has active work.
+// Inside the 5–10s bound: long enough to avoid a request storm, short enough
+// that a growing run log shows up without an executor status change.
+export const CHAT_PROGRESS_REFRESH_MS = 8000;
+
+export const CHAT_PROGRESS_PATH_MAX = 40;
+
+export interface ChatProgressTask {
+  id: string;
+  started?: number;
+  created?: number;
+  activity?: {
+    last_log_at?: number | null;
+    recent?: {tool?: string; path?: string}[];
+  } | null;
+}
+
+function finiteClock(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+// started when the task has actually started; otherwise created. Newest first.
+function progressAnchor(task: {started?: number; created?: number}): number {
+  const started = finiteClock(task.started);
+  if (started !== null && started > 0) return started;
+  const created = finiteClock(task.created);
+  if (created !== null && created > 0) return created;
+  return 0;
+}
+
+// One primary task for the chat denseline. The order is started/created, then id,
+// so two snapshots with the same clocks name the same task.
+export function pickChatProgressTask<T extends {id: string; started?: number; created?: number}>(tasks: readonly T[]): {task: T; extra: number} | null {
+  if (!tasks.length) return null;
+  const ranked = tasks.map((task, index) => ({task, index})).sort((a, b) => {
+    const delta = progressAnchor(b.task) - progressAnchor(a.task);
+    if (delta !== 0) return delta;
+    if (a.task.id !== b.task.id) return a.task.id < b.task.id ? -1 : 1;
+    return a.index - b.index;
+  });
+  return {task: ranked[0].task, extra: tasks.length - 1};
+}
+
+export function truncateChatProgressPath(path: string, max = CHAT_PROGRESS_PATH_MAX): string {
+  if (!path || /[\u0000-\u001f\u007f]/.test(path)) return '';
+  const text = path.replaceAll('\\', '/');
+  if (text.length <= max) return text;
+  return '…' + text.slice(-(max - 1));
+}
+
+// Narrow chat line: last log time, latest closed-set step, and ·+N when the
+// scope has more than one active task. Missing activity returns null so the
+// caller keeps the coarse progress sentence. This is not the WorkPane summary.
+export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): string | null {
+  const picked = pickChatProgressTask(tasks);
+  if (!picked?.task.activity) return null;
+  const activity = picked.task.activity;
+  const parts: string[] = [];
+  if (typeof activity.last_log_at === 'number' && activity.last_log_at > 0) {
+    parts.push(tr('chat.progressLastLog', {time: clockHMS(activity.last_log_at)}));
+  }
+  const recent = Array.isArray(activity.recent) ? activity.recent : [];
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const step = recent[i];
+    const tool = step && typeof step.tool === 'string' ? step.tool : '';
+    if (!CHAT_PROGRESS_TOOLS.has(tool)) continue;
+    const path = typeof step.path === 'string' ? truncateChatProgressPath(step.path) : '';
+    parts.push(path ? tr('chat.progressStep', {tool, path}) : tr('chat.progressTool', {tool}));
+    break;
+  }
+  if (!parts.length) return null;
+  const body = parts.join(' · ');
+  return picked.extra > 0 ? body + tr('chat.progressMore', {n: picked.extra}) : body;
+}
+
+// True only while this chat has working or active tasks and the page is visible.
+export function chatProgressRefreshDue(input: {
+  visible: boolean;
+  hasProgressWork: boolean;
+  activeTaskCount: number;
+}): boolean {
+  return input.visible && (input.hasProgressWork || input.activeTaskCount > 0);
 }
 
 // Text the operator typed when manually resolving a task. A system termination
