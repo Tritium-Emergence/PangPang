@@ -113,6 +113,39 @@ test('paths are truncated and control characters drop the path', () => {
   assert.equal(chatActivityLine([task('run', {
     activity: {recent: [{tool: 'read', path: 'a\nb.py'}]},
   })], zh), 'read');
+  assert.equal(truncateChatProgressPath('src\\a.py'), 'src/a.py');
+  assert.equal(truncateChatProgressPath('src\\\\nested\\b.py'), 'src//nested/b.py');
+  assert.equal(chatActivityLine([task('run', {
+    activity: {recent: [{tool: 'read', path: 'src\\a.py'}]},
+  })], zh), 'read src/a.py');
+});
+
+test('oldest-first snapshot order still assigns the status subject and the line to one task', () => {
+  const older = task('step-b', {
+    started: 1_690_000_000,
+    created: 1_689_999_990,
+    installation_id: 'executor-older',
+    prompt: 'older step',
+    activity: {last_log_at: 1_690_000_001, recent: [{tool: 'list', path: 'older.md'}]},
+  });
+  const newer = task('step-a', {
+    started: 1_700_000_000,
+    created: 1_699_999_990,
+    installation_id: 'executor-newer',
+    prompt: 'research 香草',
+    activity: {last_log_at: 1_700_000_010, recent: [{tool: 'read', path: 'src/a.py'}]},
+  });
+  const tasks = [older, newer];
+  assert.ok(tasks[0].created < tasks[1].created);
+  const picked = pickChatProgressTask(tasks);
+  const line = chatActivityLine(tasks, zh);
+  assert.equal(picked.task.id, 'step-a');
+  assert.notEqual(picked.task.id, tasks[0].id);
+  assert.equal(picked.task.installation_id, 'executor-newer');
+  assert.equal(picked.task.prompt, 'research 香草');
+  assert.match(line, /read src\/a\.py ·\+1$/);
+  assert.equal(line.includes('older.md'), false);
+  assert.equal(line.includes('executor-older'), false);
 });
 
 test('primary task is newest started, then id, and does not follow the log clock', () => {
@@ -165,6 +198,8 @@ test('the progress clock is outside the live region and previews still suppress 
   assert.match(chat, /aria-hidden="true"/);
   assert.match(chat, /livePreviews\.length \? '':/);
   assert.match(chat, /progress && progressLine/);
+  assert.match(chat, /pickChatProgressTask\(activity\.tasks\)/);
+  assert.equal(chat.includes('activity.tasks[0]'), false);
   assert.match(chat, /refreshSnapshot\('snapshot'\)/);
   assert.match(chat, /visibilitychange/);
   const store = fs.readFileSync('web-src/store.ts', 'utf8');

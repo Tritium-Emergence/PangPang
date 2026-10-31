@@ -252,8 +252,9 @@ function progressAnchor(task: {started?: number; created?: number}): number {
   return 0;
 }
 
-// One primary task for the chat denseline. The order is started/created, then id,
-// so two snapshots with the same clocks name the same task.
+// One primary task for the chat status sentence and denseline. The order is
+// started/created, then id, so two snapshots with the same clocks name the same task.
+// Snapshot rows arrive oldest-first; this pick does not follow that array order.
 export function pickChatProgressTask<T extends {id: string; started?: number; created?: number}>(tasks: readonly T[]): {task: T; extra: number} | null {
   if (!tasks.length) return null;
   const ranked = tasks.map((task, index) => ({task, index})).sort((a, b) => {
@@ -267,7 +268,7 @@ export function pickChatProgressTask<T extends {id: string; started?: number; cr
 
 export function truncateChatProgressPath(path: string, max = CHAT_PROGRESS_PATH_MAX): string {
   if (!path || /[\u0000-\u001f\u007f]/.test(path)) return '';
-  const text = path.replaceAll('\\', '/');
+  const text = path.split('\\').join('/');
   if (text.length <= max) return text;
   return '…' + text.slice(-(max - 1));
 }

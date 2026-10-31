@@ -15,7 +15,8 @@ function hms(unix) {
 function runningTask(id, started, activity) {
   return {
     id, status: 'running', revision: 3, work_id: 'herbs', owner_bot_id: 'bot-main',
-    installation_id: 'inst-local', prompt: id === 'step-a' ? 'research 香草' : 'older step',
+    installation_id: id === 'step-a' ? 'executor-newer' : 'executor-older',
+    prompt: id === 'step-a' ? 'research 香草' : 'older step',
     created: started - 10, started, activity,
   };
 }
@@ -48,14 +49,15 @@ async function routeChat(page, counts, activityFor) {
     s.work = [{id: 'herbs', owner_bot_id: 'bot-main', goal: '香草三步指南', kind: 'conversation', status: 'active', attention: 'working', created: 100}];
     s.turns = [];
     s.exchanges = [];
+    // Snapshot tasks are oldest-first. The newer row is second on purpose.
     s.tasks = [
+      runningTask('step-b', 1_690_000_000, {
+        status: 'running', last_log_at: 1_690_000_001, recent: [{tool: 'list', path: 'older.md'}],
+      }),
       runningTask('step-a', 1_700_000_000, {
         status: 'running', last_log_at: next.logAt, observation_capped: 'maybe',
         recent: [{tool: next.tool, path: next.path}],
         present_outputs: [{path: 'out.txt', present: true}],
-      }),
-      runningTask('step-b', 1_690_000_000, {
-        status: 'running', last_log_at: 1_690_000_001, recent: [{tool: 'list', path: 'older.md'}],
       }),
     ];
     await route.fulfill({json: s});
@@ -87,7 +89,9 @@ test('denseline updates from activity while status and revision stay put', async
   await expect(line).not.toContainText('已出现');
   await expect(line).toHaveAttribute('aria-hidden', 'true');
   expect(await line.evaluate((el) => el.closest('[aria-live], [role="status"]'))).toBeNull();
-  await expect(live).toContainText('已派 inst-local 执行：research 香草');
+  await expect(live).toContainText('已派 executor-newer 执行：research 香草');
+  await expect(live).not.toContainText('executor-older');
+  await expect(live).not.toContainText('older step');
   const liveText = await live.innerText();
   const before = {snapshot: counts.snapshot, messages: counts.messages};
   advanced = true;

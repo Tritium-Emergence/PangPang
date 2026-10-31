@@ -7,7 +7,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
-import {CHAT_PROGRESS_REFRESH_MS, chatActivityLine, chatProgressRefreshDue, visibleChatMessages} from '../pure';
+import {CHAT_PROGRESS_REFRESH_MS, chatActivityLine, chatProgressRefreshDue, pickChatProgressTask, visibleChatMessages} from '../pure';
 import {conversationActivity, currentWorkId} from '../scope';
 
 // Chat log. RCB-critical:
@@ -105,8 +105,10 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   const recovering = snap.turns.some((t) => activity.scope.has(t.work_id || '') && t.recovery_dispatched && activity.tasks.some((task) => task.id === t.recovery_dispatched));
   // Describe durable activity facts. Work badges and attention remain server-owned.
   const delegate = exchange ? {bot: exchange.target_bot_id, text: exchange.request || exchange.summary}: delegated ? {bot: delegated.owner_bot_id, text: delegated.goal}: null;
-  // A streaming preview still suppresses this whole bubble.
-  const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): activity.tasks.length ? t('chat.dispatchedTo', {executor: activity.tasks[0].installation_id || t('chat.executorFallback'), prompt: (activity.tasks[0].prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
+  // A streaming preview still suppresses this whole bubble. The dispatched sentence
+  // names the same task as the denseline, not whichever row the snapshot listed first.
+  const progressTask = pickChatProgressTask(activity.tasks)?.task;
+  const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): progressTask ? t('chat.dispatchedTo', {executor: progressTask.installation_id || t('chat.executorFallback'), prompt: (progressTask.prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
   const progressLine = progress ? chatActivityLine(activity.tasks, t) : null;
   const hasProgressWork = !!progressWork;
   const activeTaskCount = activity.tasks.length;
