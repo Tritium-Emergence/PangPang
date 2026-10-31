@@ -326,6 +326,7 @@ export default {
     delegatedTo: 'Handed off to {{name}}: {{text}} — in progress…', dispatchedTo: 'Dispatched to {{executor}}: {{prompt}}, in progress…',
 
     awaitingResult: 'Waiting for the result…', awaitingApprovalLabel: 'Awaiting your approval', needsConfirm: '⏸ Needs your confirmation before running',
+    progressLastLog: 'last log {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
 
     executorPrefix: 'Executor {{id}}', approve: 'Approve', approveOnce: 'This time only', approveAlways: 'Always', cancel: 'Cancel', needsAttention: 'Needs attention',
     runDevice: 'Device {{name}}', runCommand: 'Command {{command}}', runCwd: 'Working directory {{cwd}}',

@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {api, ApiError} from './api';
-import {applyPreviewFrame, mergeRefreshScope, reconcilePendingSends, type PendingSend} from './pure';
+import {applyPreviewFrame, mergeRefreshScope, mergeRefreshWant, reconcilePendingSends, refreshWant, type PendingSend, type RefreshScope, type RefreshWant} from './pure';
 import type {Snapshot, Message} from './types';
 
 // THE single data coordinator: "one root data entry, no second domain
@@ -36,7 +36,7 @@ export interface Store {
   selectionToken: () => number;
   selectionCurrent: (token: number) => boolean;
   select: (botId: string) => void;
-  refresh: () => Promise<void>;
+  refresh: (scope?: RefreshScope) => Promise<void>;
   login: (token: string) => Promise<void>;
   logout: () => Promise<void>;
   connection: 'connecting' | 'connected' | 'reconnecting';
@@ -71,10 +71,10 @@ export function useStore(): Store {
   // Monotonic selection generation (bumped on every switch) — the true epoch.
   const generation = useRef(0);
 
-  // single-flight: while a refresh runs, mark dirty and replay once on completion.
+  // single-flight: while a refresh runs, coalesce callers into one follow-up.
+  // snapshot-only does not reload the transcript.
   const running = useRef(false);
-  const dirty = useRef(false);
-  const dirtyAll = useRef(false);
+  const pendingWant = useRef<RefreshWant>({snapshot: false, messages: false});
   const snapRef = useRef<Snapshot | null>(null);
 
   // Fetch the selected bot's messages, tagged with the bot id so a late response for a
@@ -110,30 +110,35 @@ export function useStore(): Store {
     });
   }, []);
 
-  const refresh = useCallback(async (scope: 'all' | 'messages' = 'all') => {
-    if (running.current) { dirty.current = true; if (scope === 'all') dirtyAll.current = true; return; }
+  const refresh = useCallback(async (scope: RefreshScope = 'all') => {
+    if (running.current) {
+      pendingWant.current = mergeRefreshWant(pendingWant.current, scope);
+      return;
+    }
     running.current = true;
+    let want = refreshWant(scope);
     try {
-      let all = scope === 'all';
-      do {
-        dirty.current = false;
-        const thisAll = all || dirtyAll.current;
-        dirtyAll.current = false;
-        all = false;
-        if (thisAll) {
+      while (want.snapshot || want.messages) {
+        pendingWant.current = {snapshot: false, messages: false};
+        if (want.snapshot) {
           const snap = await api<Snapshot>('snapshot');
           setAuthed(true);
           snapRef.current = snap;
           setSnapshot(snap);
-          await loadMessages(selectedRef.current, snap);
-        } else {
-          await loadMessages(selectedRef.current, snapRef.current ?? undefined);
         }
-      } while (dirty.current);
+        if (want.messages) await loadMessages(selectedRef.current, snapRef.current ?? undefined);
+        want = pendingWant.current;
+      }
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) setAuthed(false);
     } finally {
       running.current = false;
+      const leftover = pendingWant.current;
+      if (leftover.snapshot || leftover.messages) {
+        pendingWant.current = {snapshot: false, messages: false};
+        const next: RefreshScope = leftover.snapshot && leftover.messages ? 'all' : leftover.snapshot ? 'snapshot' : 'messages';
+        void refresh(next);
+      }
     }
   }, [loadMessages]);
 

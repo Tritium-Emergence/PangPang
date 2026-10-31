@@ -571,6 +571,68 @@ class TaskActivityTests(unittest.TestCase):
         self.assertNotIn("snap-remote-leak.py", json.dumps(snapshot["tasks"]))
         self.assertFalse(any(remote_id in path for path in calls))
 
+    def test_snapshot_follows_the_log_without_writing_the_task(self):
+        sent = self.app.send("bot-main", {"text": "进度", "allow_write": True}, "snap-follow")
+        res = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "读文件", "installation_id": "codex-local"})
+        task = self.app.store.get("task", res["task_id"])
+        task.update(status="running", started=task["created"])
+        self.app.store.put("task", task)
+        stored = self.app.store.get("task", task["id"])
+        revision = stored["revision"]
+        folder = self._write_run_log(stored, _line(_claude("Read", "src/a.py")))
+        log_path = folder / "output.log"
+        token = "f" * 32
+        server = serve(self.app, token, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            import http.cookiejar
+            import urllib.request
+            origin = "http://127.0.0.1:" + str(server.server_port)
+            client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+            def request(path, body=None, key="k"):
+                headers = {"Origin": origin}
+                data = None
+                if body is not None:
+                    headers.update({"Content-Type": "application/json", "Idempotency-Key": key})
+                    data = json.dumps(body).encode()
+                return client.open(urllib.request.Request(origin + "/api/v1/" + path, data=data, headers=headers))
+
+            with request("login", {"token": token}, key="login-follow"):
+                pass
+
+            def task_row():
+                with request("snapshot") as response:
+                    body = json.load(response)
+                return next(row for row in body["tasks"] if row["id"] == stored["id"])
+
+            first = task_row()
+            self.assertEqual(first["status"], "running")
+            self.assertEqual(first["revision"], revision)
+            self.assertEqual(first["activity"]["recent"][-1]["path"], "src/a.py")
+            self.assertNotIn("age_s", first["activity"])
+            log_path.write_text(_line(_claude("Read", "src/a.py")) + _line(_claude("Write", "src/b.py")), encoding="utf-8")
+            os.utime(log_path, (first["activity"]["last_log_at"] + 5, first["activity"]["last_log_at"] + 5))
+            with self.app.store.lock:
+                events_before = self.app.store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            second = task_row()
+            with self.app.store.lock:
+                events_after = self.app.store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertEqual(second["status"], "running")
+        self.assertEqual(second["revision"], revision)
+        self.assertEqual(second["activity"]["recent"][-1], {"tool": "write", "path": "src/b.py"})
+        self.assertGreaterEqual(second["activity"]["last_log_at"], first["activity"]["last_log_at"] + 5)
+        self.assertEqual(events_before, events_after)
+        persisted = self.app.store.get("task", stored["id"])
+        self.assertEqual(persisted["status"], "running")
+        self.assertEqual(persisted["revision"], revision)
+        self.assertNotIn("activity", persisted)
+
     def test_read_work_has_no_activity_and_reads_no_files(self):
         sent = self.app.send("bot-main", {"text": "读取", "allow_write": True}, "read-work")
         res = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "文件", "installation_id": "codex-local"})
@@ -771,6 +833,15 @@ class ActivityCardTests(unittest.TestCase):
         env.pop("TYPESAFE_API_KEY", None)
         proc = subprocess.run(
             ["node", "--experimental-strip-types", "--test", "tests/test_activity_card.mjs"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+
+    def test_chat_progress_line(self):
+        env = os.environ.copy()
+        env.pop("TYPESAFE_API_KEY", None)
+        proc = subprocess.run(
+            ["node", "--experimental-strip-types", "--test", "tests/test_chat_progress.mjs"],
             cwd=str(Path(__file__).resolve().parents[1]),
             env=env, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
