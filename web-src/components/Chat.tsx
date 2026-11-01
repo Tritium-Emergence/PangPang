@@ -113,6 +113,10 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   const hasProgressWork = !!progressWork;
   const activeTaskCount = activity.tasks.length;
   const refreshSnapshot = store.refresh;
+  // The empty hint centers with h-full, which needs a parent of definite height.
+  // Stretch this live region only while the chat is empty. The progress line is a
+  // sibling below it; a permanent h-full overflows the scroller by that line.
+  const showEmpty = visible.length === 0 && taskCards.length === 0 && unknownTasks.length === 0 && !pendingSends.length && !progress && !livePreviews.length;
 
   // Re-read the snapshot while this chat has active work and the tab is visible.
   // The run log can grow without a status change, and that growth does not emit
@@ -138,12 +142,12 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
       ref={scrollRef}
       className="scroll-none flex-1 overflow-auto px-5 py-4"
     >
-      <div aria-live="polite">
-        {visible.length === 0 && taskCards.length === 0 && unknownTasks.length === 0 && !pendingSends.length && !progress && !livePreviews.length ? (
-          <div className="grid h-full place-items-center text-center text-muted">
+      <div aria-live="polite" className={showEmpty ? 'h-full' : undefined}>
+        {showEmpty ? (
+          <div data-testid="chat-empty" className="grid h-full place-items-center text-center text-muted">
             <div>
               <h2 className="text-lg font-medium text-ink">{t('chat.emptyTitle')}</h2>
-              <p className="mt-1 text-sm">{t('chat.emptyHint', {name: botName(botId)})}</p>
+              <p className="mt-1 text-sm">{t('chat.emptyHint')}</p>
             </div>
           </div>
 ): null}

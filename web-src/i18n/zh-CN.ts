@@ -203,8 +203,8 @@ export default {
     executionLevelHint: '只影响这台设备。L0 个人自用档：允许该设备自证的协作监管档（macOS/无 cgroup 的 Linux 还需在设备本机记录进程组同意）。L1/L2：只允许强监管（Windows Job Object）。',
   },
   chat: {
-    botFallback: '胖胖', executorFallback: '执行器', emptyTitle: '先聊聊你想完成什么。',
-    emptyHint: '直接说要做什么，{{name}} 会自己关联相关工作。', thinking: '正在思考…',
+    botFallback: '胖胖', executorFallback: '执行器', emptyTitle: '先接上一个能干活的 Agent。',
+    emptyHint: '接好之后，任务才能自动分配。', thinking: '正在思考…',
     workingComplex: '这个有点复杂，我正在处理，稍候给你结果…',
     delegatedTo: '已交给 {{name}}：{{text}}，执行中…', dispatchedTo: '已派 {{executor}} 执行：{{prompt}}，进行中…',
     awaitingResult: '正在等待执行结果…', awaitingApprovalLabel: '待你批准', needsConfirm: '⏸ 需你确认后才执行',

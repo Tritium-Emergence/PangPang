@@ -106,6 +106,19 @@ test('denseline updates from activity while status and revision stay put', async
   expect(counts.messages).toBe(before.messages);
 });
 
+test('a short progress line does not overflow the chat scroller', async ({page}) => {
+  await page.setViewportSize({width: 1280, height: 800});
+  const counts = {snapshot: 0, messages: 0};
+  await routeChat(page, counts, () => ({logAt: LOG_A, tool: 'read', path: 'src/a.py'}));
+  await login(page);
+  const line = page.getByTestId('chat-progress-line');
+  await expect(line).toBeVisible();
+  expect(await line.evaluate((el) => el.closest('[aria-live], [role="status"]'))).toBeNull();
+  // A full-height live region plus this sibling line overflows by the line's box (~28px).
+  const overflow = await page.locator('#messages').evaluate((el) => el.scrollHeight - el.clientHeight);
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
 test('hiding the page stops the progress poll', async ({page}) => {
   const counts = {snapshot: 0, messages: 0};
   await routeChat(page, counts, () => ({logAt: LOG_A, tool: 'read', path: 'src/a.py'}));

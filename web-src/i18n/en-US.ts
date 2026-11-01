@@ -317,9 +317,9 @@ export default {
 
   chat: {
 
-    botFallback: 'PangPang', executorFallback: 'executor', emptyTitle: 'Tell me what you want to get done.',
+    botFallback: 'PangPang', executorFallback: 'executor', emptyTitle: 'Connect a working Agent first.',
 
-    emptyHint: 'Just say what you need and {{name}} will link the relevant work.', thinking: 'Thinking…',
+    emptyHint: 'Only then can tasks be assigned automatically.', thinking: 'Thinking…',
 
     workingComplex: "This one's a bit involved — I'm on it, results shortly…",
 
