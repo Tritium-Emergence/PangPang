@@ -188,6 +188,24 @@ test('soft refresh is bounded and snapshot-only does not pull messages', () => {
   assert.deepEqual(pending, {snapshot: true, messages: true});
 });
 
+test('empty chat copy asks for a working agent before tasks can be assigned', () => {
+  assert.equal(zh('chat.emptyTitle'), '先接上一个能干活的 Agent。');
+  assert.equal(zh('chat.emptyHint'), '接好之后，任务才能自动分配。');
+  assert.equal(en('chat.emptyTitle'), 'Connect a working Agent first.');
+  assert.equal(en('chat.emptyHint'), 'Only then can tasks be assigned automatically.');
+  assert.equal(zh('chat.emptyTitle').includes('先聊聊'), false);
+  assert.equal(en('chat.emptyTitle').includes('Tell me what you want'), false);
+});
+
+test('the empty hint stretches the live region only while the chat is empty', () => {
+  const chat = fs.readFileSync('web-src/components/Chat.tsx', 'utf8');
+  assert.match(chat, /className=\{showEmpty \? 'h-full' : undefined\}/);
+  assert.equal(chat.includes('aria-live="polite" className="h-full"'), false);
+  const liveAt = chat.indexOf('aria-live="polite"');
+  const noteAt = chat.indexOf('Outside the live region');
+  assert.equal(chat.slice(liveAt, noteAt).includes('data-testid="chat-progress-line"'), false);
+});
+
 test('the progress clock is outside the live region and previews still suppress the bubble', () => {
   const chat = fs.readFileSync('web-src/components/Chat.tsx', 'utf8');
   const liveAt = chat.indexOf('aria-live="polite"');
