@@ -327,6 +327,7 @@ export default {
 
     awaitingResult: 'Waiting for the result…', awaitingApprovalLabel: 'Awaiting your approval', needsConfirm: '⏸ Needs your confirmation before running',
     progressLastLog: 'last log {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
+    progressAwaitingTool: 'starting / waiting for the first tool',
 
     executorPrefix: 'Executor {{id}}', approve: 'Approve', approveOnce: 'This time only', approveAlways: 'Always', cancel: 'Cancel', needsAttention: 'Needs attention',
     runDevice: 'Device {{name}}', runCommand: 'Command {{command}}', runCwd: 'Working directory {{cwd}}',

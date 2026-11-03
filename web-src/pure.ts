@@ -231,6 +231,7 @@ export const CHAT_PROGRESS_PATH_MAX = 40;
 
 export interface ChatProgressTask {
   id: string;
+  status?: string;
   started?: number;
   created?: number;
   activity?: {
@@ -274,8 +275,10 @@ export function truncateChatProgressPath(path: string, max = CHAT_PROGRESS_PATH_
 }
 
 // Narrow chat line: last log time, latest closed-set step, and ·+N when the
-// scope has more than one active task. Missing activity returns null so the
-// caller keeps the coarse progress sentence. This is not the WorkPane summary.
+// scope has more than one active task. A running task whose recent array is
+// empty adds a static waiting phrase and no tool name. Missing activity, or
+// activity with no recent array and no clock, returns null so the caller
+// keeps the coarse progress sentence. This is not the WorkPane summary.
 export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): string | null {
   const picked = pickChatProgressTask(tasks);
   if (!picked?.task.activity) return null;
@@ -292,6 +295,12 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
     const path = typeof step.path === 'string' ? truncateChatProgressPath(step.path) : '';
     parts.push(path ? tr('chat.progressStep', {tool, path}) : tr('chat.progressTool', {tool}));
     break;
+  }
+  // Local projection always sends recent as an array. Empty means the run log
+  // has no complete tool row yet (startup banner only). A missing recent is a
+  // different activity shape and stays on the clock or the coarse sentence.
+  if (Array.isArray(activity.recent) && activity.recent.length === 0 && picked.task.status === 'running') {
+    parts.push(tr('chat.progressAwaitingTool'));
   }
   if (!parts.length) return null;
   const body = parts.join(' · ');

@@ -83,10 +83,79 @@ test('english copy and a step with no path', () => {
 test('missing activity keeps the coarse sentence by returning no line', () => {
   assert.equal(chatActivityLine([task('run')], zh), null);
   assert.equal(chatActivityLine([task('run', {activity: null})], zh), null);
-  assert.equal(chatActivityLine([task('run', {activity: {last_log_at: null, recent: []}})], zh), null);
+  // No recent array is not the empty-list startup gap.
+  assert.equal(chatActivityLine([task('run', {activity: {last_log_at: null}})], zh), null);
   assert.equal(chatActivityLine([task('quiet'), task('loud', {
     started: 1_600_000_000,
     activity: {last_log_at: 1_700_000_030, recent: [{tool: 'read', path: 'secret.py'}]},
+  })], zh), null);
+});
+
+test('running with an empty recent list names the startup gap', () => {
+  const logAt = 1_700_000_010;
+  const zhText = chatActivityLine([task('run', {
+    activity: {status: 'running', last_log_at: logAt, recent: []},
+  })], zh);
+  assert.equal(zhText, `最后日志 ${hms(logAt)} · 启动中 / 等待首条工具`);
+  assert.equal(zhText.includes('暂无可观测活动'), false);
+  assert.equal(zhText.includes('{{'), false);
+  const enText = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, recent: []},
+  })], en);
+  assert.equal(enText, `last log ${hms(logAt)} · starting / waiting for the first tool`);
+  assert.equal(enText.includes('{{'), false);
+  assert.equal(chatActivityLine([task('run', {
+    activity: {last_log_at: null, recent: []},
+  })], zh), '启动中 / 等待首条工具');
+  const extra = chatActivityLine([
+    task('older', {started: 1_600_000_000, activity: {last_log_at: logAt, recent: [{tool: 'read', path: 'old.py'}]}}),
+    task('run', {activity: {last_log_at: logAt, recent: []}}),
+  ], zh);
+  assert.equal(extra, `最后日志 ${hms(logAt)} · 启动中 / 等待首条工具 ·+1`);
+  assert.equal(extra.includes('old.py'), false);
+  assert.equal(extra.includes('read'), false);
+});
+
+test('a real step, a non-running status, or a missing recent list omits the waiting phrase', () => {
+  const logAt = 1_700_000_010;
+  const withTool = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, recent: [{tool: 'read', path: 'src/a.py'}]},
+  })], zh);
+  assert.equal(withTool, `最后日志 ${hms(logAt)} · read src/a.py`);
+  assert.equal(withTool.includes('等待首条工具'), false);
+  assert.equal(withTool.includes('启动中'), false);
+  const unknown = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, recent: [{tool: 'Bash', path: 'skip.py'}]},
+  })], zh);
+  assert.equal(unknown, `最后日志 ${hms(logAt)}`);
+  assert.equal(unknown.includes('skip.py'), false);
+  assert.equal(unknown.includes('Bash'), false);
+  assert.equal(unknown.includes('等待首条工具'), false);
+  assert.equal(chatActivityLine([task('run', {
+    activity: {last_log_at: null, recent: [{tool: 'Bash', path: 'skip.py'}]},
+  })], zh), null);
+  assert.equal(chatActivityLine([task('run', {activity: {recent: [{}]}})], zh), null);
+  for (const status of ['queued', 'starting', 'cancel_requested', 'succeeded', 'failed', 'cancelled']) {
+    const clockOnly = chatActivityLine([task('run', {
+      status,
+      activity: {last_log_at: logAt, recent: []},
+    })], zh);
+    assert.equal(clockOnly, `最后日志 ${hms(logAt)}`);
+    assert.equal(clockOnly.includes('等待首条工具'), false);
+    assert.equal(chatActivityLine([task('run', {
+      status,
+      activity: {last_log_at: null, recent: []},
+    })], zh), null);
+  }
+  assert.equal(chatActivityLine([task('run', {
+    activity: {status: 'running', last_log_at: logAt},
+  })], zh), `最后日志 ${hms(logAt)}`);
+  assert.equal(chatActivityLine([task('run', {
+    activity: {status: 'running', last_log_at: null},
+  })], zh), null);
+  assert.equal(chatActivityLine([task('done', {
+    status: 'cancelled',
+    activity: {last_log_at: null, recent: []},
   })], zh), null);
 });
 
