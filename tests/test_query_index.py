@@ -208,5 +208,73 @@ class LatestStartedIndexTests(unittest.TestCase):
         self.assertIn("objects_work", message_plan, message_plan)
 
 
+class TaskExecutionIndexTests(unittest.TestCase):
+    """Activity sync looks up one task by execution_id. That must seek, not scan."""
+
+    N = 4000
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.st = Store(os.path.join(cls.tmp.name, "exec.db"))
+        cls.target = "exec-" + "ab" * 16
+        with cls.st.atomic():
+            for i in range(cls.N):
+                execution_id = "exec-" + ("%032x" % i)
+                cls.st.put("task", {"id": "task-%d" % i, "status": "succeeded",
+                                     "host_id": "old", "execution_id": execution_id,
+                                     "created": float(i)})
+            cls.st.put("task", {"id": "task-live", "status": "running", "host_id": "connector-1",
+                                 "execution_id": cls.target, "created": float(cls.N + 5)})
+            cls.st.put("task", {"id": "task-none", "status": "running", "host_id": "connector-1",
+                                 "created": float(cls.N + 6)})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.st.close()
+        cls.tmp.cleanup()
+
+    def _traced_selects(self, fn):
+        seen = []
+        self.st.db.set_trace_callback(seen.append)
+        try:
+            result = fn()
+        finally:
+            self.st.db.set_trace_callback(None)
+        return result, [s for s in seen if s.lstrip().upper().startswith("SELECT")]
+
+    def _explain(self, sql):
+        rows = self.st.db.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        return " | ".join(str(r[-1]) for r in rows)
+
+    def test_execution_lookup_seeks_the_partial_index(self):
+        task, selects = self._traced_selects(lambda: self.st.task_by_execution_id(self.target))
+        self.assertEqual(task["id"], "task-live")
+        self.assertEqual(task["host_id"], "connector-1")
+        self.assertEqual(task["status"], "running")
+        self.assertIsNone(self.st.task_by_execution_id("exec-" + "f" * 32))
+        self.assertEqual(len(selects), 1, selects)
+        text = self._explain(selects[0])
+        self.assertIn("task_execution_id", text, text)
+        self.assertIn("SEARCH", text, text)
+        self.assertNotRegex(text, r"SCAN objects( |$)")
+        hits = {"n": 0}
+
+        def tick():
+            hits["n"] += 1
+            return 0
+
+        self.st.db.set_progress_handler(tick, 100)
+        try:
+            self.st.task_by_execution_id(self.target)
+            lookup = hits["n"]
+            hits["n"] = 0
+            self.st.db.execute("SELECT id FROM objects WHERE kind='task'").fetchall()
+            scan = hits["n"]
+        finally:
+            self.st.db.set_progress_handler(None, 0)
+        self.assertGreater(scan, max(lookup, 1) * 10, (lookup, scan))
+
+
 if __name__ == "__main__":
     unittest.main()

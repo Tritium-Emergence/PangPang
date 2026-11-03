@@ -568,6 +568,146 @@ class ConnectorTests(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def _plant_run(self, execution_id, *, log=None, created=1):
+        task = {"id": "task-" + execution_id, "execution_id": execution_id, "cwd": str(self.root),
+                "status": "running", "host_id": "local", "required_outputs": [],
+                "spec_digest": "activity", "created": created, "started": created}
+        self.connector.store.put("local_run", {
+            "id": execution_id, "task": task, "status": "active", "created": created})
+        host = self.connector.execution.hosts[self.connector.host_id]
+        directory = Path(self.connector.execution.directory(host, execution_id))
+        directory.mkdir(parents=True)
+        if log is not None:
+            (directory / "output.log").write_text(log, encoding="utf-8")
+        return task, directory
+
+    def test_activity_report_reuses_local_projection(self):
+        execution_id = "exec-" + "c" * 32
+        quiet_id = "exec-" + "d" * 32
+        secret = "sk-ROUNDTRIPSECRET0123456789abcd"
+        log = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo " + secret}},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/ok.py"}},
+        ]}}) + "\n"
+        task, _directory = self._plant_run(execution_id, log=log, created=1)
+        self.app.store.put("task", dict(task, work_id="w", owner_bot_id="bot-main", prompt="x"))
+        quiet, _quiet_dir = self._plant_run(quiet_id, created=2)
+        self.app.store.put("task", dict(quiet, work_id="w", owner_bot_id="bot-main", prompt="y"))
+        before = self.app.store.get("task", task["id"])
+        bodies = []
+        inner = self.connector.request
+
+        def capture(body):
+            bodies.append(body)
+            return inner(body)
+
+        self.connector.request = capture
+        self.connector.tick()
+        self.assertEqual(len(bodies), 1)
+        body = bodies[0]
+        reported = {item["execution_id"]: item for item in body["activities"]}
+        self.assertIn(execution_id, reported)
+        self.assertNotIn(quiet_id, reported)
+        self.assertEqual(reported[execution_id]["recent"], [
+            {"tool": "execute"}, {"tool": "read", "path": "src/ok.py"}])
+        self.assertIsInstance(reported[execution_id]["last_log_at"], int)
+        self.assertEqual(set(reported[execution_id]), {
+            "execution_id", "last_log_at", "observation_capped", "recent"})
+        blob = json.dumps(body)
+        self.assertNotIn(secret, blob)
+        self.assertNotIn("echo ", blob)
+        self.assertTrue(all("recent" not in receipt for receipt in body["receipts"]))
+        stored = self.app.store.get("task", task["id"])
+        self.assertEqual(stored["revision"], before["revision"])
+        self.assertEqual(stored["status"], "running")
+        self.assertNotIn("activity", stored)
+        from pangpang.activity import annotate_snapshot_tasks
+        rows = [self.app.store.get("task", task["id"]), self.app.store.get("task", quiet["id"])]
+        annotate_snapshot_tasks(self.app, rows)
+        self.assertEqual(rows[0]["activity"]["recent"], reported[execution_id]["recent"])
+        self.assertNotIn("age_s", rows[0]["activity"])
+        self.assertEqual(rows[0]["activity"]["present_outputs"], [])
+        self.assertNotIn("activity", rows[1])
+        self.app.broker.sync("local", {
+            "instance_id": self.connector.instance_id, "reports": [], "receipts": []})
+        rows = [self.app.store.get("task", task["id"]), self.app.store.get("task", quiet["id"])]
+        annotate_snapshot_tasks(self.app, rows)
+        self.assertEqual(rows[0]["activity"]["recent"][-1]["path"], "src/ok.py")
+        self.assertNotIn("activity", rows[1])
+
+    def test_activity_failure_does_not_drop_receipts(self):
+        execution_id = "exec-" + "e" * 32
+        task = {"execution_id": execution_id, "cwd": str(self.root), "spec_digest": "d",
+                "status": "running", "host_id": self.connector.host_id}
+        self.connector.store.put("local_run", {
+            "id": execution_id, "task": task, "status": "active", "created": 1})
+        host = self.connector.execution.hosts[self.connector.host_id]
+        directory = Path(self.connector.execution.directory(host, execution_id))
+        directory.mkdir(parents=True)
+        (directory / "receipt.json").write_text(json.dumps({
+            "execution_id": execution_id, "spec_digest": "d", "status": "cancelled",
+            "process_tree_confirmed": True}), encoding="utf-8")
+        kept = "exec-" + "f" * 32
+        self.app.broker._publish_activity([(
+            kept, {"last_log_at": 1_700_000_010, "observation_capped": "no",
+                   "recent": [{"tool": "read", "path": "src/kept.py"}]})], ())
+        bodies = []
+
+        def capture(body):
+            bodies.append(body)
+            return {"commands": [], "ack": [], "receipt_ack": []}
+
+        self.connector.request = capture
+        with patch.object(Connector, "_activity_reports", side_effect=RuntimeError("observe failed")):
+            self.connector.tick()
+        self.assertEqual(bodies[0]["activities"], [])
+        self.assertEqual(bodies[0]["receipts"][0]["execution_id"], execution_id)
+        self.assertEqual(bodies[0]["receipts"][0]["status"], "cancelled")
+        self.assertNotIn("recent", bodies[0]["receipts"][0])
+        # An empty activities list is what a failed read sends. It must not
+        # wipe an observation the cloud already kept.
+        self.app.broker.sync("local", {
+            "instance_id": self.connector.instance_id, "reports": [], "receipts": [], "activities": []})
+        self.assertEqual(self.app.broker.reported_activity(kept)["recent"],
+                         [{"tool": "read", "path": "src/kept.py"}])
+
+    def test_one_activity_read_failure_skips_only_that_run(self):
+        good = "exec-" + "a" * 32
+        bad = "exec-" + "b" * 32
+        self._plant_run(good, log='{"type":"keep"}\n', created=1)
+        self._plant_run(bad, log='{"type":"drop"}\n', created=2)
+        real = __import__("pangpang.activity", fromlist=["activity_projection"]).activity_projection
+
+        def flaky(task, **kwargs):
+            if task.get("execution_id") == bad:
+                raise RuntimeError("unreadable log")
+            return real(task, **kwargs)
+
+        with patch("pangpang.activity.activity_projection", flaky):
+            reports = self.connector._activity_reports()
+        self.assertEqual([item["execution_id"] for item in reports], [good])
+        self.assertIsInstance(reports[0]["last_log_at"], int)
+        self.assertEqual(reports[0]["recent"], [])
+
+    def test_activity_reports_stop_at_sixteen(self):
+        for i in range(17):
+            self._plant_run("exec-" + f"{i:032x}", log="{}\n", created=i + 1)
+        reports = self.connector._activity_reports()
+        self.assertEqual(len(reports), 16)
+        self.assertNotIn("exec-" + f"{16:032x}", [item["execution_id"] for item in reports])
+
+    def test_activity_reports_rotate_past_the_first_sixteen(self):
+        ids = ["exec-" + f"{i:032x}" for i in range(17)]
+        for created, execution_id in enumerate(ids, 1):
+            self._plant_run(execution_id, log="{}\n", created=created)
+        first = self.connector._activity_reports()
+        second = self.connector._activity_reports()
+        self.assertEqual(len(first), 16)
+        self.assertNotIn(ids[-1], [item["execution_id"] for item in first])
+        later = next(item for item in second if item["execution_id"] == ids[-1])
+        self.assertIsInstance(later["last_log_at"], int)
+        self.assertEqual(later["recent"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
