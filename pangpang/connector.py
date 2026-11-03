@@ -533,6 +533,46 @@ class Connector:
         record.update(status="report", result=result)
         self.store.put("local_command", record)
 
+    def _activity_reports(self):
+        """Closed-set log observation for active runs.
+
+        Reuses the local projection. One bounded read per run on the sync this
+        process already performs. A read failure skips that run. Nothing here
+        is written onto the receipt or the run row.
+        """
+        from .activity import ACTIVITY_REPORT_LIMIT, activity_projection
+        host = self.execution.hosts.get(self.host_id) or {}
+        roots = list(host.get("allowed_roots") or [])
+        reports = []
+        for record in self._active_runs():
+            if len(reports) >= ACTIVITY_REPORT_LIMIT:
+                break
+            if record.get("status") not in {"launching", "active"}:
+                continue
+            task = record.get("task")
+            if not isinstance(task, dict):
+                continue
+            execution_id = task.get("execution_id")
+            if not isinstance(execution_id, str):
+                continue
+            try:
+                directory = self.execution.directory(host, execution_id)
+                projected = activity_projection(
+                    task, directory=directory, local=True, roots=roots, cwd=task.get("cwd"))
+            except Exception:
+                continue
+            recent = projected.get("recent") or []
+            last_log_at = projected.get("last_log_at")
+            if last_log_at is None and not recent:
+                continue
+            reports.append({
+                "execution_id": execution_id,
+                "last_log_at": last_log_at,
+                "observation_capped": projected.get("observation_capped") or "no",
+                "recent": recent,
+            })
+        return reports
+
     def _active_runs(self):
         for status in ("launching", "active"):
             cursor = None
@@ -602,10 +642,17 @@ A run that has ALREADY been reported/acknowledged is IMMUTABLE — the
                 break
             if record["status"] in {"launching", "active"} and record.get("receipt"):
                 receipts.append(record["receipt"])
+        # Side observation for the snapshot. A failure here must not drop the
+        # receipts collected above, and it is not written onto those receipts.
+        try:
+            activities = self._activity_reports()
+        except Exception:
+            activities = []
         from .store import CONTRACT_VERSION
         response = self.request({"version": __version__, "instance_id": self.instance_id,
                                  "supported_contract_version": CONTRACT_VERSION,
                                  "reports": reports, "receipts": receipts,
+                                 "activities": activities,
                                  "declared_adapters": self.declared_adapters})
         for identity in response.get("ack", []):
             record = self.store.get("local_command", identity)

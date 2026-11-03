@@ -1,9 +1,14 @@
 """Computed task activity for the planner packet and task cards.
 
-The value is derived when a packet or snapshot is built. It is not stored.
-File reads run only for local tasks, and only outside a store transaction.
-Recent steps come from complete single-line JSON already written to the run
-log. Fragments and unrecognized records are ignored.
+The value is derived when a packet or snapshot is built. It is not stored on
+the task. File reads run only for local tasks, and only outside a store
+transaction. Recent steps come from complete single-line JSON already written
+to the run log. Fragments and unrecognized records are ignored.
+
+A connector's log stays on the device. The connector reuses this projection
+and may report last_log_at and recent on the sync it already sends. The cloud
+keeps that report in memory and the snapshot attaches it. A connector that
+sends nothing leaves the task unchanged.
 """
 import json
 import os
@@ -21,6 +26,10 @@ _DEFAULT_LOG_BYTES = 4 * 1024 * 1024
 _PATH_MAX = 160
 _ACTIVE = frozenset({"queued", "starting", "running", "cancel_requested"})
 _REDACTED = "<redacted-path>"
+# Same bound as a connector receipt batch. A progress report must not outgrow
+# the sync that already carries execution receipts.
+ACTIVITY_REPORT_LIMIT = 16
+_LOG_AT_MAX = 4_000_000_000
 
 # Executor tool names are mapped onto this closed set. Arbitrary names are not
 # passed through, and command or message text is never copied.
@@ -105,27 +114,92 @@ def attach_dependency_activity(service, dependencies, *, now=None):
 
 
 def annotate_snapshot_tasks(service, tasks, *, now=None):
-    """Attach activity on active local task rows. Other rows are left untouched.
+    """Attach activity on active rows the cloud can observe.
 
-    age_s is omitted. It is only true at this instant, and the card uses the
-    stored created or started clock instead. The planner packet keeps age_s.
+    Local rows are read from the run log. Connector rows use the last
+    closed-set report from that device, when one exists. Rows with no
+    observation are left untouched. age_s is omitted. It is only true at this
+    instant, and the card uses the stored created or started clock instead.
+    The planner packet keeps age_s and does not receive connector reports.
     """
-    chosen = []
+    local = []
+    reported = []
     for task in tasks or []:
         if task.get("status") not in _ACTIVE:
             continue
-        host = service.execution.hosts.get(task.get("host_id")) or {}
-        if host.get("transport") != "local":
-            continue
-        chosen.append(task)
-    if not chosen:
+        transport = (service.execution.hosts.get(task.get("host_id")) or {}).get("transport")
+        if transport == "local":
+            local.append(task)
+        elif transport == "connector":
+            reported.append(task)
+    if not local and not reported:
         return tasks
-    moment = time.time() if now is None else now
-    for task in chosen:
-        activity = _project_task(service, task, now=moment)
-        activity.pop("age_s", None)
-        task["activity"] = activity
+    if local:
+        moment = time.time() if now is None else now
+        for task in local:
+            activity = _project_task(service, task, now=moment)
+            activity.pop("age_s", None)
+            task["activity"] = activity
+    for task in reported:
+        _attach_reported_activity(service, task)
     return tasks
+
+
+def accept_reported_activity(item, status):
+    """Closed-set projection to keep, or None when the report is refused.
+
+    The device is not trusted. Tools outside the set are dropped, paths are
+    sanitized again, and a report with no log time and no remaining step is
+    refused so an empty report does not invent an activity object. ``status``
+    is the cloud task's status. A status on the report is ignored. Inactive
+    tasks are refused.
+    """
+    if status not in _ACTIVE or not isinstance(item, dict):
+        return None
+    if "last_log_at" in item and item.get("last_log_at") is not None:
+        last = item.get("last_log_at")
+        if type(last) is not int or not 0 < last <= _LOG_AT_MAX:
+            return None
+    else:
+        last = None
+    if "observation_capped" in item:
+        capped = item.get("observation_capped")
+        if capped not in {"no", "maybe"}:
+            return None
+    else:
+        capped = "no"
+    recent = item.get("recent", [])
+    if not isinstance(recent, list) or len(recent) > 3:
+        return None
+    steps = []
+    for step in recent:
+        if not isinstance(step, dict):
+            continue
+        tool = step.get("tool")
+        if tool not in _TOOLS:
+            continue
+        cleaned = {"tool": tool}
+        if "path" in step:
+            path = sanitize_rel_path(step.get("path"), None)
+            if path:
+                cleaned["path"] = path
+        steps.append(cleaned)
+    if last is None and not steps:
+        return None
+    return {"last_log_at": last, "observation_capped": capped, "recent": steps}
+
+
+def _attach_reported_activity(service, task):
+    stored = service.broker.reported_activity(task.get("execution_id"))
+    if not stored:
+        return
+    task["activity"] = {
+        "status": task.get("status"),
+        "last_log_at": stored["last_log_at"],
+        "observation_capped": stored["observation_capped"],
+        "recent": stored["recent"],
+        "present_outputs": [],
+    }
 
 
 def _project_task(service, task, *, now):

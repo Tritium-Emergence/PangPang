@@ -4,6 +4,7 @@ import hmac
 import os
 import re
 import time
+from .activity import ACTIVITY_REPORT_LIMIT, accept_reported_activity
 from .adapters_file import validate_declared
 from .logs import get_logger
 from .store import Fault, digest, uid
@@ -11,6 +12,9 @@ from .store import Fault, digest, uid
 log = get_logger(__name__)
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+# Volatile observations only. A forgotten id must not grow the process.
+_ACTIVITY_KEEP = 64
+_EXECUTION_ID = re.compile(r"exec-[a-f0-9]{32}")
 
 
 def global_profile(config):
@@ -31,6 +35,10 @@ class Broker:
         # Published only after the sync transaction commits; empty after restart,
         # so a device reads offline until its first sync (~2s).
         self._last_seen = {}
+        # Same class of fact as liveness: the latest closed-set run observation
+        # a connector reported. Not a task field, not a receipt, empty after
+        # restart until the next sync. Keyed by execution_id.
+        self._activity = {}
 
     def authenticate(self, host_id, authorization):
         host = self.service.execution.hosts.get(host_id, {})
@@ -257,6 +265,58 @@ class Broker:
             raise Fault("connector_offline")
         return {"status": "awaiting_receipt"}
 
+    def reported_activity(self, execution_id):
+        """Copy of the last accepted report, or None. Does not read a run log."""
+        item = self._activity.get(execution_id)
+        if not item:
+            return None
+        return {
+            "last_log_at": item["last_log_at"],
+            "observation_capped": item["observation_capped"],
+            "recent": [dict(step) for step in item["recent"]],
+        }
+
+    def _stage_reported_activity(self, host_id, raw, forget):
+        """Prepare one sync's observations. Publish only after commit.
+
+        A missing, empty, or malformed ``activities`` field changes nothing
+        except ids in ``forget`` (terminal or unconfirmed receipts). A bad
+        report is dropped. It does not fail the sync and it does not rewrite
+        a receipt or a task.
+        """
+        staged = []
+        if isinstance(raw, list) and len(raw) <= ACTIVITY_REPORT_LIMIT:
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                execution_id = item.get("execution_id")
+                if not isinstance(execution_id, str) or _EXECUTION_ID.fullmatch(execution_id) is None:
+                    continue
+                rows = self.store.find("task", execution_id=execution_id, limit=1)
+                if not rows or rows[0].get("host_id") != host_id:
+                    continue
+                projection = accept_reported_activity(item, rows[0].get("status"))
+                if projection is None:
+                    continue
+                staged.append((execution_id, projection))
+        forgotten = tuple(item for item in forget if isinstance(item, str))
+        if not staged and not forgotten:
+            return
+        self.store.after_commit(
+            "device_activity:" + host_id,
+            lambda staged=tuple(staged), forgotten=forgotten: self._publish_activity(staged, forgotten))
+
+    def _publish_activity(self, staged, forgotten):
+        for execution_id, projection in staged:
+            self._activity.pop(execution_id, None)
+            self._activity[execution_id] = projection
+        for execution_id in forgotten:
+            self._activity.pop(execution_id, None)
+        overflow = len(self._activity) - _ACTIVITY_KEEP
+        if overflow > 0:
+            for execution_id in list(self._activity)[:overflow]:
+                self._activity.pop(execution_id, None)
+
     def sync(self, host_id, body):
         instance_id = body.get("instance_id", "")
         if not isinstance(instance_id, str) or not re.fullmatch(r"device-[a-f0-9]{32}", instance_id):
@@ -352,6 +412,11 @@ class Broker:
                     self.store.put("receipt", {"id": receipt["execution_id"], "host_id": host_id, "payload": receipt})
                 receipt_ack.append(receipt["execution_id"])
                 reconcile.append(task["id"])
+            try:
+                # Observation only. A failure here must not roll back receipts.
+                self._stage_reported_activity(host_id, body.get("activities"), receipt_ack)
+            except Exception:
+                log.exception("connector activity report dropped host=%s", host_id)
             try:
                 device = self.store.get("device", host_id)
             except Fault:

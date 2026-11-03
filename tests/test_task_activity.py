@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from test_bot_runtime import call, config
-from pangpang.activity import activity_projection, sanitize_rel_path
+from pangpang.activity import activity_projection, annotate_snapshot_tasks, sanitize_rel_path
 from pangpang.http import serve
 from pangpang.planner_prompt import PLANNER_SYSTEM
 from pangpang.runtime import Runtime
@@ -825,6 +825,213 @@ class TaskActivityTests(unittest.TestCase):
             "work_id": earlier["work_id"], "route_quality": "fallback", "route_source": "fallback"})
         self.assertEqual(earlier["turn_id"], later["turn_id"])
         self.assertEqual(self.app.store.get("turn", earlier["turn_id"])["route_quality"], "fallback")
+
+    def _connector_host(self, host_id):
+        self.app.execution.hosts[host_id] = {
+            "id": host_id, "transport": "connector", "os": "Linux",
+            "runner_root": str(self.root / host_id), "allowed_roots": [str(self.root)]}
+
+    def _sync_device(self, host_id, instance, **extra):
+        body = {"instance_id": instance, "reports": [], "receipts": []}
+        body.update(extra)
+        return self.app.broker.sync(host_id, body)
+
+    def test_connector_report_attaches_on_snapshot_and_absence_does_not(self):
+        self._connector_host("connector-1")
+        self._connector_host("connector-2")
+        instance = "device-" + "a" * 32
+        other = "device-" + "b" * 32
+        sent = self.app.send("bot-main", {"text": "远程进度", "allow_write": True}, "remote-activity")
+        res = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "远程", "installation_id": "codex-local"})
+        task = self.app.store.get("task", res["task_id"])
+        task.update(host_id="connector-1", status="running", started=task["created"])
+        self.app.store.put("task", task)
+        task = self.app.store.get("task", task["id"])
+        local_res = self.app.submit_task("bot-main", sent["work_id"], {"prompt": "本机", "installation_id": "codex-local"})
+        local = self.app.store.get("task", local_res["task_id"])
+        local.update(status="running", started=local["created"])
+        self.app.store.put("task", local)
+        self._write_run_log(self.app.store.get("task", local["id"]), _line(_claude("Read", "src/local.py")))
+        planted = self.root / "connector-1" / task["execution_id"]
+        planted.mkdir(parents=True)
+        (planted / "output.log").write_text(_line(_claude("Read", "remote-leak.py")), encoding="utf-8")
+        secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+        command = "echo SECRET_COMMAND_TEXT"
+        calls = []
+        real_lstat = os.lstat
+        real_tail = runner.read_tail_bounded
+
+        def spy_lstat(path, *args, **kwargs):
+            text = os.fspath(path)
+            if task["execution_id"] in text:
+                calls.append(text)
+            return real_lstat(path, *args, **kwargs)
+
+        def spy_tail(path, n=16384):
+            text = os.fspath(path)
+            if task["execution_id"] in text:
+                calls.append("tail:" + text)
+            return real_tail(path, n)
+
+        def attached():
+            row = dict(self.app.store.get("task", task["id"]))
+            annotate_snapshot_tasks(self.app, [row])
+            return row
+
+        with patch("pangpang.activity.os.lstat", spy_lstat), \
+                patch("pangpang.activity.runner.read_tail_bounded", spy_tail), \
+                patch("os.lstat", spy_lstat):
+            self._sync_device("connector-1", instance)
+            bare = attached()
+            self.assertNotIn("activity", bare)
+            packet = self._packet(sent["turn_id"])
+            target = next(dep["target"] for dep in packet["dependencies"]
+                          if dep.get("target", {}).get("task_id") == task["id"])
+            self._bounded(target["activity"], full=False)
+            stored = self.app.store.get("task", task["id"])
+            self._sync_device("connector-1", instance, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": 1_700_000_100,
+                "observation_capped": "maybe", "recent": [],
+                "present_outputs": [{"path": "secret-output.txt", "present": True}]}])
+            timed = attached()
+            self.assertEqual(set(timed["activity"]), {
+                "status", "last_log_at", "observation_capped", "recent", "present_outputs"})
+            self.assertEqual(timed["activity"]["status"], "running")
+            self.assertEqual(timed["activity"]["last_log_at"], 1_700_000_100)
+            self.assertEqual(timed["activity"]["observation_capped"], "maybe")
+            self.assertEqual(timed["activity"]["recent"], [])
+            self.assertEqual(timed["activity"]["present_outputs"], [])
+            self.assertNotIn("age_s", timed["activity"])
+            self.assertNotIn("secret-output.txt", json.dumps(timed["activity"]))
+            after = self.app.store.get("task", task["id"])
+            self.assertEqual(after["revision"], stored["revision"])
+            self.assertEqual(after["status"], "running")
+            self.assertNotIn("activity", after)
+            self._sync_device("connector-1", instance, activities=[])
+            self.assertEqual(attached()["activity"]["last_log_at"], 1_700_000_100)
+            self._sync_device("connector-1", instance)
+            self.assertEqual(attached()["activity"]["recent"], [])
+            flood = [{
+                "execution_id": task["execution_id"], "last_log_at": 1_700_000_150,
+                "observation_capped": "no", "recent": [{"tool": "write", "path": "src/b.py"}]}]
+            flood.extend({
+                "execution_id": "exec-" + f"{i:032x}", "last_log_at": 1_700_000_150,
+                "observation_capped": "no", "recent": []} for i in range(1, 17))
+            self.assertEqual(len(flood), 17)
+            self._sync_device("connector-1", instance, activities=flood)
+            self._sync_device("connector-1", instance, activities="nope")
+            self._sync_device("connector-1", instance, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": 1_700_000_160,
+                "observation_capped": "no", "recent": [
+                    {"tool": "read"}, {"tool": "write"}, {"tool": "edit"}, {"tool": "list"}]}])
+            self._sync_device("connector-1", instance, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": True,
+                "observation_capped": "no", "recent": [{"tool": "read", "path": "src/a.py"}]}])
+            self._sync_device("connector-1", instance, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": 1_700_000_160,
+                "observation_capped": "yes", "recent": [{"tool": "read", "path": "src/a.py"}]}])
+            self._sync_device("connector-1", instance, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": None, "recent": []}])
+            self.assertEqual(attached()["activity"]["last_log_at"], 1_700_000_100)
+            self.assertEqual(attached()["activity"]["recent"], [])
+            self._sync_device("connector-1", instance, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": 1_700_000_200,
+                "observation_capped": "no", "status": "succeeded", "command": command,
+                "recent": [
+                    {"tool": "Bash", "path": "skip.py", "command": command},
+                    {"tool": "read", "path": "notes/" + secret + "/a.py"},
+                    {"tool": "read", "path": "/tmp/abs-secret.txt"},
+                ]}])
+            shown = attached()
+            self.assertEqual(shown["activity"]["status"], "running")
+            self.assertEqual(shown["activity"]["last_log_at"], 1_700_000_200)
+            self.assertEqual(shown["activity"]["recent"], [
+                {"tool": "read", "path": "<redacted-path>"}, {"tool": "read"}])
+            blob = json.dumps(shown["activity"])
+            self.assertNotIn(secret, blob)
+            self.assertNotIn("SECRET_COMMAND_TEXT", blob)
+            self.assertNotIn("abs-secret.txt", blob)
+            self.assertNotIn("Bash", blob)
+            self.assertNotIn("remote-leak.py", blob)
+            self.assertEqual(self.app.store.get("task", task["id"])["status"], "running")
+            self._sync_device("connector-2", other, activities=[{
+                "execution_id": task["execution_id"], "last_log_at": 1_700_000_300,
+                "observation_capped": "no", "recent": [{"tool": "list", "path": "other.py"}]}])
+            self.assertEqual(attached()["activity"]["last_log_at"], 1_700_000_200)
+            with self.assertRaises(Fault) as caught:
+                self._sync_device("connector-1", instance, activities=[{
+                    "execution_id": task["execution_id"], "last_log_at": 1_700_000_400,
+                    "observation_capped": "no", "recent": [{"tool": "write", "path": "src/c.py"}]}],
+                    receipts=[{"execution_id": "exec-" + "0" * 32, "spec_digest": "nope",
+                               "status": "succeeded", "process_tree_confirmed": True}])
+            self.assertEqual(caught.exception.code, "receipt_identity_mismatch")
+            self.assertEqual(attached()["activity"]["recent"][-1], {"tool": "read"})
+            self.assertEqual(self.app.store.get("task", task["id"])["status"], "running")
+            packet = self._packet(sent["turn_id"])
+            target = next(dep["target"] for dep in packet["dependencies"]
+                          if dep.get("target", {}).get("task_id") == task["id"])
+            self._bounded(target["activity"], full=False)
+            self.assertNotIn("src/local.py", json.dumps(target))
+            token = "r" * 32
+            server = serve(self.app, token, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                import http.cookiejar
+                import urllib.request
+                origin = "http://127.0.0.1:" + str(server.server_port)
+                client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+                def request(path, body=None, key="k"):
+                    headers = {"Origin": origin}
+                    data = None
+                    if body is not None:
+                        headers.update({"Content-Type": "application/json", "Idempotency-Key": key})
+                        data = json.dumps(body).encode()
+                    return client.open(urllib.request.Request(origin + "/api/v1/" + path, data=data, headers=headers))
+
+                with request("login", {"token": token}, key="login-remote"):
+                    pass
+
+                def snap(task_id):
+                    with request("snapshot") as response:
+                        body = json.load(response)
+                    return next(row for row in body["tasks"] if row["id"] == task_id)
+
+                remote = snap(task["id"])
+                local_row = snap(local["id"])
+                self.assertEqual(remote["activity"]["recent"], shown["activity"]["recent"])
+                self.assertNotIn("age_s", remote["activity"])
+                self.assertEqual(local_row["activity"]["recent"][-1], {"tool": "read", "path": "src/local.py"})
+                done = self.app.store.get("task", task["id"])
+                done["status"] = "succeeded"
+                self.app.store.put("task", done)
+                self.assertNotIn("activity", snap(task["id"]))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            self.assertIsNotNone(self.app.broker.reported_activity(task["execution_id"]))
+            receipt = {"execution_id": task["execution_id"], "spec_digest": task["spec_digest"],
+                       "status": "running", "process_tree_confirmed": False}
+            if task.get("attempt_uuid"):
+                receipt["attempt_uuid"] = task["attempt_uuid"]
+            self._sync_device("connector-1", instance, receipts=[receipt])
+            self.assertEqual(self.app.store.get("task", task["id"])["status"], "succeeded")
+            self.assertIsNone(self.app.broker.reported_activity(task["execution_id"]))
+            self.assertNotIn("activity", attached())
+        self.assertEqual(calls, [])
+
+    def test_reported_activity_cache_is_bounded(self):
+        kept = None
+        for i in range(70):
+            execution_id = "exec-" + f"{i:032x}"
+            self.app.broker._publish_activity([(
+                execution_id, {"last_log_at": 1_700_000_000 + i, "observation_capped": "no", "recent": []})], ())
+            kept = execution_id
+        self.assertLessEqual(len(self.app.broker._activity), 64)
+        self.assertIsNone(self.app.broker.reported_activity("exec-" + f"{0:032x}"))
+        self.assertEqual(self.app.broker.reported_activity(kept)["last_log_at"], 1_700_000_000 + 69)
 
 
 class ActivityCardTests(unittest.TestCase):
