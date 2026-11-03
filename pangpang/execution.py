@@ -378,10 +378,23 @@ def task_interjection_tier(installation, host):
 
 
 def stdin_protocol_for(adapter):
+    """Launch protocol for one catalog row, or None.
+
+    Tier 1 still requires a registered stdin protocol. A custom row may name
+    claude-stream-json by itself so the runner speaks that protocol and the
+    run log receives tool NDJSON. That does not advertise online inject:
+    interjection stays 3 unless the row also declares tier 1, and custom rows
+    cannot declare that field.
+    """
     row = ADAPTER_CATALOG.get(adapter or "")
-    if interjection_tier_of(row) != 1:
+    if not isinstance(row, dict):
         return None
-    return row.get("stdin_protocol")
+    protocol = row.get("stdin_protocol")
+    if protocol not in _STDIN_PROTOCOLS:
+        return None
+    if interjection_tier_of(row) == 1 or protocol == CLAUDE_STREAM_JSON:
+        return protocol
+    return None
 
 
 def resume_protocol_for(adapter):
@@ -956,6 +969,11 @@ class Execution:
         protocol = stdin_protocol_for(e.get("adapter"))
         if protocol:
             spec["stdin_protocol"] = protocol
+        # The receipt may say tier 1 only when the catalog row declared it.
+        # A custom claude-stream-json row speaks that protocol for the run log
+        # and does not advertise online inject.
+        if interjection_tier_of(ADAPTER_CATALOG.get(e.get("adapter") or "")) == 1:
+            spec["interjection_tier"] = 1
         # Same shape as stdin_protocol: a launch channel, not a task field.
         # The session id is derived from execution_id inside the runner.
         resume = resume_protocol_for(e.get("adapter"))

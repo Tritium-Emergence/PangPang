@@ -26,7 +26,8 @@ log = get_logger("onboarding")
 # Fields of one adapters.json row. They are accepted only on declare_adapter.
 # configure must not carry them: argv stays the approved declaration, not a
 # later model edit of the configure call.
-_DECLARATION_FIELDS = {"binary", "argv", "concurrency", "priority", "use_when", "secret_env", "extra_env"}
+_DECLARATION_FIELDS = {"binary", "argv", "concurrency", "priority", "use_when", "secret_env",
+                       "extra_env", "stdin_protocol"}
 
 
 def apply_model_concurrency(candidate, value):

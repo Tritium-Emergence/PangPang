@@ -44,7 +44,8 @@ class ValidateDeclaredTests(unittest.TestCase):
     def test_execution_and_env_material_never_cross(self):
         for row in ({"argv": ["rm", "-rf", "/"]}, {"binary": "sh"},
                     {"secret_env": "OPENAI_API_KEY"}, {"extra_env": {"A": "b"}},
-                    {"stdin_protocol": "x"}, {"interjection_tier": 1}):
+                    {"stdin_protocol": "x"}, {"stdin_protocol": "claude-stream-json"},
+                    {"interjection_tier": 1}):
             with self.subTest(row=row):
                 self.assert_rejected({"opencode-test": dict(row)})
 

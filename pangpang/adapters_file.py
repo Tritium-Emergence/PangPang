@@ -33,7 +33,7 @@ MAX_ENV_VALUE_CHARS = 4096
 NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
 ALLOWED_KEYS = frozenset(("binary", "argv", "concurrency", "priority", "use_when",
-                          "secret_env", "extra_env"))
+                          "secret_env", "extra_env", "stdin_protocol"))
 REQUIRED_KEYS = ("binary", "argv", "concurrency", "priority", "use_when")
 
 
@@ -139,6 +139,18 @@ def _clean_row(path, line, name, row):
                     or not isinstance(value, str) or "\x00" in value or len(value) > MAX_ENV_VALUE_CHARS:
                 _bad(path, line, name, "extra_env must map environment variable names to plain strings")
         clean["extra_env"] = dict(extra)
+    if "stdin_protocol" in row:
+        # Launch channel only. Online inject, resume, and the permission bridge
+        # stay built-in: a custom row cannot declare those keys. The one value
+        # the runner already speaks for Claude Code is enough for a wrapper to
+        # emit the same tool NDJSON the built-in row does.
+        from .execution import CLAUDE_STREAM_JSON
+        protocol = row["stdin_protocol"]
+        if protocol != CLAUDE_STREAM_JSON:
+            _bad(path, line, name,
+                 "stdin_protocol must be %s when set; other protocols are built-in only"
+                 % CLAUDE_STREAM_JSON)
+        clean["stdin_protocol"] = protocol
     return clean
 
 

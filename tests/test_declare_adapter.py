@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pangpang import adapters_file
-from pangpang.execution import ADAPTER_CATALOG, Execution
+from pangpang.execution import ADAPTER_CATALOG, Execution, interjection_tier_of, stdin_protocol_for
 from pangpang.local_setup import LocalSetup
 from pangpang.onboarding import empty_config
 from pangpang.service import Service
@@ -773,6 +773,19 @@ class LocalDeclareAdapterTests(unittest.TestCase):
         self.assertNotIn("dsk-claude", seen)
         self.assertNotIn("dsk-claude-othername-host-local", self.app.execution.installations)
 
+    def test_claude_stream_json_declaration_is_stored_without_inject(self):
+        staged = self.stage(stdin_protocol="claude-stream-json")
+        proposal = self.app.store.get("setup_request", staged["request_id"])["proposal"]
+        self.assertEqual(proposal["adapter_row"]["stdin_protocol"], "claude-stream-json")
+        self.assertNotIn("interjection_tier", proposal["adapter_row"])
+        self.assertEqual(proposal["command"], ["dsk-claude", "--stdio"])
+        accepted = self.app.onboarding.approve(staged["request_id"], {})
+        self.assertEqual(accepted, {"accepted": True})
+        stored = json.loads((self.data / "adapters.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["dsk-claude"]["stdin_protocol"], "claude-stream-json")
+        self.assertEqual(stdin_protocol_for("dsk-claude"), "claude-stream-json")
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["dsk-claude"]), 3)
+
     def test_builtin_protocol_and_conflict_are_refused(self):
         before = self.app.store.find("setup_request")
         with self.assertRaises(Fault) as ctx:
@@ -780,7 +793,7 @@ class LocalDeclareAdapterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
         self.assertIn("built-in", ctx.exception.advice)
         with self.assertRaises(Fault) as ctx:
-            self.stage(stdin_protocol="claude-stream-json")
+            self.stage(stdin_protocol="codex-app-server")
         self.assertEqual(ctx.exception.code, "invalid_adapter_declaration")
         self.assertIn("stdin_protocol", ctx.exception.advice)
         self.assertEqual(self.app.store.find("setup_request"), before)
