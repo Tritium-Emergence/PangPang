@@ -180,13 +180,36 @@ def accept_reported_activity(item, status):
             continue
         cleaned = {"tool": tool}
         if "path" in step:
-            path = sanitize_rel_path(step.get("path"), None)
+            path = _reported_path(step.get("path"))
             if path:
                 cleaned["path"] = path
         steps.append(cleaned)
     if last is None and not steps:
         return None
     return {"last_log_at": last, "observation_capped": capped, "recent": steps}
+
+
+def _reported_path(raw):
+    """Sanitized path safe to put on a snapshot, or None.
+
+    A lone surrogate survives JSON and then makes ``encode(snapshot).encode()``
+    raise. That 400 would stick for every later snapshot while the report stays
+    in memory. Drop the path instead of the whole snapshot.
+    """
+    if not isinstance(raw, str) or not _utf8_ok(raw):
+        return None
+    path = sanitize_rel_path(raw, None)
+    if not path or not _utf8_ok(path):
+        return None
+    return path
+
+
+def _utf8_ok(text):
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _attach_reported_activity(service, task):

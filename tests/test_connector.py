@@ -696,6 +696,18 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(len(reports), 16)
         self.assertNotIn("exec-" + f"{16:032x}", [item["execution_id"] for item in reports])
 
+    def test_activity_reports_rotate_past_the_first_sixteen(self):
+        ids = ["exec-" + f"{i:032x}" for i in range(17)]
+        for created, execution_id in enumerate(ids, 1):
+            self._plant_run(execution_id, log="{}\n", created=created)
+        first = self.connector._activity_reports()
+        second = self.connector._activity_reports()
+        self.assertEqual(len(first), 16)
+        self.assertNotIn(ids[-1], [item["execution_id"] for item in first])
+        later = next(item for item in second if item["execution_id"] == ids[-1])
+        self.assertIsInstance(later["last_log_at"], int)
+        self.assertEqual(later["recent"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

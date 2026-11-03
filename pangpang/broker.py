@@ -292,10 +292,10 @@ class Broker:
                 execution_id = item.get("execution_id")
                 if not isinstance(execution_id, str) or _EXECUTION_ID.fullmatch(execution_id) is None:
                     continue
-                rows = self.store.find("task", execution_id=execution_id, limit=1)
-                if not rows or rows[0].get("host_id") != host_id:
+                task = self.store.task_by_execution_id(execution_id)
+                if task is None or task.get("host_id") != host_id:
                     continue
-                projection = accept_reported_activity(item, rows[0].get("status"))
+                projection = accept_reported_activity(item, task.get("status"))
                 if projection is None:
                     continue
                 staged.append((execution_id, projection))

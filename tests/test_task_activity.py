@@ -1022,6 +1022,75 @@ class TaskActivityTests(unittest.TestCase):
             self.assertNotIn("activity", attached())
         self.assertEqual(calls, [])
 
+    def test_surrogate_activity_path_does_not_break_snapshot(self):
+        self._connector_host("connector-1")
+        self.app.execution.hosts["connector-1"]["credential_env"] = "TEST_DEVICE_KEY"
+        execution_id = "exec-" + "e" * 32
+        instance = "device-" + "c" * 32
+        self.app.store.put("task", {
+            "id": "task-surrogate", "execution_id": execution_id, "host_id": "connector-1",
+            "status": "running", "created": 1, "started": 1, "cwd": str(self.root),
+            "required_outputs": [], "spec_digest": "s", "prompt": "x",
+            "work_id": "w-surrogate", "owner_bot_id": "bot-main"})
+        payload = (
+            b'{"instance_id":"' + instance.encode() + b'",'
+            b'"reports":[],"receipts":[],"activities":[{"execution_id":"'
+            + execution_id.encode() + b'","last_log_at":1700000200,'
+            b'"observation_capped":"no","recent":['
+            b'{"tool":"read","path":"notes/\\ud800/a.py"},'
+            b'{"tool":"write","path":"src/ok.py"}]}]}')
+        token = "r" * 32
+        server = serve(self.app, token, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            import http.cookiejar
+            import urllib.error
+            import urllib.request
+            origin = "http://127.0.0.1:" + str(server.server_port)
+            with patch.dict(os.environ, {"TEST_DEVICE_KEY": "d" * 40}):
+                sync = urllib.request.Request(
+                    origin + "/api/v1/connector/sync", data=payload, headers={
+                        "Content-Type": "application/json",
+                        "X-PangPang-Host": "connector-1",
+                        "Authorization": "Bearer " + "d" * 40})
+                with urllib.request.urlopen(sync) as response:
+                    self.assertEqual(response.status, 200)
+                    json.load(response)
+            client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+            def request(path, body=None, key="k"):
+                headers = {"Origin": origin}
+                data = None
+                if body is not None:
+                    headers.update({"Content-Type": "application/json", "Idempotency-Key": key})
+                    data = json.dumps(body).encode()
+                return client.open(urllib.request.Request(origin + "/api/v1/" + path, data=data, headers=headers))
+
+            with request("login", {"token": token}, key="login-surrogate"):
+                pass
+            bodies = []
+            for _ in range(2):
+                try:
+                    with request("snapshot") as response:
+                        self.assertEqual(response.status, 200)
+                        raw = response.read()
+                except urllib.error.HTTPError as error:
+                    self.fail("snapshot %s %s" % (error.code, error.read()))
+                self.assertNotIn(b"\\ud800", raw)
+                bodies.append(json.loads(raw.decode("utf-8")))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        for body in bodies:
+            row = next(item for item in body["tasks"] if item["id"] == "task-surrogate")
+            self.assertEqual(row["activity"]["recent"], [
+                {"tool": "read"}, {"tool": "write", "path": "src/ok.py"}])
+            self.assertNotIn("ud800", json.dumps(row["activity"]))
+            for step in row["activity"]["recent"]:
+                step.get("path", "").encode("utf-8")
+
     def test_reported_activity_cache_is_bounded(self):
         kept = None
         for i in range(70):

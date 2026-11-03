@@ -182,6 +182,10 @@ class Connector:
         self.declared_adapters = {name: {key: ADAPTER_CATALOG[name][key]
                                          for key in ("concurrency", "priority", "use_when")}
                                   for name in declared}
+        # Last execution_id this process spent an activity-read slot on.
+        # The next sync continues after it so a run past the batch of 16 is
+        # still observed. Memory only; a restart starts again at the front.
+        self._activity_cursor = None
         self.host_id = config["host_id"]
         hosts = config.get("hosts", [])
         if len(hosts) != 1 or hosts[0]["id"] != self.host_id or hosts[0].get("transport") != "local":
@@ -543,10 +547,8 @@ class Connector:
         from .activity import ACTIVITY_REPORT_LIMIT, activity_projection
         host = self.execution.hosts.get(self.host_id) or {}
         roots = list(host.get("allowed_roots") or [])
-        reports = []
+        ordered = []
         for record in self._active_runs():
-            if len(reports) >= ACTIVITY_REPORT_LIMIT:
-                break
             if record.get("status") not in {"launching", "active"}:
                 continue
             task = record.get("task")
@@ -555,6 +557,21 @@ class Connector:
             execution_id = task.get("execution_id")
             if not isinstance(execution_id, str):
                 continue
+            ordered.append((execution_id, task))
+        if not ordered:
+            return []
+        start = 0
+        cursor = self._activity_cursor
+        if cursor is not None:
+            for index, (execution_id, _task) in enumerate(ordered):
+                if execution_id == cursor:
+                    start = (index + 1) % len(ordered)
+                    break
+        reports = []
+        last = None
+        for step in range(min(ACTIVITY_REPORT_LIMIT, len(ordered))):
+            execution_id, task = ordered[(start + step) % len(ordered)]
+            last = execution_id
             try:
                 directory = self.execution.directory(host, execution_id)
                 projected = activity_projection(
@@ -571,6 +588,7 @@ class Connector:
                 "observation_capped": projected.get("observation_capped") or "no",
                 "recent": recent,
             })
+        self._activity_cursor = last
         return reports
 
     def _active_runs(self):

@@ -419,6 +419,13 @@ class Store:
             "CREATE INDEX IF NOT EXISTS turn_bot_started ON objects("
             "json_extract(data,'$.bot_id'), json_extract(data,'$.started_at')) "
             "WHERE kind='turn' AND json_extract(data,'$.started_at') IS NOT NULL")
+        # Connector activity sync looks up one task by execution_id on every
+        # heartbeat. A kind-wide scan grows with historical tasks. This partial
+        # index is the direct path; task_by_execution_id forces it with INDEXED BY.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS task_execution_id ON objects("
+            "json_extract(data,'$.execution_id')) "
+            "WHERE kind='task' AND json_extract(data,'$.execution_id') IS NOT NULL")
 
     def _ensure_history_correction_indexes(self):
         """Bounded routing-correction lookups for history. Partial expression
@@ -614,6 +621,23 @@ class Store:
                 "WHERE kind='turn' AND json_extract(data,'$.status')='running' "
                 "AND json_extract(data,'$.work_id')=?", (work_id,)).fetchone()
         return row[0] if row else None
+
+    def task_by_execution_id(self, execution_id):
+        """The task row for this execution, or None.
+
+        Activity sync does this on every connector heartbeat. INDEXED BY turns a
+        missing index into a SQL error instead of a scan of historical tasks.
+        The caller still checks host and status; this lookup does not.
+        """
+        if not isinstance(execution_id, str):
+            return None
+        with self.lock:
+            row = self.db.execute(
+                "SELECT data FROM objects INDEXED BY task_execution_id "
+                "WHERE kind='task' AND json_extract(data,'$.execution_id')=? "
+                "ORDER BY created,rowid LIMIT 1",
+                (execution_id,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def count(self, kind, **where):
         """Unbounded COUNT for a kind with optional json_extract equality filters.
