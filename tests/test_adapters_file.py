@@ -69,7 +69,7 @@ class AdaptersFileUnitTests(unittest.TestCase):
         self.assertIn("opencode-test", ctx.exception.advice)
 
     def test_trust_and_protocol_keys_are_rejected(self):
-        for key in ("pinned", "sha256", "guard_sha256", "interjection_tier", "stdin_protocol",
+        for key in ("pinned", "sha256", "guard_sha256", "interjection_tier",
                     "session_protocol", "resume_protocol", "permission_bridge", "models_json"):
             with self.subTest(key=key):
                 with self.assertRaises(Fault) as ctx:
@@ -77,6 +77,24 @@ class AdaptersFileUnitTests(unittest.TestCase):
                                                    name="row-%s.json" % key))
                 self.assertIn(key, ctx.exception.advice)
                 self.assertNotIn("opencode-test", ADAPTER_CATALOG)
+
+    def test_claude_stream_json_is_the_only_custom_stdin_protocol(self):
+        from pangpang.execution import CLAUDE_STREAM_JSON, interjection_tier_of, stdin_protocol_for
+        row = dict(ROW, binary="host-claude", argv=[], stdin_protocol=CLAUDE_STREAM_JSON,
+                   use_when="Claude-compatible wrapper.")
+        path = self.write({"host-claude": row})
+        self.assertEqual(adapters_file.merge(path), ["host-claude"])
+        self.assertEqual(ADAPTER_CATALOG["host-claude"]["stdin_protocol"], CLAUDE_STREAM_JSON)
+        self.assertEqual(stdin_protocol_for("host-claude"), CLAUDE_STREAM_JSON)
+        self.assertEqual(interjection_tier_of(ADAPTER_CATALOG["host-claude"]), 3)
+        self.assertNotIn("interjection_tier", ADAPTER_CATALOG["host-claude"])
+        for bad in ("codex-app-server", "x", "", 1, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Fault) as ctx:
+                    adapters_file.load(self.write(
+                        {"host-claude": dict(row, stdin_protocol=bad)}, name="bad-protocol.json"))
+                self.assertIn("stdin_protocol", ctx.exception.advice)
+                self.assertEqual(ADAPTER_CATALOG["host-claude"]["stdin_protocol"], CLAUDE_STREAM_JSON)
 
     def test_builtin_collision_reports_line(self):
         path = self.write('{\n  "first-test": %s,\n  "codex": %s\n}' % (json.dumps(ROW), json.dumps(ROW)))

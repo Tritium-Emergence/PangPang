@@ -516,7 +516,13 @@ def acp_argv(argv):
 def executor_argv(spec, prompt, *, resume=False):
     """CLI argv. Stream-json keeps the prompt off the process list and appends
     `--flag=value` protocol flags, plus `--verbose` (Claude Code refuses
-    `--print` + stream-json without it). Permission flags already in argv stay.
+    `--print` + stream-json without it). `-p` is appended only when argv does
+    not already carry `-p` or `--print`: without print mode the CLI ignores
+    `--output-format` and writes the startup banner instead of tool NDJSON.
+    Flags are appended after the stored argv, so a `--settings <value>` pair
+    already there keeps its value and is not replaced by a protocol flag.
+    A wrapper that runs `claude --settings <file> "$@"` therefore forwards
+    those flags to the inner claude. Permission flags already in argv stay.
     `--fork-session` is refused: the session id is this attempt's own.
 
     Codex app-server rewrites a stored `exec` invocation into `app-server` on
@@ -545,6 +551,11 @@ def executor_argv(spec, prompt, *, resume=False):
         session = session_id_from_execution(spec["execution_id"])
         # Claude Code 2.1.x exits immediately when --print is combined with
         # --output-format=stream-json unless --verbose is also present.
+        # Append, never insert: a stored `--settings <file>` must keep that
+        # file as its value, and the protocol flags must stay behind it so a
+        # wrapper's `"$@"` forwards them to the inner claude.
+        if not any(part in ("-p", "--print") for part in argv):
+            argv.append("-p")
         argv += [
             "--input-format=stream-json",
             "--output-format=stream-json",
@@ -2771,7 +2782,10 @@ def supervise(directory):
                     result_text = result_text.replace(secret, "[redacted]")
             steer_rows = [row for row in read_steer_mailbox(directory)
                           if row.get("op") == "user" and isinstance(row.get("uuid"), str)]
-            receipt["interjection_tier"] = 1
+            # Same fact the catalog declared. A stream-json launch without
+            # tier 1 (a custom wrapper) must not grow an inject capability here.
+            if spec.get("interjection_tier") == 1:
+                receipt["interjection_tier"] = 1
             receipt["injects"] = [{"uuid": row["uuid"], "delivered": row["uuid"] in confirmed_ids}
                                   for row in steer_rows]
             if isinstance(result_text, str):

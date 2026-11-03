@@ -93,9 +93,9 @@ python -m pangpang.cli connector \
 - 本机传输上，`setup_agent` 的 `declare_adapter` 只打开一张批准卡。卡片展示将写入的完整命令和整行。操作者批准后，协调器把这一行合并进自己数据目录的 `adapters.json`，并纳入本机目录。未批准时不写文件。未知名称的 configure 仍然失败。这一步不启动该命令。
 - 已配对的连接器上，同一张批准卡由设备把这一行合并进设备自己的 `adapters.json`。协调器按主机记下获批的那一行，不写自己的 `adapters.json`，也不执行该命令。未批准时，未知名称的 configure 仍然失败。发现上报里的其他行不会被记入。
 
-- 格式：JSON 对象，键为自定义 adapter 名（小写字母数字连字符），值为 `{binary, argv, concurrency, priority, use_when, secret_env?, extra_env?}`。`binary` 为 PATH 中的单个可执行文件名（路径会在写入和读取时被拒绝），`argv` 为参数模板（字符串数组），`concurrency` 1–64，`priority` 0–1000，`use_when` 为模型可见的派单说明。
+- 格式：JSON 对象，键为自定义 adapter 名（小写字母数字连字符），值为 `{binary, argv, concurrency, priority, use_when, secret_env?, extra_env?, stdin_protocol?}`。`binary` 为 PATH 中的单个可执行文件名（路径会在写入和读取时被拒绝），`argv` 为参数模板（字符串数组），`concurrency` 1–64，`priority` 0–1000，`use_when` 为模型可见的派单说明。`stdin_protocol` 省略时仍是通用 stdin；要让 Claude Code 兼容包装命令把中途工具事件写进该次运行的 `output.log`，设为 `claude-stream-json`。
 - **argv 由获批的那一行决定**：模型不能自行写文件。写入只发生在操作者批准卡片上的整行之后。本机写入协调器数据目录；连接器由设备写入自己的文件。协调器下发的 configure 不含 argv，设备按自己目录里的行组装命令。
-- 自定义行**禁止**携带 `pinned`、`stdin_protocol`、`session_protocol`、`resume_protocol`、`interjection_tier`、`permission_bridge`、`models_json` 等内置协议/信任字段；未知字段一律拒启。自定义 CLI 只承诺通用 stdin 任务的可执行与回执，mid-turn inject、会话恢复、权限桥是内置 runner 的显式协议能力，加数据行不会自动获得。
+- 自定义行**禁止**携带 `pinned`、`session_protocol`、`resume_protocol`、`interjection_tier`、`permission_bridge`、`models_json`，也禁止除 `claude-stream-json` 以外的 `stdin_protocol`；未知字段一律拒启。`stdin_protocol` 只选择已有的 stream-json 启动：runner 在每次启动时把与内置 Claude Code 相同的参数追加到已保存的 argv 之后（argv 里还没有 `-p` / `--print` 时补一个 `-p`）。追加发生在 `--settings <值>` 之后，所以包装脚本若是 `claude --settings <file> "$@"`，这些 flag 会原样到达内部的 claude。这一行不获得 mid-turn inject、会话恢复或权限桥。改的是目录里的协议名，不是 installation 里已经固化的 argv：重启读取 `adapters.json` 的进程后，下一次任务即生效，不必为了这个字段重新 configure。包装命令必须转发参数；只执行固定的 `claude --settings …` 而不带 `"$@"` 时，runner 追加的 flag 到不了内部的 claude。
 - 启动时严格校验（JSON 合法性、大小/条数/argv 长度上限、env 键格式、文件属主与权限）；任何违规**拒启**并指明文件、行号与字段。
 - **设备是 argv 的唯一来源**：start 下发 payload 不含 argv，connector 执行只用设备自己 installation 记录里的 argv；云端与设备 catalog 不一致不会"悄悄执行另一条命令"，也只影响云端侧调度元数据（priority/use_when/concurrency）。设备侧 installation 的任何变更由既有 `policy_digest` 合同拦截（`local_policy_changed_probe_and_resubmit`）。
 - 设备侧修改 `adapters.json` 的 argv **不影响已注册的 installation**：argv 在 configure 时已固化进 installation 记录，要重新 configure 才生效。连接器上与已获批行不同的写入会被拒绝，文件保持原样。
