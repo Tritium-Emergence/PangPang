@@ -53,7 +53,7 @@ export function Markdown({src}: {src: string}) {
     if (/^```/.test(line)) {
       i++; const buf: string[] = [];
       while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
-      i++; blocks.push(<pre key={k()} className="md-pre overflow-auto rounded-lg bg-surface p-3 text-xs"><code>{buf.join('\n')}</code></pre>);
+      i++; blocks.push(<pre key={k()} className="md-pre rounded-lg bg-surface p-3 text-xs"><code>{buf.join('\n')}</code></pre>);
       continue;
     }
     if (hr(line)) { blocks.push(<hr key={k()} className="md-hr" />); i++; continue; }
@@ -62,7 +62,7 @@ export function Markdown({src}: {src: string}) {
       const rows: string[][] = [];
       while (i < lines.length && lines[i].trim() && lines[i].includes('|')) rows.push(cells(lines[i++]));
       const cls = (n: number) => align[n]?.startsWith(':') && align[n]?.endsWith(':') ? 'text-center': align[n]?.endsWith(':') ? 'text-right': 'text-left';
-      blocks.push(<div key={k()} className="md-table-scroll"><table className="md-table"><thead><tr>{headers.map((v, n) => <th key={k()} className={cls(n)}>{inline(v, k)}</th>)}</tr></thead><tbody>{rows.map((row) => <tr key={k()}>{headers.map((_, n) => <td key={k()} className={cls(n)}>{inline(row[n] || '', k)}</td>)}</tr>)}</tbody></table></div>);
+      blocks.push(<div key={k()} className="md-table-scroll"><table className={headers.length > 6 ? 'md-table md-table-reflow' : 'md-table'}><thead><tr>{headers.map((v, n) => <th key={k()} className={cls(n)}>{inline(v, k)}</th>)}</tr></thead><tbody>{rows.map((row) => <tr key={k()}>{headers.map((_, n) => <td key={k()} className={cls(n)}>{inline(row[n] || '', k)}</td>)}</tr>)}</tbody></table></div>);
       continue;
     }
     const h = line.match(/^(#{1,4})\s+(.*)$/);

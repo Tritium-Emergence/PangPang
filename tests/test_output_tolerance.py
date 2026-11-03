@@ -338,6 +338,7 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(task['error'], 'required_output_missing')
         self.assertEqual(work.get('pending_required_outputs'), ['final.docx'])
         self.assertEqual(dep['outcome'], 'failed')
+        self.assertEqual(dep['result_payload'].get('missing_outputs'), ['final.docx'])
 
     def test_79_raw_receipt_preserved_while_business_fails(self):
         # (RCB/SIS layering): the raw receipt keeps the TRUE execution fact
@@ -387,6 +388,7 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(task['error'], 'declared_output_missing')
         self.assertEqual(task['receipt']['status'], 'succeeded')
         self.assertEqual(dep['outcome'], 'failed')
+        self.assertEqual(dep['result_payload'].get('missing_outputs'), ['out.docx'])
         self.assertNotIn('declared_output_missing', work.get('error') or '')
         self.assertNotEqual(work['status'], 'delivered')
         self._finish_adjudicated(work['id'])

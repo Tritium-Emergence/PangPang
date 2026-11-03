@@ -5958,6 +5958,17 @@ class Service:
         # (receipt.ended - receipt.started); total_s = created → now (incl. queue,
         # retries) which is what the user's wall clock sees.
         rc = task.get("receipt") or {}
+        # The chat names the files that failed the check. Same O(#outputs)
+        # helpers that adjudicated the error, read off the receipt already stored
+        # on the task. An empty set stays off the payload.
+        if error == "required_output_missing":
+            missing_outputs = self._required_outputs_split(task, rc)[1]
+        elif error == "declared_output_missing":
+            missing_outputs = self._declared_output_missing(rc)
+        else:
+            missing_outputs = ()
+        if missing_outputs:
+            payload["missing_outputs"] = list(missing_outputs)
         try:
             executor_s = round(float(rc["ended"]) - float(rc["started"]), 1) if rc.get("ended") and rc.get("started") else None
         except (TypeError, ValueError):

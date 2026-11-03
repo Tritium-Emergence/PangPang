@@ -3,7 +3,7 @@ import type {Message, Snapshot} from '../types';
 import {useTranslation} from 'react-i18next';
 import {Markdown, unwrapFrame} from '../markdown';
 import {MediaPreview} from './MediaPreview';
-import {clock, dateTime, exchangeLabel} from '../display';
+import {clock, dateTime, exchangeLabel, taskLabel} from '../display';
 import {COPY_FEEDBACK_MS, messagePlainText} from '../pure';
 import {Value, hasValue} from './Facts';
 
@@ -41,7 +41,7 @@ export function MessageBubble({m, snap, botName, onReply}: {
 ): typeof m.content === 'string' ? (
           <Markdown src={String(unwrapFrame(m.content))} />
 ): (
-          <pre className="evidence-raw overflow-auto text-xs">{JSON.stringify(m.content, null, 2)}</pre>
+          <Value value={m.content} />
 )}
       </div>
       {m.exchange_id ? (() => { const ex = snap.exchanges.find((x) => x.id === m.exchange_id); return ex ? <p className="exchange-status text-xs text-muted">{t('msg.exchange')} · {ex.status && exchangeLabel[ex.status] ? t(exchangeLabel[ex.status]): ex.status}</p>: null; })(): null}
@@ -97,6 +97,7 @@ function parse(content: Message['content']): Record<string, any> | null {
 function StructuredPayload({content, kind, botName}: {content: Message['content']; kind: string; botName: (id?: string) => string}) {
   const {t} = useTranslation();
   const p = parse(content);
+  if (kind === 'execution_result' && p && !Array.isArray(p) && typeof p === 'object') return <ExecutionResult p={p} />;
   if (!p || Array.isArray(p) || typeof p !== 'object') return <details><summary>{kind === 'handoff' ? t('msg.handoffDetails'): t('msg.resultEvidence')}</summary><Value value={content} /></details>;
   const labels: Record<string, string> = kind === 'handoff'
     ? {target_bot_id: t('msg.field.targetBot'), goal: t('msg.field.goal'), request: t('msg.field.request'), acceptance: t('msg.field.acceptance'), constraints: t('msg.field.constraints'), facts: t('msg.field.facts'), completed: t('msg.field.completed'), open_questions: t('msg.field.openQuestions'), mode: t('msg.field.mode')}
@@ -111,5 +112,23 @@ function StructuredPayload({content, kind, botName}: {content: Message['content'
   return <div className="handoff-card">
     {Object.entries(labels).map(([key, title]) => hasValue(p[key]) ? <section key={key} data-field={key} className="mt-2 first:mt-0"><h4 className="text-xs font-semibold text-muted">{title}</h4><div className={['constraints', 'open_questions', 'error', 'verification_status'].includes(key) ? 'text-sm text-warn': 'text-sm'}>{render(key, p[key])}</div></section>: null)}
     {hasValue(rest) ? <section className="mt-2"><h4 className="text-xs font-semibold text-muted">{t('msg.field.other')}</h4><Value value={rest} /></section>: null}
+  </div>;
+}
+
+// An executor result is a verdict, not a document. One human line, the missing
+// output names, and the result text when it succeeded. task_id, notice, and
+// timing stay in the payload for the Bot and are not shown.
+function ExecutionResult({p}: {p: Record<string, any>}) {
+  const {t} = useTranslation();
+  const ok = p.status === 'succeeded';
+  const status = taskLabel[p.status] ? t(taskLabel[p.status]) : t('task.unknown');
+  const code = typeof p.error === 'string' && p.error ? p.error : '';
+  const reason = code ? t(`msg.exec.reason.${code}`, {defaultValue: t('msg.exec.reason.other', {code})}) : '';
+  const missing = Array.isArray(p.missing_outputs) ? p.missing_outputs.filter((x: unknown) => typeof x === 'string' && x) : [];
+  return <div className="exec-result" data-status={p.status}>
+    <p className={ok ? 'text-sm' : 'text-sm text-warn'}>{reason ? t('msg.exec.line', {status, reason}) : status}{p.late ? ` ${t('msg.exec.late')}` : ''}</p>
+    {missing.length ? <p className="text-sm text-warn">{t('msg.exec.missingOutputs', {names: missing.join('、')})}</p> : null}
+    {p.side_effects_unknown ? <p className="text-sm text-warn">{t('msg.exec.sideEffectsUnknown')}</p> : null}
+    {ok && typeof p.result_text === 'string' && p.result_text.trim() ? <p className="exec-text mt-1 text-sm">{p.result_text}{p.result_text_truncated ? ` ${t('msg.exec.truncated')}` : ''}</p> : null}
   </div>;
 }

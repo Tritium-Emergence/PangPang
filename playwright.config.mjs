@@ -19,6 +19,6 @@ export default defineConfig({
     {name: 'studio', testMatch: /studio-.*\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8798'}},
     {name: 'correction', testMatch: /correction-.*\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8797'}},
     {name: 'activity', testMatch: /activity\.spec\.mjs/, use: {...base, baseURL: 'http://127.0.0.1:8796'}},
-...(process.env.P21_WEBKIT ? [{name: 'webkit-mobile', testMatch: /studio-(?:mobile|parity-(?:mobile|boundaries))\.spec\.mjs/, use: {...base, browserName: 'webkit', isMobile: true, hasTouch: true, baseURL: 'http://127.0.0.1:8798'}}]: []),
+...(process.env.P21_WEBKIT ? [{name: 'webkit-mobile', testMatch: /studio-(?:mobile(?:-overflow)?|parity-(?:mobile|boundaries))\.spec\.mjs/, use: {...base, browserName: 'webkit', isMobile: true, hasTouch: true, baseURL: 'http://127.0.0.1:8798'}}]: []),
   ],
 });

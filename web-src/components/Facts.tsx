@@ -8,9 +8,9 @@ import {dateTime} from '../display';
 export const hasValue = (v: unknown): boolean =>
   v != null && v !== '' && (!Array.isArray(v) ? typeof v !== 'object' || Object.keys(v as object).length > 0: v.length > 0);
 
-// Evidence/output ITEMS are objects like {path, bytes, sha256}; showed their
-// human-meaningful field on one line rather than dumping JSON into the conversation.
-// Scoped to items on purpose: a whole object (the '其他' bag) must keep every field.
+// Evidence/output ITEMS are objects like {path, bytes, sha256}; show their
+// human-meaningful field on one line. Any other object is labelled lines, never a
+// JSON dump — the product UI does not render payloads as source.
 const itemText = (v: unknown) => v && typeof v === 'object' && !Array.isArray(v)
   ? [(v as Record<string, unknown>).text, (v as Record<string, unknown>).path].find((x) => typeof x === 'string' && x) as string | undefined
 : undefined;
@@ -21,7 +21,7 @@ export function Value({value}: {value: unknown}) {
     const t = itemText(v);
     return <li key={i}>{t ? <span>{t}</span>: <Value value={v} />}</li>;
   })}</ul>;
-  if (typeof value === 'object') return <pre className="evidence-raw overflow-auto text-xs">{JSON.stringify(value, null, 2)}</pre>;
+  if (typeof value === 'object') return <dl className="kv">{Object.entries(value as Record<string, unknown>).filter(([, v]) => hasValue(v)).map(([k, v]) => <div key={k}><dt className="inline text-muted">{k}: </dt><dd className="inline"><Value value={v} /></dd></div>)}</dl>;
   return <span>{String(value)}</span>;
 }
 export function Facts({value, labels}: {value?: Record<string, unknown>; labels: Record<string, string>}) {

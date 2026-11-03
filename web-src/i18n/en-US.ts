@@ -368,6 +368,18 @@ export default {
 
     mode: { deliverToUser: 'Deliver to user', returnToSender: 'Return to sender' },
 
+    exec: {
+      line: '{{status}}: {{reason}}',
+      missingOutputs: 'Missing outputs: {{names}}', late: '(late result; work progress unchanged)', truncated: '(showing the end only)',
+      sideEffectsUnknown: 'Execution stopped, but whether earlier actions took effect is unknown. Check before retrying.',
+      reason: {
+        required_output_missing: 'Required output files are missing', declared_output_missing: 'Declared output files were not produced',
+        queue_timeout: 'Timed out in the queue before starting', execution_vanished: 'The execution disappeared mid-run', execution_state_unknown: 'Execution state unknown',
+        capability_hold: 'Held: the device lacks a required capability', recovery_poison_cap: 'Stopped retrying after repeated recovery failures', receipt_missing: 'No execution receipt was received',
+        other: 'Reason: {{code}}',
+      },
+    },
+
     field: {
 
       targetBot: 'Handoff to', goal: 'Goal', request: 'Request', acceptance: 'Acceptance criteria', constraints: 'Constraints',
