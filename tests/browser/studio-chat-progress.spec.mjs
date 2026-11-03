@@ -83,6 +83,8 @@ test('denseline updates from activity while status and revision stay put', async
   await expect(line).toContainText(`最后日志 ${hms(LOG_A)}`);
   await expect(line).toContainText('read src/a.py');
   await expect(line).toContainText('·+1');
+  await expect(line).not.toContainText('等待首条工具');
+  await expect(line).not.toContainText('启动中');
   await expect(line).not.toContainText('older.md');
   await expect(line).not.toContainText('未声明必需文件');
   await expect(line).not.toContainText('日志可能已达上限');
@@ -164,4 +166,40 @@ test('an idle chat does not poll the snapshot', async ({page}) => {
   await page.waitForTimeout(10000);
   expect(counts.snapshot).toBe(snap);
   expect(counts.messages).toBe(msgs);
+});
+
+test('running with an empty recent list shows the startup phrase, then clears when finished', async ({page}) => {
+  let finished = false;
+  await page.route('**/api/v1/snapshot', async (route) => {
+    const response = await route.fetch();
+    if (!response.ok()) return route.fulfill({response});
+    const s = await response.json();
+    s.turns = [];
+    s.exchanges = [];
+    if (finished) {
+      s.work = [{id: 'herbs', owner_bot_id: 'bot-main', goal: '香草三步指南', kind: 'conversation', status: 'delivered', attention: 'settled', created: 100}];
+      s.tasks = [{...runningTask('step-a', 1_700_000_000, {status: 'cancelled', last_log_at: LOG_A, recent: []}), status: 'cancelled'}];
+    } else {
+      s.work = [{id: 'herbs', owner_bot_id: 'bot-main', goal: '香草三步指南', kind: 'conversation', status: 'active', attention: 'working', created: 100}];
+      s.tasks = [runningTask('step-a', 1_700_000_000, {status: 'running', last_log_at: LOG_A, recent: []})];
+    }
+    await route.fulfill({json: s});
+  });
+  await page.route('**/api/v1/bots/bot-main/messages', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    if (!response.ok()) return route.fulfill({response});
+    await route.fulfill({json: [{id: 'u-herbs', created: 1, bot_id: 'bot-main', from: 'user', kind: 'user', content: '帮我做香草三步指南', work_id: 'herbs'}]});
+  });
+  await login(page);
+  const line = page.getByTestId('chat-progress-line');
+  const live = page.locator('.thinking[role="status"]');
+  await expect(line).toContainText(`最后日志 ${hms(LOG_A)}`);
+  await expect(line).toContainText('启动中 / 等待首条工具');
+  await expect(line).not.toContainText('src/');
+  await expect(live).toContainText('进行中…');
+  await expect(live).not.toContainText('等待首条工具');
+  finished = true;
+  await expect(line).toHaveCount(0, {timeout: 12000});
+  await expect(live).toHaveCount(0);
 });
