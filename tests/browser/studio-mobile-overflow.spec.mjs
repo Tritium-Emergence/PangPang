@@ -107,6 +107,8 @@ test('approval and recovery cards wrap long URLs and do not pan the transcript',
   const log = page.getByTestId('chat-log');
   await expect(log.locator('.tcard.awaiting', {hasText: url.slice(0, 40)})).toBeVisible();
   await expect(log.locator('.bubble.warning[data-task="recovery-long-url"]')).toContainText(url.slice(0, 40));
+  const axis = await log.evaluate((el) => getComputedStyle(el).overflowX);
+  expect(axis === 'auto' || axis === 'scroll').toBeFalsy();
   const m = await measure(page);
   expect(m.over, JSON.stringify(m.over)).toEqual([]);
   expect(m.pans, JSON.stringify(m.pans)).toEqual([]);
@@ -114,5 +116,36 @@ test('approval and recovery cards wrap long URLs and do not pan the transcript',
   expect(m.messages.left).toBe(0);
   expect(m.doc.sw).toBeLessThanOrEqual(m.doc.cw + 1);
   expect(m.doc.left).toBe(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('a long work goal on the progress title wraps and cannot pan the transcript', async ({page}) => {
+  await page.setViewportSize({width: 390, height: 844});
+  const url = 'https://example.com/' + 'g'.repeat(200);
+  await project(page, (s) => {
+    s.turns = [];
+    s.work = s.work || [];
+    s.work.push({id: 'progress-long', owner_bot_id: 'bot-main', goal: url, kind: 'conversation', attention: 'working', status: 'active', created: 200});
+  }, [msg('u-prog', 1, '继续这个工作', {kind: 'user', from: 'user', work_id: 'progress-long'})]);
+  await login(page);
+  const title = page.locator('.bubble.thinking .source');
+  await expect(title).toContainText(url.slice(0, 48));
+  await expect(title).not.toHaveCSS('white-space', 'nowrap');
+  const box = await title.evaluate((el) => {
+    el.scrollLeft = 10000;
+    return {sw: el.scrollWidth, cw: el.clientWidth, left: el.scrollLeft, ox: getComputedStyle(el).overflowX};
+  });
+  expect(box.sw).toBeLessThanOrEqual(box.cw + 1);
+  expect(box.left).toBe(0);
+  expect(box.ox === 'visible' || box.ox === 'clip').toBeTruthy();
+  const log = page.getByTestId('chat-log');
+  const axis = await log.evaluate((el) => getComputedStyle(el).overflowX);
+  // Author CSS is overflow-x:clip. Engines compute that to hidden beside overflow-y:auto.
+  expect(axis === 'auto' || axis === 'scroll').toBeFalsy();
+  const m = await measure(page);
+  expect(m.over, JSON.stringify(m.over)).toEqual([]);
+  expect(m.pans, JSON.stringify(m.pans)).toEqual([]);
+  expect(m.messages.sw).toBeLessThanOrEqual(m.messages.cw + 1);
+  expect(m.messages.left).toBe(0);
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
