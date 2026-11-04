@@ -6,6 +6,7 @@ from test_bot_runtime import config
 from pangpang.service import Service
 from pangpang.runtime import Runtime
 from pangpang.planner_prompt import PLANNER_SYSTEM, detect_language, response_language_block
+from pangpang.runtime import TOOLS
 
 
 class PlannerPromptTests(unittest.TestCase):
@@ -30,6 +31,17 @@ class PlannerPromptTests(unittest.TestCase):
         self.assertTrue(PLANNER_SYSTEM.startswith("You are a long-running staff Bot of PangPang"))
         # Canonical prompt is English: no CJK should remain in it.
         self.assertFalse(any('一' <= c <= '鿿' for c in PLANNER_SYSTEM))
+        self.assertIn("status is awaiting_approval", PLANNER_SYSTEM)
+        self.assertIn("spec_digest", PLANNER_SYSTEM)
+        self.assertIn("Missing permission_asks or request_id is not 'no approval record'", PLANNER_SYSTEM)
+
+    def test_tool_descriptions_distinguish_ops_approval_from_permission_asks(self):
+        described = {item["function"]["name"]: item["function"]["description"] for item in TOOLS}
+        for name in ("submit_task", "inspect_task", "resolve_permission"):
+            text = described[name]
+            self.assertIn("awaiting_approval", text, name)
+            self.assertIn("spec_digest", text, name)
+            self.assertIn("not 'no approval record'", text, name)
 
     def test_detect_language(self):
         self.assertEqual(detect_language('帮我查一下阿里巴巴的股价'), 'zh')

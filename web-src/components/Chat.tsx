@@ -7,7 +7,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
-import {CHAT_PROGRESS_REFRESH_MS, chatActivityLine, chatProgressRefreshDue, pickChatProgressTask, visibleChatMessages} from '../pure';
+import {CHAT_PROGRESS_REFRESH_MS, chatActivityLine, chatProgressRefreshDue, pickChatProgressTask, splitPinnedTimeline, visibleChatMessages} from '../pure';
 import {conversationActivity, currentWorkId} from '../scope';
 
 // Chat log. RCB-critical:
@@ -28,9 +28,10 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   // setup_result stays stored for the model. The timeline omits that payload.
   const visible = visibleChatMessages(store.messages);
 
-  // Approval cards for this bot's work (inline, chat-ordered). Only tasks still waiting
-  // for the user: an approved task's record lives with the task (Inspector / Work), not
-  // as a growing pile of history in the conversation.
+  // Approval cards for this bot's work. Only tasks still waiting for the user:
+  // an approved task's record lives with the task (Inspector / Work), not as a
+  // growing pile of history in the conversation. The card is pinned after every
+  // message so a later line cannot bury the one-tap approve control.
   const myWorkIds = new Set((snap.work || []).filter((w) => w.owner_bot_id === botId).map((w) => w.id));
   const taskCards = (snap.tasks || []).filter((t) => myWorkIds.has(t.work_id!) && t.status === 'awaiting_approval');
 
@@ -85,14 +86,14 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
 
   const botName = (id?: string) => snap.bots.find((b) => b.id === id)?.name || id || t('chat.botFallback');
   const pendingSends = store.pendingSends.filter((p) => p.botId === botId);
-  const timeline = [
-...visible.map((m) => ({key: 'message-' + m.id, at: m.created || 0, node: <MessageBubble m={m} snap={snap} botName={botName} onReply={(workId) => {
-    const goal = snap.work.find((w) => w.id === workId)?.goal || '';
-    store.setContinueTarget({id: workId, goal});
-  }} />})),
-...taskCards.map((task) => ({key: 'approval-' + task.id, at: task.created || 0, node: <TaskCard task={task} store={store} />})),
-...pendingSends.map((p) => ({key: 'pending-' + p.id, at: p.created || 0, node: <div data-testid="pending-msg"><MessageBubble m={{id: p.id, kind: 'user', from: 'user', content: p.text, created: p.created}} snap={snap} botName={botName} /></div>})),
-  ].sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
+  const {flow, pinned} = splitPinnedTimeline([
+    ...visible.map((m) => ({key: 'message-' + m.id, at: m.created || 0, node: <MessageBubble m={m} snap={snap} botName={botName} onReply={(workId) => {
+      const goal = snap.work.find((w) => w.id === workId)?.goal || '';
+      store.setContinueTarget({id: workId, goal});
+    }} />})),
+    ...taskCards.map((task) => ({key: 'approval-' + task.id, at: task.created || 0, pin: true as const, node: <TaskCard task={task} store={store} />})),
+    ...pendingSends.map((p) => ({key: 'pending-' + p.id, at: p.created || 0, node: <div data-testid="pending-msg"><MessageBubble m={{id: p.id, kind: 'user', from: 'user', content: p.text, created: p.created}} snap={snap} botName={botName} /></div>})),
+  ]);
   const curId = currentWorkId(botId, store.messages);
   const current = snap.work.find((w) => w.id === curId);
   // A tab may still be reading a delivered conversation while this Bot works on
@@ -152,7 +153,7 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
           </div>
 ): null}
 
-        {timeline.map((item) => <div key={item.key} data-timeline={item.key} data-created={item.at}>{item.node}</div>)}
+        {flow.map((item) => <div key={item.key} data-timeline={item.key} data-created={item.at}>{item.node}</div>)}
 
         {unknownTasks.map((task: Task) => (
           <RecoveryCard key={task.id} task={task} snap={snap} store={store} />
@@ -172,6 +173,11 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
       </div>
       {/* Outside the live region: the clock changes on each poll and must not be announced. */}
       {progress && progressLine ? <div data-testid="chat-progress-line" aria-hidden="true" className="-mt-1 mb-2 max-w-[80%] px-4 text-xs text-muted">{progressLine}</div>: null}
+      {pinned.length ? (
+        <div data-testid="approval-pin" className="sticky bottom-0 z-10 bg-surface">
+          {pinned.map((item) => <div key={item.key} data-timeline={item.key} data-created={item.at} data-pinned="approval">{item.node}</div>)}
+        </div>
+      ): null}
     </div>
 );
 }

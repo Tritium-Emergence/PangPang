@@ -128,14 +128,15 @@ test('warm palette and desktop scrollbars match ', async ({page}) => {
   expect(await page.locator('#hosts-view').evaluate((e) => getComputedStyle(e).scrollbarWidth)).not.toBe('none');
 });
 
-test('only an awaiting approval card joins the chat timeline, at its created-time position', async ({page}) => {
+test('only an awaiting approval card joins the chat, pinned after later messages', async ({page}) => {
   await project(page, (s) => {
     s.work = [work('timeline')];
-    s.tasks = [{id: 'historical', work_id: 'timeline', created: 200, approved_at: 240, status: 'succeeded', prompt: '旧批准'}, {id: 'pending', work_id: 'timeline', created: 250, status: 'awaiting_approval', prompt: '待批准'}];
+    s.tasks = [{id: 'historical', work_id: 'timeline', created: 200, approved_at: 240, status: 'succeeded', prompt: '旧批准'}, {id: 'pending', work_id: 'timeline', created: 250, status: 'awaiting_approval', prompt: '待批准', spec_digest: 'digest-pending'}];
   }, [msg('later', 300, '后来的消息'), msg('earlier', 100, '更早的消息')]);
   await login(page);
   // An already-approved task is a record of the task, not a conversation entry.
-  expect(await page.locator('#messages [data-timeline]').evaluateAll((es) => es.map((e) => e.dataset.timeline))).toEqual(['message-earlier', 'approval-pending', 'message-later']);
+  // The waiting card is pinned after later messages so it is not buried at created time.
+  expect(await page.locator('#messages [data-timeline]').evaluateAll((es) => es.map((e) => e.dataset.timeline))).toEqual(['message-earlier', 'message-later', 'approval-pending']);
   await expect(page.locator('.tcard')).toHaveCount(1);
   await expect(page.getByTestId('chat-log')).not.toContainText('旧批准');
   await expect(page.locator('.source time')).toHaveCount(2);
@@ -147,6 +148,23 @@ test('only an awaiting approval card joins the chat timeline, at its created-tim
   const refreshed = page.waitForResponse(r => r.url().endsWith('/snapshot'));
   await page.locator('#refresh').click(); await (await refreshed).finished();
   expect(await page.locator('[data-timeline="approval-pending"]').evaluate(e => e === window.timelineNode)).toBe(true);
+});
+
+test('an awaiting approval card stays on screen after many newer messages', async ({page}) => {
+  const later = Array.from({length: 24}, (_, i) => msg('later-' + i, 400 + i, '后来的消息 ' + i + ' ' + '内容'.repeat(12)));
+  await project(page, (s) => {
+    s.work = [work('timeline')];
+    s.tasks = [{id: 'pending', work_id: 'timeline', created: 50, status: 'awaiting_approval', prompt: '待批准的写操作', spec_digest: 'digest-pending'}];
+  }, [msg('earlier', 10, '更早的消息'), ...later]);
+  await login(page);
+  const ids = await page.locator('#messages [data-timeline]').evaluateAll((es) => es.map((e) => e.dataset.timeline));
+  expect(ids[0]).toBe('message-earlier');
+  expect(ids.at(-1)).toBe('approval-pending');
+  expect(ids.filter((id) => id === 'approval-pending')).toHaveLength(1);
+  const approve = page.locator('[data-pinned="approval"]').getByRole('button', {name: '批准执行'});
+  await expect(approve).toBeInViewport();
+  await page.locator('#messages').evaluate((el) => { el.scrollTop = 0; });
+  await expect(approve).toBeInViewport();
 });
 
 test('structured handoff/result and peer exchange retain every fact and unknown fields', async ({page}) => {

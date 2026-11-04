@@ -60,6 +60,30 @@ export function visibleChatMessages<M extends ChatTimelineMessage>(messages: rea
   ));
 }
 
+export interface ChatTimelineItem {
+  key: string;
+  at: number;
+  pin?: boolean;
+}
+
+// Pinned rows stay after every unpinned row. An awaiting-approval card uses
+// this so a later message cannot bury the one-tap approve control.
+export function orderChatTimeline<T extends ChatTimelineItem>(items: readonly T[]): T[] {
+  return items.map((item, index) => ({item, index})).sort((a, b) => {
+    const ap = a.item.pin ? 1 : 0;
+    const bp = b.item.pin ? 1 : 0;
+    if (ap !== bp) return ap - bp;
+    if (a.item.at !== b.item.at) return a.item.at - b.item.at;
+    const byKey = a.item.key.localeCompare(b.item.key);
+    return byKey || a.index - b.index;
+  }).map((row) => row.item);
+}
+
+export function splitPinnedTimeline<T extends ChatTimelineItem>(items: readonly T[]): {flow: T[]; pinned: T[]} {
+  const ordered = orderChatTimeline(items);
+  return {flow: ordered.filter((item) => !item.pin), pinned: ordered.filter((item) => item.pin)};
+}
+
 export interface BotListItem {id: string; kind?: string}
 export interface ConversationStamp {bot_id?: string; created?: number}
 
