@@ -49,7 +49,11 @@ body {
 #composer.composer-root { padding-bottom: calc(0.75rem + env(safe-area-inset-bottom)); }
 #messages, #work-view, #hosts-view { min-height: 0; min-width: 0; }
 #composer, .shell-root main > header { flex-shrink: 0; min-width: 0; }
-#messages { container-type: inline-size; container-name: transcript; }
+/* Vertical scroll only. overflow-x:clip is the value that does not ask for a
+   horizontal scrollport. Current engines compute that to hidden when overflow-y
+   is auto; visible would compute back to auto. Wide lines still have to wrap —
+   this declaration is not what keeps them inside. */
+#messages { container-type: inline-size; container-name: transcript; overflow-y: auto; overflow-x: clip; }
 #composer { container-type: inline-size; container-name: composer; }
 #work-view { container-type: inline-size; container-name: work; }
 #setup-panel, #capability-list, #notice { flex-shrink: 0; max-height: 25dvh; overflow-y: auto; }
@@ -98,10 +102,38 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 .modal.lightbox { padding: 0; background: transparent; border: 0; width: fit-content; min-width: 64px; min-height: 64px; max-width: 96vw; max-height: 94dvh; overflow: visible; }
 .lightbox-img { max-width: 96vw; max-height: 90dvh; object-fit: contain; }
 .lightbox-close { position: absolute; right: 4px; top: 4px; border-radius: 50%; width: 44px; height: 44px; background: var(--raised); }
-.md-table-scroll { max-width: 100%; overflow-x: auto; }
-.md-table { border-collapse: collapse; white-space: normal; }
-.md-table th, .md-table td { border: 1px solid var(--line); padding: 6px 10px; }
+/* Wide tables and code stay inside the bubble. Cells and lines wrap; nothing
+   here is a horizontal scrollport. */
+.md-table-scroll { display: block; width: 100%; max-width: 100%; min-width: 0; }
+.md-table { width: 100%; max-width: 100%; table-layout: fixed; border-collapse: collapse; white-space: normal; }
+.md-table th, .md-table td {
+  border: 1px solid var(--line);
+  padding: 6px clamp(2px, 0.7cqi, 10px);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+  vertical-align: top;
+}
 .md-table th { background: var(--soft); }
+/* More columns than a readable grid can hold (the reading measure is 42em).
+   Cells wrap onto extra lines inside the row instead of widening the table. */
+.md-table-reflow, .md-table-reflow thead, .md-table-reflow tbody { display: block; width: 100%; max-width: 100%; }
+.md-table-reflow tr { display: flex; flex-wrap: wrap; width: 100%; max-width: 100%; }
+.md-table-reflow th, .md-table-reflow td {
+  flex: 1 1 8rem;
+  width: auto;
+  min-width: min(100%, 7rem);
+  max-width: 100%;
+}
+#messages .md-pre, #messages .md-pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+/* The UA stylesheet indents dd by 40px. Nested facts must not use that indent
+   to spill out of the bubble. */
+#messages .kv, #messages .kv dd { margin: 0; }
 .md-h, .md-p, .md-list, .md-quote, .md-pre { margin: 6px 0; }
 .md-hr { border-top: 1px solid var(--line); margin: 12px 0; }
 /* File actions, the message field, and send share one row at every pane width. */
@@ -172,13 +204,44 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
 #messages .body,
 #messages .bubble.tcard,
 #messages .bubble.warning {
+  /* 100% on a shrink-to-fit bubble can fail to resolve (the iOS pan). cqi is the
+     transcript's own content width, which does not depend on the bubble. */
   max-width: min(100%, 72ch, 42em);
+  max-width: min(100cqi, 72ch, 42em);
   padding-left: clamp(0.75rem, 1.2cqi, 1rem);
   padding-right: clamp(0.75rem, 1.2cqi, 1rem);
+}
+/* Approval and recovery cards are not .body. A long URL in the prompt or the
+   work goal is one unbreakable line unless these cards wrap it themselves. */
+#messages .bubble.tcard,
+#messages .bubble.warning {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* Code and tables need a definite containing block so their 100% width is the
+   column, not their own min-content. Plain text still shrink-wraps. */
+#messages .body:has(.md-pre, .md-table-scroll) {
+  width: min(100%, 72ch, 42em);
+  width: min(100cqi, 72ch, 42em);
 }
 #messages .bubble.thinking,
 #messages [data-testid="stream-preview"] {
   max-width: min(100%, 72ch, 42em);
+  max-width: min(100cqi, 72ch, 42em);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* The progress title used to be truncate (nowrap + hidden). A full Work goal
+   that is one long URL then stayed one line. Wrap it inside the bubble. */
+#messages .bubble.thinking .source,
+#messages [data-testid="chat-progress-line"] {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 #messages .body,
 #messages .md-p,

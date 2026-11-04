@@ -140,7 +140,7 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
       id="messages"
       data-testid="chat-log"
       ref={scrollRef}
-      className="scroll-none flex-1 overflow-auto px-5 py-4"
+      className="scroll-none flex-1 px-5 py-4"
     >
       <div aria-live="polite" className={showEmpty ? 'h-full' : undefined}>
         {showEmpty ? (
@@ -160,7 +160,7 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
 
         {progress ? <div className="bubble thinking my-2 max-w-[80%] text-sm" role="status">
           {/* One Bot timeline can hold several live Works, so a Work-scoped bubble names its Work. */}
-          <div className="source truncate text-xs text-muted">{botName(botId)}{!active.length && progressWork ? ` · ${progressWork.goal}`: ''}</div>
+          <div className="source text-xs text-muted">{botName(botId)}{!active.length && progressWork ? ` · ${progressWork.goal}`: ''}</div>
           <div className="body mt-1 rounded-2xl bg-raised px-4 py-2 text-muted shadow-sm">{progress}</div>
         </div>: null}
         {livePreviews.map(([turnId, p]) => (

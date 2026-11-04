@@ -231,6 +231,17 @@ export default {
     copy: '拷贝', reply: '回复',
     handoffDetails: '工作交接详情', resultEvidence: '结果与证据', botReportNotVerified: 'Bot 自述，未经独立核验',
     mode: { deliverToUser: '交付给用户', returnToSender: '回交发起方' },
+    exec: {
+      line: '{{status}}：{{reason}}',
+      missingOutputs: '缺少产出物：{{names}}', late: '（迟到的结果，已不改变工作进度）', truncated: '（仅显示末尾部分）',
+      sideEffectsUnknown: '执行已停止，但之前的操作是否已生效未知，请先核实再重试。',
+      reason: {
+        required_output_missing: '缺少要求的产出文件', declared_output_missing: '声明的产出文件没有生成',
+        queue_timeout: '排队超时，没有开始执行', execution_vanished: '执行进程中途消失', execution_state_unknown: '执行状态未知',
+        capability_hold: '设备能力不足，任务被挂起', recovery_poison_cap: '多次恢复失败，已停止重试', receipt_missing: '没有收到执行回执',
+        other: '原因：{{code}}',
+      },
+    },
     field: {
       targetBot: '交接给', goal: '目标', request: '要求', acceptance: '验收标准', constraints: '约束',
       facts: '已知事实', completed: '已完成', openQuestions: '待澄清', mode: '交付方式', summary: '结果',

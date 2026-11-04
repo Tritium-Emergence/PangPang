@@ -30,9 +30,15 @@ test('mobile parity: narrow screens and landscape keep every pane, modal and med
     await expect(page.locator('#message')).toBeInViewport();
     await expect(page.locator('#send')).toBeInViewport();
     const table = page.locator('.md-table-scroll').last();
-    expect(await table.evaluate(e => e.scrollWidth > e.clientWidth)).toBe(true);
-    await table.evaluate(e => { e.scrollLeft = e.scrollWidth; });
-    expect(await table.evaluate(e => e.scrollLeft)).toBeGreaterThan(0);
+    await expect(table).toContainText('宽列');
+    await expect(table).toContainText('内容');
+    const wide = await table.evaluate((e) => {
+      e.scrollLeft = e.scrollWidth;
+      return {sw: e.scrollWidth, cw: e.clientWidth, left: e.scrollLeft, right: e.getBoundingClientRect().right};
+    });
+    expect(wide.sw).toBeLessThanOrEqual(wide.cw + 1);
+    expect(wide.left).toBe(0);
+    expect(wide.right).toBeLessThanOrEqual(width + 1);
     await page.locator('#attach').click();
     await expect(page.locator('.browse-item')).toHaveCount(31);
     const box = await page.locator('#file-dialog').boundingBox();

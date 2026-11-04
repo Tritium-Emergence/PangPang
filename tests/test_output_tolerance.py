@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import time
@@ -338,6 +339,7 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(task['error'], 'required_output_missing')
         self.assertEqual(work.get('pending_required_outputs'), ['final.docx'])
         self.assertEqual(dep['outcome'], 'failed')
+        self.assertEqual(dep['result_payload'].get('missing_outputs'), ['final.docx'])
 
     def test_79_raw_receipt_preserved_while_business_fails(self):
         # (RCB/SIS layering): the raw receipt keeps the TRUE execution fact
@@ -387,6 +389,7 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(task['error'], 'declared_output_missing')
         self.assertEqual(task['receipt']['status'], 'succeeded')
         self.assertEqual(dep['outcome'], 'failed')
+        self.assertEqual(dep['result_payload'].get('missing_outputs'), ['out.docx'])
         self.assertNotIn('declared_output_missing', work.get('error') or '')
         self.assertNotEqual(work['status'], 'delivered')
         self._finish_adjudicated(work['id'])
@@ -534,8 +537,16 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(self.app.store.get('task', task['id'])['status'], 'failed')
         self.assertEqual(self.app.store.get('task', task['id'])['error'], 'declared_output_missing')
         self.assertEqual(self.app.store.get('dependency', res['dependency_id'])['outcome'], 'unknown')
+        self.assertEqual(self.app.store.get('dependency', res['dependency_id'])['status'], 'settled')
         # The late failure is on the task. It does not become a delivery obligation.
         self.assertEqual(self.app._unresolved_declared_outputs(work_id), [])
+        late = [m for m in self.app.store.find('message', work_id=work_id, limit=50)
+                if m.get('kind') == 'execution_result' and m.get('from') == 'executor']
+        self.assertEqual(len(late), 1)
+        body = json.loads(late[0]['content'])
+        self.assertTrue(body.get('late'))
+        self.assertEqual(body.get('error'), 'declared_output_missing')
+        self.assertEqual(body.get('missing_outputs'), ['late.docx'])
 
     def test_79_required_missing_still_beats_declared_warning(self):
         # Do not weaken required_outputs: an unmet hard contract keeps that error
@@ -932,6 +943,15 @@ class RequiredOutputWorkInvariantTests(unittest.TestCase):
         self.app.complete_task(task, self._receipt_for(task, {'late.docx': False}))
         # late.docx must NOT be added; other.docx must NOT be touched.
         self.assertEqual(self.app.store.get('work', work_id).get('pending_required_outputs'), ['other.docx'])
+        self.assertEqual(self.app.store.get('dependency', dep['id'])['status'], 'settled')
+        self.assertEqual(self.app.store.get('dependency', dep['id'])['outcome'], 'unknown')
+        late = [m for m in self.app.store.find('message', work_id=work_id, limit=50)
+                if m.get('kind') == 'execution_result' and m.get('from') == 'executor']
+        self.assertEqual(len(late), 1)
+        body = json.loads(late[0]['content'])
+        self.assertTrue(body.get('late'))
+        self.assertEqual(body.get('error'), 'required_output_missing')
+        self.assertEqual(body.get('missing_outputs'), ['late.docx'])
 
 
 class HarvestUnitTests(unittest.TestCase):

@@ -5958,6 +5958,11 @@ class Service:
         # (receipt.ended - receipt.started); total_s = created → now (incl. queue,
         # retries) which is what the user's wall clock sees.
         rc = task.get("receipt") or {}
+        # The chat names the files that failed the check. Same projection the
+        # late-result card uses. An empty set stays off the payload.
+        missing_outputs = self._missing_output_names(task, error)
+        if missing_outputs:
+            payload["missing_outputs"] = missing_outputs
         try:
             executor_s = round(float(rc["ended"]) - float(rc["started"]), 1) if rc.get("ended") and rc.get("started") else None
         except (TypeError, ValueError):
@@ -5987,6 +5992,19 @@ class Service:
         self.settle_dependency(dep_id, self.TASK_OUTCOME.get(status, "unknown"),
                                summary=summary, refs=refs,
                                fast_accept=fast_accept if (fast_accept and fast_accept.get("fast_accept")) else None)
+
+    def _missing_output_names(self, task, error):
+        """File names a business-output failure already computed.
+
+        Same O(#outputs) helpers the adjudication used, on the receipt stored
+        on the task. Callers attach the list to a card. This does not settle
+        a dependency or touch Work obligations."""
+        rc = task.get("receipt") or {}
+        if error == "required_output_missing":
+            return list(self._required_outputs_split(task, rc)[1])
+        if error == "declared_output_missing":
+            return list(self._declared_output_missing(rc))
+        return []
 
     def _required_outputs_split(self, task, receipt):
         """Deterministic business check. Return (satisfied, missing): the declared
@@ -6175,11 +6193,17 @@ class Service:
                 # must ALSO leave the Work's acceptance obligations
                 # (pending_required_outputs) untouched — the no-reopen invariant covers
                 # delivery obligations, not just the dependency.
+                late_card = {"task_id": current["id"], "status": adjudicated,
+                    "late": True, "artifact_refs": refs,
+                    "notice": "迟到的执行结果：该任务此前已被标记为 unknown 并结算，父工作已据此推进；这是后到的确认，不重开依赖。"}
+                if adj_error:
+                    late_card["error"] = adj_error
+                late_missing = self._missing_output_names(current, adj_error)
+                if late_missing:
+                    late_card["missing_outputs"] = late_missing
                 self.store.put("message", self._stamp_message({"id": uid("msg"), "bot_id": task["owner_bot_id"],
                     "work_id": task["work_id"], "kind": "execution_result", "from": "executor",
-                    "artifact_refs": refs, "content": encode({"task_id": current["id"], "status": adjudicated,
-                        "late": True, "artifact_refs": refs,
-                        "notice": "迟到的执行结果：该任务此前已被标记为 unknown 并结算，父工作已据此推进；这是后到的确认，不重开依赖。"}),
+                    "artifact_refs": refs, "content": encode(late_card),
                     "created": time.time()}))
                 self.notification(task["owner_bot_id"], "result", f"迟到执行结果 {adjudicated}",
                                   work_id=task["work_id"], refs=refs)
