@@ -73,6 +73,20 @@ def model_work_view(work):
     return {k: work[k] for k in _WORK_FIELDS if k in work}
 
 
+def ops_approval_fields(task):
+    """Operator ops approval is status awaiting_approval plus spec_digest.
+
+    Does not synthesize permission_asks. Those rows are in-run tool permissions
+    and are a different record.
+    """
+    if not isinstance(task, dict) or task.get("status") != "awaiting_approval":
+        return {}
+    digest_value = task.get("spec_digest")
+    if not isinstance(digest_value, str) or not digest_value:
+        return {}
+    return {"spec_digest": digest_value}
+
+
 def model_dependency_view(dep, *, own=False, store=None, installations=None, hosts=None):
     # `own=True` (read_work on the Bot's OWN Work) safely exposes the dependency
     # id so the model can call cancel_dependency(dep_id). Cross-Work projections
@@ -115,6 +129,7 @@ def _dependency_target(store, dep, installations=None, hosts=None):
                              "method": str(item.get("method") or "")[:80]})
         if asks:
             view["permission_asks"] = asks
+        view.update(ops_approval_fields(target))
         return view
     if kind == "child_work":
         return {"work_id": target["id"], "bot_id": target.get("owner_bot_id"), "status": target.get("status"),

@@ -2639,6 +2639,7 @@ class Service:
         refusal stays a refusal. A timeout denial already on disk is not upgraded.
         """
         from .store import assert_no_txn_io
+        from .context import ops_approval_fields
         with self.store.atomic():
             turn = self.store.get("turn", turn_id)
             dep = self.store.get("dependency", body.get("dep_id"))
@@ -2653,6 +2654,15 @@ class Service:
                 return {"error": "permission_unavailable",
                         "advice": "这条依赖不是仍在进行的任务，没有可确认的工具许可。"}
             task = self.store.get("task", dep["target_id"])
+            if task.get("status") == "awaiting_approval":
+                return {"error": "ops_approval_pending", "status": "awaiting_approval",
+                        **ops_approval_fields(task),
+                        "advice": (
+                            "This task is waiting for operator ops approval. "
+                            "The approval record is status=awaiting_approval plus spec_digest. "
+                            "permission_asks and request_id are in-run tool permissions only. "
+                            "Missing permission_asks is not 'no approval record'. "
+                            "resolve_permission does not grant ops approval.")}
             if task.get("status") != "running":
                 return {"error": "permission_unavailable",
                         "advice": "任务不在运行，不能补写工具许可。"}
@@ -4679,7 +4689,10 @@ class Service:
             self._observe_duplicate_task(task)
         except Exception:
             log.exception("duplicate-task observation failed task=%s", task["id"])
-        return {"task_id": task["id"], "status": task["status"], "yielded": True, "dependency_id": dep["id"]}
+        from .context import ops_approval_fields
+        result = {"task_id": task["id"], "status": task["status"], "yielded": True, "dependency_id": dep["id"]}
+        result.update(ops_approval_fields(task))
+        return result
 
     def _observe_duplicate_task(self, task):
         if (self.config.get("task_result_gate") or {}).get("duplicate_shadow") is not True:

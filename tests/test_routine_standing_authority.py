@@ -10,7 +10,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from test_bot_runtime import config
+from pangpang.context import model_dependency_view
 from pangpang.http import serve
+from pangpang.runtime import Runtime
 from pangpang.service import Service
 from pangpang.store import Fault, digest
 
@@ -65,6 +67,45 @@ class RoutineStandingAuthorityTests(unittest.TestCase):
         child = self.app.delegate('bot-main', work['id'], {'target_bot_id': child_bot['id'], 'goal': 'child',
                                   'request': 'answer', 'acceptance': ['done'], 'mode': 'return_to_sender'})
         self.assertIs(self.app.store.get('work', child['work_id'])['grant_write'], False)
+
+    def test_readonly_routine_submit_awaits_then_approve_queues(self):
+        # grant_write=false stays behind the ops-approval gate. Approving the
+        # spec_digest queues the task. The gate does not invent permission_asks.
+        r = self._proposal()
+        self._approve(r['id'])
+        work = self._fire(r['id'])
+        self.assertIs(work['grant_write'], False)
+        submitted = self.app.submit_task('bot-main', work['id'], {'prompt': 'write report'})
+        task = self.app.store.get('task', submitted['task_id'])
+        self.assertEqual(submitted['status'], 'awaiting_approval')
+        self.assertEqual(submitted['spec_digest'], task['spec_digest'])
+        self.assertNotIn('permission_asks', submitted)
+        self.assertEqual(task['status'], 'awaiting_approval')
+        self.assertNotIn('permission_asks', task)
+        dep = self.app.store.get('dependency', task['dependency_id'])
+        view = model_dependency_view(
+            dep, own=True, store=self.app.store,
+            installations=self.app.execution.installations, hosts=self.app.execution.hosts)
+        self.assertEqual(view['target']['status'], 'awaiting_approval')
+        self.assertEqual(view['target']['spec_digest'], task['spec_digest'])
+        self.assertNotIn('permission_asks', view['target'])
+        turn = next(item for item in self.app.store.find('turn', work_id=work['id']))
+        inspected = Runtime(self.app).invoke(turn, 'inspect_task', {'task_id': task['id']})
+        self.assertEqual(inspected['status'], 'awaiting_approval')
+        self.assertEqual(inspected['spec_digest'], task['spec_digest'])
+        self.assertNotIn('permission_asks', inspected)
+        refused = self.app.resolve_permission(
+            'bot-main', work['id'],
+            {'dep_id': task['dependency_id'], 'request_id': '1', 'decision': 'approve'},
+            turn_id=turn['id'])
+        self.assertEqual(refused['error'], 'ops_approval_pending')
+        self.assertEqual(refused['spec_digest'], task['spec_digest'])
+        self.assertIn("not 'no approval record'", refused['advice'])
+        self.assertNotIn('permission_asks', refused)
+        self.assertNotIn('permission_asks', self.app.store.get('task', task['id']))
+        self.assertEqual(self.app.store.get('task', task['id'])['status'], 'awaiting_approval')
+        queued = self.app.approve(task['id'], {'spec_digest': task['spec_digest']})
+        self.assertEqual(queued['status'], 'queued')
 
     def test_explicit_write_envelope_queues_write_tasks(self):
         r = self._proposal()
