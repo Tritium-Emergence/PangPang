@@ -207,6 +207,14 @@ pre, .facts, .body, .panel { min-width: 0; overflow-wrap: anywhere; }
   padding-left: clamp(0.75rem, 1.2cqi, 1rem);
   padding-right: clamp(0.75rem, 1.2cqi, 1rem);
 }
+/* Approval and recovery cards are not .body. A long URL in the prompt or the
+   work goal is one unbreakable line unless these cards wrap it themselves. */
+#messages .bubble.tcard,
+#messages .bubble.warning {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 /* Code and tables need a definite containing block so their 100% width is the
    column, not their own min-content. Plain text still shrink-wraps. */
 #messages .body:has(.md-pre, .md-table-scroll) {

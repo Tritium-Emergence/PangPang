@@ -16,7 +16,8 @@ const FAIL = {task_id: TASK, status: 'failed', error: 'required_output_missing',
   notice: '执行结果以本 status 为准：failed。原始执行器输出仅供 operator 检查，不进入 Bot 上下文。exit=0 也不代表业务验收通过。｜耗时以 timing 为权威：executor_s=执行器实际运行秒数，total_s=从提交到现在的总秒数（含排队/重试）。',
   timing: {executor_s: 91.2, total_s: 94.6}};
 const OK = {task_id: 'task-ok1', status: 'succeeded', error: null, artifact_refs: [], notice: '执行结果以本 status 为准：succeeded。',
-  result_text: 'done: wrote out/portrait.png', result_text_truncated: false, timing: {executor_s: 12.3, total_s: 15}};
+  result_text: '{"task_id":"task-ok1","notice":"执行结果以本 status 为准：succeeded。","timing":{"executor_s":12.3,"total_s":15}}',
+  result_text_truncated: false, timing: {executor_s: 12.3, total_s: 15}};
 const MESSAGES = [
   msg('u1', 1, '你能用 finland-linux 上的 codex 去画一幅交易者画像吗？', {kind: 'user', from: 'user'}),
   msg('a1', 2, '分析如下：\n\n' + TABLE + '\n结论：**你没有**稳定的短线优势。'),
@@ -87,6 +88,31 @@ test('executor result cards show a human line, never raw JSON', async ({page}) =
   await expect(cards.nth(0)).toContainText('缺少产出物：out/portrait.png、out/report.md');
   await expect(page.locator('#messages .evidence-raw')).toHaveCount(0);
   await expect(cards.nth(1)).toContainText('执行成功');
-  await expect(cards.nth(1)).toContainText('done: wrote out/portrait.png');
+  await expect(cards.nth(1)).not.toContainText('executor_s');
+  await expect(cards.nth(1)).not.toContainText('task-ok1');
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('approval and recovery cards wrap long URLs and do not pan the transcript', async ({page}) => {
+  await page.setViewportSize({width: 390, height: 844});
+  const url = 'https://example.com/' + 'u'.repeat(200);
+  await project(page, (s) => {
+    s.work = s.work || [];
+    s.tasks = s.tasks || [];
+    s.work.push({id: 'overflow-work', owner_bot_id: 'bot-main', goal: url, kind: 'conversation', attention: 'working', status: 'active'});
+    s.tasks.push({id: 'approval-long-url', work_id: 'overflow-work', owner_bot_id: 'bot-main', status: 'awaiting_approval', created: 50, prompt: url, installation_id: 'codex'});
+    s.tasks.push({id: 'recovery-long-url', work_id: 'overflow-work', owner_bot_id: 'bot-main', status: 'unknown', created: 51, prompt: url});
+  }, [msg('u1', 1, '确认一下', {kind: 'user', from: 'user'})]);
+  await login(page);
+  const log = page.getByTestId('chat-log');
+  await expect(log.locator('.tcard.awaiting', {hasText: url.slice(0, 40)})).toBeVisible();
+  await expect(log.locator('.bubble.warning[data-task="recovery-long-url"]')).toContainText(url.slice(0, 40));
+  const m = await measure(page);
+  expect(m.over, JSON.stringify(m.over)).toEqual([]);
+  expect(m.pans, JSON.stringify(m.pans)).toEqual([]);
+  expect(m.messages.sw).toBeLessThanOrEqual(m.messages.cw + 1);
+  expect(m.messages.left).toBe(0);
+  expect(m.doc.sw).toBeLessThanOrEqual(m.doc.cw + 1);
+  expect(m.doc.left).toBe(0);
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });

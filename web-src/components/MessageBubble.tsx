@@ -115,9 +115,10 @@ function StructuredPayload({content, kind, botName}: {content: Message['content'
   </div>;
 }
 
-// An executor result is a verdict, not a document. One human line, the missing
-// output names, and the result text when it succeeded. task_id, notice, and
-// timing stay in the payload for the Bot and are not shown.
+// An executor result is a verdict, not a document. One human line and the missing
+// output names. result_text, task_id, notice, and timing stay in the payload for
+// the Bot. result_text is executor output and may itself be JSON, so it is never
+// painted into the card.
 function ExecutionResult({p}: {p: Record<string, any>}) {
   const {t} = useTranslation();
   const ok = p.status === 'succeeded';
@@ -129,6 +130,5 @@ function ExecutionResult({p}: {p: Record<string, any>}) {
     <p className={ok ? 'text-sm' : 'text-sm text-warn'}>{reason ? t('msg.exec.line', {status, reason}) : status}{p.late ? ` ${t('msg.exec.late')}` : ''}</p>
     {missing.length ? <p className="text-sm text-warn">{t('msg.exec.missingOutputs', {names: missing.join('、')})}</p> : null}
     {p.side_effects_unknown ? <p className="text-sm text-warn">{t('msg.exec.sideEffectsUnknown')}</p> : null}
-    {ok && typeof p.result_text === 'string' && p.result_text.trim() ? <p className="exec-text mt-1 text-sm">{p.result_text}{p.result_text_truncated ? ` ${t('msg.exec.truncated')}` : ''}</p> : null}
   </div>;
 }
