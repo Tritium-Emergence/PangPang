@@ -3453,12 +3453,16 @@ class Service:
         from .install_git import apply_upgrade, schedule_self_restart
         result = apply_upgrade((body or {}).get("target_commit"))
         if result.get("status") == "updated":
-            schedule_self_restart(delay=1.5)
+            schedule_self_restart("pangpang", delay=1.5)
             result = dict(result, restarting=True)
         return result
 
     def device_upgrade(self, host_id, body):
-        """Panel: enqueue a bounded self-upgrade on one online connector."""
+        """Panel: enqueue a bounded self-upgrade on one online connector.
+
+        No durable key: a finished failure must not block a later retry of the
+        same target SHA (panel click = new command).
+        """
         from .install_git import require_target_commit
         host = self.execution.hosts.get(host_id) or {}
         if host.get("transport") != "connector":
@@ -3466,8 +3470,7 @@ class Service:
         target = require_target_commit((body or {}).get("target_commit"))
         if not self.broker.online(host_id):
             raise Fault("connector_offline")
-        return self.broker.enqueue(host_id, "upgrade", {"target_commit": target},
-                                   key="upgrade-" + target)
+        return self.broker.enqueue(host_id, "upgrade", {"target_commit": target})
 
     def set_host_execution_level(self, host_id, body):
 

@@ -319,6 +319,7 @@ export default {
     cloudServer: 'Cloud server',
     installVersion: 'Version {{version}} · {{hash}}',
     installVersionUnknown: 'Version unknown',
+    versionHashUnknown: 'hash unknown',
     versionMismatch: 'Differs from cloud',
     upgradeCloud: 'Upgrade cloud',
     upgradeDevice: 'Upgrade this device',

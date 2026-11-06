@@ -208,6 +208,7 @@ export default {
     cloudServer: '云端服务',
     installVersion: '版本 {{version}} · {{hash}}',
     installVersionUnknown: '版本未知',
+    versionHashUnknown: 'hash 未知',
     versionMismatch: '与云端不一致',
     upgradeCloud: '升级云端',
     upgradeDevice: '升级此设备',

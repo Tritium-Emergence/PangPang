@@ -8,9 +8,15 @@ from unittest import mock
 
 from pangpang import __version__
 from pangpang.install_git import (
-    apply_upgrade, install_identity, plan_upgrade, require_target_commit, tracking_ref,
+    apply_upgrade, install_identity, plan_upgrade, require_target_commit, restart_argv, tracking_ref,
 )
 from pangpang.store import Fault
+from pangpang import install_git as install_git_mod
+
+
+def _clear_identity_cache():
+    install_git_mod._IDENTITY_CACHE["value"] = None
+    install_git_mod._IDENTITY_CACHE["at"] = 0.0
 
 
 def _git(cwd, *args):
@@ -56,6 +62,7 @@ class TrackingRef(unittest.TestCase):
 
 class InstallIdentity(unittest.TestCase):
     def test_prefers_baked_build(self):
+        _clear_identity_cache()
         fake = mock.Mock(BUILD_COMMIT="b" * 40, BUILD_REF="v1", BUILT_AT="T")
         with mock.patch.dict("sys.modules", {"pangpang._build": fake}):
             # re-import path goes through build_identity import inside function
@@ -66,6 +73,7 @@ class InstallIdentity(unittest.TestCase):
         self.assertEqual(ident["version"], __version__)
 
     def test_unknown_without_git_or_build(self):
+        _clear_identity_cache()
         with mock.patch("pangpang.install_git.build_identity", return_value=("unknown", "unknown", "unknown")):
             with mock.patch("pangpang.install_git.install_root", return_value=None):
                 ident = install_identity()
@@ -150,3 +158,63 @@ class PlanUpgrade(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestartArgv(unittest.TestCase):
+    def test_rebuilds_module_form(self):
+        from pangpang.install_git import restart_argv
+        with mock.patch("pangpang.install_git.sys") as fake_sys:
+            fake_sys.executable = "/usr/bin/python3"
+            fake_sys.argv = ["/usr/bin/python3", "-m", "pangpang", "--data", "/tmp/data", "--origin", "https://x"]
+            argv = restart_argv("pangpang")
+        self.assertEqual(argv[:5], ["/usr/bin/python3", "-m", "pangpang", "--data", "/tmp/data"])
+        self.assertIn("--origin", argv)
+
+
+class TrackingRefHardening(unittest.TestCase):
+    def test_rejects_leading_dash_remote(self):
+        with mock.patch.dict(os.environ, {"PANGPANG_UPGRADE_REMOTE": "--upload-pack", "PANGPANG_UPGRADE_BRANCH": "main"}):
+            with self.assertRaises(Fault) as raised:
+                tracking_ref()
+            self.assertEqual(raised.exception.code, "invalid_upgrade_tracking_ref")
+
+    def test_rejects_absolute_branch_path(self):
+        with mock.patch.dict(os.environ, {"PANGPANG_UPGRADE_REMOTE": "origin", "PANGPANG_UPGRADE_BRANCH": "/tmp/helper"}):
+            with self.assertRaises(Fault) as raised:
+                tracking_ref()
+            self.assertEqual(raised.exception.code, "invalid_upgrade_tracking_ref")
+
+
+class IdentityIsolation(unittest.TestCase):
+    def test_missing_git_binary_returns_unknown(self):
+        root, _head = _repo()
+        with mock.patch("pangpang.install_git.build_identity", return_value=("unknown", "unknown", "unknown")):
+            with mock.patch("pangpang.install_git.install_root", return_value=root):
+                with mock.patch("pangpang.install_git.subprocess.run", side_effect=FileNotFoundError("git")):
+                    from pangpang import install_git as ig
+                    ig._IDENTITY_CACHE["value"] = None
+                    ident = install_identity()
+        self.assertEqual(ident["source"], "unknown")
+        self.assertEqual(ident["commit"], "unknown")
+
+
+class TipNamespace(unittest.TestCase):
+    def test_same_name_tag_does_not_override_remote_tip(self):
+        root, head = _repo()
+        remote = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", "--bare", str(root), str(remote)], check=True, capture_output=True)
+        subprocess.run(["git", "--git-dir", str(remote), "branch", "-M", "main"], check=True)
+        _git(root, "remote", "add", "origin", str(remote))
+        # Side branch commit C not on main
+        _git(root, "checkout", "-b", "side")
+        (root / "README").write_text("side\n", encoding="utf-8")
+        _git(root, "add", "README")
+        _git(root, "commit", "-m", "side")
+        alien = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        _git(root, "checkout", "master")
+        # Some inits use master; ensure we are on the commit that matches remote main
+        _git(root, "reset", "--hard", head)
+        _git(root, "tag", "origin/main", alien)
+        with self.assertRaises(Fault) as raised:
+            apply_upgrade(alien, root=root)
+        self.assertEqual(raised.exception.code, "target_commit_not_on_tracking_ref")

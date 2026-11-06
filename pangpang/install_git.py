@@ -21,18 +21,20 @@ from .layout import is_source_checkout
 from .store import Fault
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-# Fixed tracking ref. Operators may override the remote/branch pair via env,
-# but values must stay simple names — no paths, URLs, or flags.
-_REMOTE_OK = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
-_BRANCH_OK = re.compile(r"^[A-Za-z0-9._/-]{1,80}$")
+# Simple names only: no leading dash/slash, no URLs, no flags, no absolute paths.
+_REMOTE_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
+_BRANCH_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$")
 _DEFAULT_REMOTE = "origin"
 _DEFAULT_BRANCH = "main"
+_IDENTITY_CACHE = {"at": 0.0, "value": None}
+_IDENTITY_TTL = 5.0
 
 
 def tracking_ref():
     remote = os.environ.get("PANGPANG_UPGRADE_REMOTE", _DEFAULT_REMOTE).strip() or _DEFAULT_REMOTE
     branch = os.environ.get("PANGPANG_UPGRADE_BRANCH", _DEFAULT_BRANCH).strip() or _DEFAULT_BRANCH
-    if not _REMOTE_OK.fullmatch(remote) or not _BRANCH_OK.fullmatch(branch):
+    if (not _REMOTE_OK.fullmatch(remote) or not _BRANCH_OK.fullmatch(branch)
+            or remote.startswith("-") or branch.startswith("-") or branch.startswith("/")):
         raise Fault("invalid_upgrade_tracking_ref", 400)
     return remote, branch
 
@@ -67,44 +69,65 @@ def _rev_parse(root, rev):
 def _git_checkout_identity(root):
     try:
         commit = _rev_parse(root, "HEAD")
-    except Fault:
+        ref_proc = _git(root, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+        ref = (ref_proc.stdout or "").strip() if ref_proc.returncode == 0 else "unknown"
+        if not ref:
+            ref = "unknown"
+        return {"commit": commit, "ref": ref[:80]}
+    except (Fault, OSError, subprocess.SubprocessError):
         return None
-    ref_proc = _git(root, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
-    ref = (ref_proc.stdout or "").strip() if ref_proc.returncode == 0 else "unknown"
-    if not ref:
-        ref = "unknown"
-    return {"commit": commit, "ref": ref[:80]}
 
 
 def install_identity():
-    """What is running now. Baked build first; else git HEAD; else unknown."""
-    commit, ref, built_at = build_identity()
-    if commit not in ("", "unknown"):
-        return {
-            "version": __version__,
-            "commit": commit,
-            "ref": ref,
-            "built_at": built_at,
-            "source": "build",
-        }
-    root = install_root()
-    if root is not None:
-        git = _git_checkout_identity(root)
-        if git:
-            return {
+    """What is running now. Baked build first; else git HEAD; else unknown.
+
+    Never raises into heartbeat/snapshot callers: a missing git binary or a
+    timed-out rev-parse degrades to ``source=unknown``.
+    """
+    now = time.monotonic()
+    cached = _IDENTITY_CACHE.get("value")
+    if cached is not None and now - float(_IDENTITY_CACHE.get("at") or 0) < _IDENTITY_TTL:
+        return dict(cached)
+    try:
+        commit, ref, built_at = build_identity()
+        if commit not in ("", "unknown"):
+            value = {
                 "version": __version__,
-                "commit": git["commit"],
-                "ref": git["ref"],
-                "built_at": "unknown",
-                "source": "git",
+                "commit": commit,
+                "ref": ref,
+                "built_at": built_at,
+                "source": "build",
             }
-    return {
-        "version": __version__,
-        "commit": "unknown",
-        "ref": "unknown",
-        "built_at": "unknown",
-        "source": "unknown",
-    }
+        else:
+            root = install_root()
+            git = _git_checkout_identity(root) if root is not None else None
+            if git:
+                value = {
+                    "version": __version__,
+                    "commit": git["commit"],
+                    "ref": git["ref"],
+                    "built_at": "unknown",
+                    "source": "git",
+                }
+            else:
+                value = {
+                    "version": __version__,
+                    "commit": "unknown",
+                    "ref": "unknown",
+                    "built_at": "unknown",
+                    "source": "unknown",
+                }
+    except Exception:
+        value = {
+            "version": __version__,
+            "commit": "unknown",
+            "ref": "unknown",
+            "built_at": "unknown",
+            "source": "unknown",
+        }
+    _IDENTITY_CACHE["at"] = now
+    _IDENTITY_CACHE["value"] = dict(value)
+    return value
 
 
 def require_target_commit(value):
@@ -114,6 +137,11 @@ def require_target_commit(value):
     return commit
 
 
+def _tracking_tip_ref(remote, branch):
+    # Explicit remotes namespace — never ambiguous with tags/heads of the same name.
+    return "refs/remotes/%s/%s" % (remote, branch)
+
+
 def plan_upgrade(root=None):
     """Fetch the tracking ref and report current HEAD vs tip."""
     root = Path(root) if root is not None else install_root()
@@ -121,13 +149,14 @@ def plan_upgrade(root=None):
         raise Fault("install_not_git_checkout", 400)
     remote, branch = tracking_ref()
     current = _rev_parse(root, "HEAD")
-    fetch = _git(root, ["fetch", "--no-tags", remote, branch], timeout=120)
+    # `--` keeps remote/branch from being parsed as git options.
+    fetch = _git(root, ["fetch", "--no-tags", "--", remote, branch], timeout=120)
     if fetch.returncode != 0:
         raise Fault(
             "git_fetch_failed", 400,
             advice=(fetch.stderr or fetch.stdout or "").strip()[:400] or None,
         )
-    tip = _rev_parse(root, "%s/%s" % (remote, branch))
+    tip = _rev_parse(root, _tracking_tip_ref(remote, branch))
     return {
         "version": __version__,
         "current_commit": current,
@@ -145,21 +174,27 @@ def apply_upgrade(target_commit, root=None):
         raise Fault("install_not_git_checkout", 400)
     target = require_target_commit(target_commit)
     remote, branch = tracking_ref()
+    tip_ref = _tracking_tip_ref(remote, branch)
     current = _rev_parse(root, "HEAD")
-    if current == target:
-        return {
-            "status": "already_current",
-            "commit": current,
-            "previous": current,
-            "tracking_ref": "%s/%s" % (remote, branch),
-        }
-    fetch = _git(root, ["fetch", "--no-tags", remote, branch], timeout=120)
+    fetch = _git(root, ["fetch", "--no-tags", "--", remote, branch], timeout=120)
     if fetch.returncode != 0:
         raise Fault(
             "git_fetch_failed", 400,
             advice=(fetch.stderr or fetch.stdout or "").strip()[:400] or None,
         )
-    tip = _rev_parse(root, "%s/%s" % (remote, branch))
+    tip = _rev_parse(root, tip_ref)
+    if current == target:
+        # Still require target to sit on the fetched tracking history.
+        ancestor = _git(root, ["merge-base", "--is-ancestor", target, tip], timeout=5)
+        if ancestor.returncode != 0:
+            raise Fault("target_commit_not_on_tracking_ref", 400)
+        return {
+            "status": "already_current",
+            "commit": current,
+            "previous": current,
+            "tracking_ref": "%s/%s" % (remote, branch),
+            "tip_commit": tip,
+        }
     probe = _git(root, ["cat-file", "-e", "%s^{commit}" % target], timeout=5)
     if probe.returncode != 0:
         raise Fault("target_commit_unavailable", 400)
@@ -172,6 +207,7 @@ def apply_upgrade(target_commit, root=None):
             "git_reset_failed", 400,
             advice=(reset.stderr or reset.stdout or "").strip()[:400] or None,
         )
+    _IDENTITY_CACHE["value"] = None
     return {
         "status": "updated",
         "commit": target,
@@ -181,13 +217,59 @@ def apply_upgrade(target_commit, root=None):
     }
 
 
-def schedule_self_restart(delay=1.0):
-    """Spawn the same argv detached, then exit this process.
+def _data_arg_from_argv(argv):
+    for i, item in enumerate(argv):
+        if item == "--data" and i + 1 < len(argv):
+            return argv[i + 1]
+        if item.startswith("--data="):
+            return item.split("=", 1)[1]
+    return None
 
-    Supervised installs (launchd KeepAlive / systemd) can simply exit; spawning
-    a successor also covers manually started Windows / shell sessions.
+
+def restart_argv(module):
+    """Rebuild a ``python -m <module> --data …`` argv for the current role."""
+    if module not in {"pangpang", "pangpang.connector"}:
+        raise Fault("invalid_restart_module", 400)
+    data = _data_arg_from_argv(sys.argv)
+    if not data:
+        raise Fault("restart_data_arg_missing", 400)
+    rest = []
+    argv = list(sys.argv)
+    i = 0
+    # Drop the executable / script / -m module prefix; keep trailing role flags.
+    while i < len(argv):
+        item = argv[i]
+        if item in {sys.executable, "-m", "pangpang", "pangpang.connector"}:
+            i += 1
+            continue
+        if item.endswith("pangpang/__main__.py") or item.endswith("pangpang\\__main__.py"):
+            i += 1
+            continue
+        if item.endswith("connector.py") and "pangpang" in item.replace("\\", "/"):
+            i += 1
+            continue
+        if item == "--data":
+            i += 2
+            continue
+        if item.startswith("--data="):
+            i += 1
+            continue
+        # Skip the original script path when launched as a file.
+        if i == 0:
+            i += 1
+            continue
+        rest.append(item)
+        i += 1
+    return [sys.executable, "-m", module, "--data", data, *rest]
+
+
+def schedule_self_restart(module, delay=1.0):
+    """Spawn ``python -m <module> --data …`` detached, then exit this process.
+
+    Supervised installs (launchd KeepAlive / systemd Restart=always) can also
+    simply exit; spawning a successor covers manually started sessions.
     """
-    argv = [sys.executable, *sys.argv]
+    argv = restart_argv(module)
 
     def _restart():
         time.sleep(max(0.2, float(delay)))
@@ -203,6 +285,7 @@ def schedule_self_restart(delay=1.0):
         try:
             subprocess.Popen(argv, **kwargs)
         finally:
-            os._exit(0)
+            # Non-zero so Restart=on-failure supervisors also come back.
+            os._exit(1)
 
     threading.Thread(target=_restart, name="pangpang-self-restart", daemon=True).start()

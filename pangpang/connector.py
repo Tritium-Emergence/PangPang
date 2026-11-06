@@ -523,11 +523,11 @@ class Connector:
                     "snapshot_execution_id": body["execution_id"], "digest": body["digest"]})
             elif action == "upgrade":
                 from .install_git import apply_upgrade, schedule_self_restart
-                if any(r.get("status") in {"launching", "active"} for r in self._active_runs()):
+                if next(self._active_runs(), None) is not None:
                     raise Fault("upgrade_blocked_active_runs")
                 result = apply_upgrade((body or {}).get("target_commit"))
                 if result.get("status") == "updated":
-                    schedule_self_restart(delay=1.5)
+                    schedule_self_restart("pangpang.connector", delay=1.5)
                     result = dict(result, restarting=True)
             else:
                 raise Fault("device_action_rejected")

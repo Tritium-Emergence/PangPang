@@ -18,11 +18,12 @@ function versionLabel(
   build?: {version?: string; commit?: string} | null,
 ) {
   const version = String(build?.version || '').trim();
-  const hash = shortHash(build?.commit);
-  if (!version && !hash) return t('hosts.installVersionUnknown');
+  const commit = String(build?.commit || '').trim();
+  const hash = shortHash(commit);
+  if (!version && (!commit || commit === 'unknown')) return t('hosts.installVersionUnknown');
   return t('hosts.installVersion', {
     version: version || t('hosts.versionUnregistered'),
-    hash: hash || '—',
+    hash: hash || t('hosts.versionHashUnknown'),
   });
 }
 
@@ -81,8 +82,12 @@ export function HostsView({store}: {store: Store}) {
     if (!confirm(t('hosts.upgradeConfirmDevice', {name: host.name || host.id, sha: target}))) return;
     setBusy('device:' + host.id);
     try {
-      await api(`devices/${host.id}/upgrade`, {target_commit: target});
-      store.setNotice(t('hosts.upgradeQueued'));
+      const queued = await api<{status?: string; result?: {error?: string}}>(`devices/${host.id}/upgrade`, {target_commit: target});
+      if (queued?.status === 'done' && queued?.result?.error) {
+        store.setNotice(String(queued.result.error));
+      } else {
+        store.setNotice(t('hosts.upgradeQueued'));
+      }
       await store.refresh();
     } catch (e: any) {
       store.setNotice(friendlyError(e));
