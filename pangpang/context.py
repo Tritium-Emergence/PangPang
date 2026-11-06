@@ -141,6 +141,185 @@ def model_project_view(project):
     return {k: project[k] for k in _PROJECT_FIELDS if k in project}
 
 
+# A later routine fire is a new Work. Its own checkpoint stays empty until this
+# turn writes one. These caps are the read-only handoff of the SAME routine's
+# other still-open Works: pointers and recorded checkpoint fields, never file
+# bodies and never a generated review. +2 leaves room for this Work in the
+# same status page so it cannot hide an older sibling or mark a complete page
+# truncated.
+_OPEN_WORK_STATUSES = ("active", "waiting", "blocked")
+_HANDOFF_WORKS = 4
+_HANDOFF_PAGE = _HANDOFF_WORKS + 2
+_HANDOFF_DEPS = 8
+_HANDOFF_REFS = 16
+_HANDOFF_LIST = 8
+_HANDOFF_ITEM = 200
+_HANDOFF_SUMMARY = 400
+_HANDOFF_PHASE = 80
+
+
+def _clip_text(value, limit):
+    if not isinstance(value, str):
+        return "", False
+    if len(value) <= limit:
+        return value, False
+    return value[:limit], True
+
+
+def _clip_strings(values, item_limit, count_limit):
+    clipped = False
+    out = []
+    if not isinstance(values, list):
+        return out, False
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        if len(out) >= count_limit:
+            return out, True
+        if len(item) > item_limit:
+            clipped = True
+            out.append(item[:item_limit])
+        else:
+            out.append(item)
+    return out, clipped
+
+
+def _extend_ids(values, into, limit):
+    """Append new string ids up to `limit`. True when another id did not fit."""
+    clipped = False
+    for item in values or []:
+        if not isinstance(item, str) or not item or item in into:
+            continue
+        if len(into) >= limit:
+            clipped = True
+            continue
+        into.append(item)
+    return clipped
+
+
+def _bounded_checkpoint(checkpoint):
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    phase, phase_cut = _clip_text(checkpoint.get("phase"), _HANDOFF_PHASE)
+    summary, summary_cut = _clip_text(checkpoint.get("summary"), _HANDOFF_SUMMARY)
+    completed, completed_cut = _clip_strings(checkpoint.get("completed"), _HANDOFF_ITEM, _HANDOFF_LIST)
+    next_actions, next_cut = _clip_strings(checkpoint.get("next_actions"), _HANDOFF_ITEM, _HANDOFF_LIST)
+    blocked_on, blocked_cut = _clip_strings(checkpoint.get("blocked_on"), _HANDOFF_ITEM, _HANDOFF_LIST)
+    evidence = []
+    evidence_cut = _extend_ids(checkpoint.get("evidence_refs"), evidence, _HANDOFF_REFS)
+    view = {"phase": phase, "summary": summary, "completed": completed,
+            "next_actions": next_actions, "blocked_on": blocked_on,
+            "evidence_refs": evidence}
+    clipped = phase_cut or summary_cut or completed_cut or next_cut or blocked_cut or evidence_cut
+    return view, clipped
+
+
+def _handoff_dependencies(service, work):
+    """Pending dependencies first, then newest settled, capped. No dependency id:
+    this is another Work, and the id would let the model cancel it from here."""
+    shown, seen = [], set()
+    clipped = False
+    pending_ids = [dep_id for dep_id in (work.get("pending_dep_ids") or []) if isinstance(dep_id, str)]
+    if len(pending_ids) > _HANDOFF_DEPS:
+        clipped = True
+    for dep_id in pending_ids[:_HANDOFF_DEPS]:
+        try:
+            dep = service.store.get("dependency", dep_id)
+        except Fault as error:
+            if error.code == "not_found":
+                continue
+            raise
+        if dep.get("source_work_id") != work.get("id") or dep.get("status") not in ("pending", "settled"):
+            continue
+        shown.append(dep)
+        seen.add(dep["id"])
+    extra = service.store.find("dependency", source_work_id=work["id"], newest=True, limit=_HANDOFF_DEPS + 1)
+    if len(extra) > _HANDOFF_DEPS:
+        clipped = True
+    for dep in extra:
+        if dep.get("id") in seen or dep.get("status") not in ("pending", "settled"):
+            continue
+        if len(shown) >= _HANDOFF_DEPS:
+            clipped = True
+            break
+        shown.append(dep)
+        seen.add(dep["id"])
+    views = []
+    for dep in shown:
+        view = {"kind": dep.get("kind"), "status": dep.get("status")}
+        outcome = dep.get("outcome")
+        if outcome is None or isinstance(outcome, str):
+            view["outcome"] = outcome
+        summary, summary_cut = _clip_text(dep.get("summary"), _HANDOFF_ITEM)
+        if summary:
+            view["summary"] = summary
+        if summary_cut:
+            clipped = True
+        refs = []
+        if _extend_ids(dep.get("refs"), refs, _HANDOFF_REFS):
+            clipped = True
+        if refs:
+            view["refs"] = refs
+        views.append(view)
+    return views, clipped
+
+
+def _handoff_work(service, work):
+    checkpoint, checkpoint_cut = _bounded_checkpoint(work.get("checkpoint"))
+    refs = []
+    refs_cut = _extend_ids(work.get("refs"), refs, _HANDOFF_REFS)
+    dependencies, deps_cut = _handoff_dependencies(service, work)
+    artifact_ids = []
+    artifacts_cut = _extend_ids(refs, artifact_ids, _HANDOFF_REFS)
+    artifacts_cut = _extend_ids(checkpoint["evidence_refs"], artifact_ids, _HANDOFF_REFS) or artifacts_cut
+    for dep in dependencies:
+        artifacts_cut = _extend_ids(dep.get("refs"), artifact_ids, _HANDOFF_REFS) or artifacts_cut
+    entry = {"id": work["id"], "status": work.get("status"), "refs": refs,
+             "checkpoint": checkpoint, "dependencies": dependencies,
+             "artifacts": [model_artifact_view(service, ref) for ref in artifact_ids]}
+    if refs_cut:
+        entry["refs_truncated"] = True
+    if checkpoint_cut:
+        entry["checkpoint_truncated"] = True
+    if deps_cut:
+        entry["dependencies_truncated"] = True
+    if artifacts_cut:
+        entry["artifacts_truncated"] = True
+    return entry
+
+
+def _same_routine_open_work(service, bot, work):
+    """Read-only handoff for a routine fire. Same owner, same routine, still open.
+
+    Does not write, does not set parent_work_id, and does not copy dependencies
+    or checkpoint fields onto this Work. File bytes stay behind read_evidence.
+    """
+    routine_id = work.get("routine_id")
+    if work.get("kind") != "routine" or not routine_id:
+        return None
+    candidates, seen, overflow = [], set(), False
+    for status in _OPEN_WORK_STATUSES:
+        rows = service.store.find("work", owner_bot_id=bot["id"], routine_id=routine_id,
+                                  status=status, newest=True, limit=_HANDOFF_PAGE)
+        others = []
+        for row in rows:
+            if row.get("id") == work.get("id") or row.get("id") in seen:
+                continue
+            if (row.get("owner_bot_id") != bot["id"] or row.get("routine_id") != routine_id
+                    or row.get("status") not in _OPEN_WORK_STATUSES):
+                continue
+            seen.add(row["id"])
+            others.append(row)
+        if len(rows) >= _HANDOFF_PAGE or len(others) > _HANDOFF_WORKS:
+            overflow = True
+        candidates.extend(others)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (float(row.get("created") or 0), str(row.get("id") or "")), reverse=True)
+    truncated = overflow or len(candidates) > _HANDOFF_WORKS
+    return {"works": [_handoff_work(service, row) for row in candidates[:_HANDOFF_WORKS]],
+            "truncated": truncated}
+
+
 def _in_flight(store, work, now):
     """Pending dependencies of a waiting Work, as kind/status/age_s only.
     Age uses task.started when the target is a task, otherwise created.
@@ -496,6 +675,12 @@ def projection(service, turn):
         other_index.append(entry)
     if other_index:
         packet["recent_work_index"] = other_index
+    # Same-routine stage review only. A separate packet field: this Work's
+    # checkpoint and dependencies stay its own, and the standing instruction
+    # stays in identity / work.goal.
+    handoff = _same_routine_open_work(service, bot, work)
+    if handoff:
+        packet["same_routine_open_work"] = handoff
 
     # Canonical planner prompt is English (planner_prompt.PLANNER_SYSTEM) — one
     # non-drifting safety spec. The reply language the user sees is controlled by
