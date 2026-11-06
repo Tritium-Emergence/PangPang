@@ -612,6 +612,11 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(evidence['metadata']['name'], 'report.md')
         self.assertTrue(evidence['metadata']['path'].replace('\\', '/').endswith('samples/actual.md'))
         self.assertEqual(evidence['digest'], shown[0]['digest'])
+        from pangpang.context import model_artifact_view
+        view = model_artifact_view(self.app, shown[0]['id'])
+        self.assertEqual(view['name'], 'report.md')
+        self.assertNotIn('actual.md', view['name'])
+        self.assertNotIn(shown[0]['path'], json.dumps(view))
 
     def test_declared_symlink_inside_cwd_is_attached(self):
         # R3. notes.md -> scratch.md stays inside cwd. Chat keeps that name
@@ -633,6 +638,30 @@ class OutputToleranceTests(unittest.TestCase):
                      if self.app.store.get('artifact', ref).get('rel') == 'notes.md')
         self.assertEqual(notes['name'], 'notes.md')
         self.assertTrue(notes['path'].replace('\\', '/').endswith('/scratch.md'))
+
+    def test_same_digest_cwd_file_does_not_steal_output_alias(self):
+        # R5-F1. report.md -> samples/actual.md, and cwd/report.md has the same
+        # bytes. cwd_fallback must not replace the output_dir binding, or the
+        # source filter then leaves the chat with nothing.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'samples').mkdir()\n"
+            "(d / 'samples' / 'actual.md').write_text('SAME')\n"
+            "(d / 'report.md').symlink_to(d / 'samples' / 'actual.md')\n"
+            "Path('report.md').write_text('SAME')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertTrue(task.get('artifact_refs'))
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual([a.get('source') for a in shown], ['output_dir'])
+        self.assertEqual(shown[0]['rel'], 'report.md')
+        self.assertTrue(shown[0]['path'].replace('\\', '/').endswith('samples/actual.md'))
+        from pangpang.context import model_artifact_view
+        self.assertEqual(model_artifact_view(self.app, shown[0]['id'])['name'], 'report.md')
 
     def test_cwd_same_name_draft_is_not_a_final(self):
         # R4-F1. cwd/report.md is a draft. Only the output-dir binding is chat.

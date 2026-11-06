@@ -398,8 +398,14 @@ def _note_harvested(artifacts, seen, budget, art, *, source, rel, contract=None,
         for index, old in enumerate(artifacts):
             if old.get("digest") != digest:
                 continue
-            old_located = _path_rel(old, output_dir, cwd)
-            if _in_contract(located, contract) and not _in_contract(old_located, contract):
+            # Only a path inside the output dir counts as the contract file.
+            # A cwd file whose relative name matches must not replace an
+            # output_dir or declared binding that already holds this digest.
+            if source == "cwd_fallback" and old.get("source") in {"output_dir", "declared"}:
+                break
+            old_located = _rel_under(old.get("path"), output_dir) if output_dir else None
+            new_located = _rel_under(art.get("path"), output_dir) if output_dir else None
+            if _in_contract(new_located, contract) and not _in_contract(old_located, contract):
                 artifacts[index] = item
             elif (_in_contract(chat, contract)
                   and not _in_contract(old.get("rel"), contract)

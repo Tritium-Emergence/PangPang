@@ -396,7 +396,8 @@ def model_artifact_view(service, ref):
         a = service.store.get("artifact", ref)
     except Exception:
         return {"ref": ref, "resolved": False}
-    return {"ref": ref, "resolved": True, "name": _basename(a.get("path")),
+    from .service import artifact_display_name
+    return {"ref": ref, "resolved": True, "name": artifact_display_name(a)[:120],
             "size": a.get("size"), "host_id": a.get("host_id"),
             "kind": a.get("kind"), "mime": a.get("mime"), # not in schema yet -> None
             "source": a.get("source"),
