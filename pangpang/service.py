@@ -6131,6 +6131,74 @@ class Service:
                     seen.add(key)
         return unresolved
 
+    @staticmethod
+    def _norm_contract_path(value):
+        """Relative contract path, slash-normalized. Absolute paths and `..` are not names."""
+        if not isinstance(value, str):
+            return None
+        text = value.replace("\\", "/").strip()
+        while text.startswith("./"):
+            text = text[2:]
+        text = text.strip("/")
+        if not text or ".." in text.split("/"):
+            return None
+        if text.startswith("/") or (len(text) >= 2 and text[1] == ":"):
+            return None
+        return text
+
+    @staticmethod
+    def _chat_artifact_contract(task):
+        """Names allowed on the chat download list, or None when there is no hard contract.
+
+        An empty required_outputs keeps today's harvest: a single undeclared
+        chart.png is still attached. A non-empty contract admits only those
+        paths plus the explicitly declared outputs. Sibling temps stay on the
+        receipt and in the archive."""
+        required = task.get("required_outputs") or []
+        if not required:
+            return None
+        names = set()
+        for raw in list(required) + list(task.get("outputs") or []):
+            norm = Service._norm_contract_path(raw)
+            if norm:
+                names.add(norm)
+        return names
+
+    @staticmethod
+    def _rel_from_artifact_path(path, task):
+        """Contract-relative path of a harvested file, derived from its absolute path."""
+        if not isinstance(path, str) or not path or not isinstance(task, dict):
+            return None
+        norm = path.replace("\\", "/")
+        execution_id = task.get("execution_id")
+        if (isinstance(execution_id, str) and execution_id
+                and "/" not in execution_id and "\\" not in execution_id):
+            marker = "/.xpp-out/" + execution_id + "/"
+            idx = norm.rfind(marker)
+            if idx >= 0:
+                return Service._norm_contract_path(norm[idx + len(marker):])
+        cwd = task.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            base = cwd.replace("\\", "/").rstrip("/")
+            head, tail = norm[:len(base)], norm[len(base):]
+            if base and head.lower() == base.lower() and tail.startswith("/"):
+                return Service._norm_contract_path(tail[1:])
+        return None
+
+    @staticmethod
+    def _artifact_matches_contract(item, names, task):
+        if not isinstance(item, dict) or not names:
+            return False
+        rel = Service._rel_from_artifact_path(item.get("path"), task)
+        if rel is None:
+            rel = Service._norm_contract_path(item.get("rel"))
+        if not rel:
+            return False
+        if rel in names:
+            return True
+        folded = rel.casefold()
+        return any(name.casefold() == folded for name in names)
+
     def complete_task(self, task, receipt):
         current = self.store.get("task", task["id"])
         if current["status"] in TERMINAL:
@@ -6189,7 +6257,13 @@ class Service:
                 current["error"] = adj_error
             self.store.put("task", current)
             refs = []
+            # The receipt keeps the full harvest (evidence). Chat and result
+            # artifact_refs do not: with a hard contract, only matching
+            # required_outputs and declared outputs become downloadable refs.
+            contract = self._chat_artifact_contract(current)
             for item in receipt.get("artifacts", []):
+                if contract is not None and not self._artifact_matches_contract(item, contract, current):
+                    continue
                 a = self.store.put("artifact", dict(item, id=uid("artifact"), host_id=task["host_id"],
                                    owner_bot_id=task["owner_bot_id"], task_id=task["id"], work_id=task["work_id"]))
                 refs.append(a["id"])

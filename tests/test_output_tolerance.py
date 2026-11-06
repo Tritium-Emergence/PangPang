@@ -249,7 +249,8 @@ class OutputToleranceTests(unittest.TestCase):
 
     def test_undeclared_file_in_output_dir_is_harvested(self):
         # The core fix: a file the model NEVER declared, written to $XPP_OUTPUT_DIR,
-        # is auto-registered as an artifact (source=output_dir).
+        # is auto-registered as an artifact (source=output_dir). No required_outputs
+        # means the chat still receives that single file.
         code = ("import os; d=os.environ['XPP_OUTPUT_DIR']; "
                 "open(os.path.join(d,'chart.png'),'wb').write(b'\\x89PNG_data'); print('ok')")
         task = self._run(code, []) # NOTHING declared
@@ -258,6 +259,148 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(len(arts), 1)
         self.assertTrue(arts[0]['path'].endswith('chart.png'))
         self.assertEqual(arts[0]['source'], 'output_dir')
+        self.assertEqual(self._chat_rels(task), ['chart.png'])
+
+    def _chat_rels(self, task):
+        rels = []
+        for ref in task.get('artifact_refs') or []:
+            art = self.app.store.get('artifact', ref)
+            rel = self.app._rel_from_artifact_path(art.get('path'), task) or art.get('rel')
+            rels.append(rel or art['path'].replace('\\', '/').rsplit('/', 1)[-1])
+        return rels
+
+    def _assert_chat_is_contract(self, task, expected):
+        self.assertEqual(set(self._chat_rels(task)), set(expected))
+        messages = [m for m in self.app.store.find('message', work_id=task['work_id'])
+                    if m.get('kind') == 'execution_result']
+        self.assertTrue(messages)
+        self.assertEqual(messages[-1].get('artifact_refs'), task.get('artifact_refs'))
+        payload = messages[-1]['content']
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        self.assertEqual(payload.get('artifact_refs'), task.get('artifact_refs'))
+        self.assertEqual(len(self.app.store.find('artifact', task_id=task['id'])), len(set(expected)))
+
+    def test_required_outputs_chat_omits_samples_and_keeps_finals(self):
+        # Same shape as a multi-file deliverable: finals are the contract,
+        # samples and working files stay on the receipt only.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('md')\n"
+            "(d / 'data.csv').write_text('a,b\\n')\n"
+            "(d / 'meta.json').write_text('{}')\n"
+            "(d / 'bundle.zip').write_bytes(b'PK')\n"
+            "(d / 'samples').mkdir()\n"
+            "(d / 'samples' / 'page-1.png').write_bytes(b'\\x89PNG')\n"
+            "(d / 'notes.tmp').write_text('scratch')\n"
+            "print('ok')\n"
+        )
+        required = ['report.md', 'data.csv', 'meta.json', 'bundle.zip']
+        task = self._run(code, [], required)
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        receipt_rels = sorted(a.get('rel') for a in task['receipt']['artifacts'])
+        self.assertIn('samples/page-1.png', receipt_rels)
+        self.assertIn('notes.tmp', receipt_rels)
+        self._assert_chat_is_contract(task, required)
+        host = self.app.execution.hosts[task['host_id']]
+        archive = Path(self.app.execution.directory(host, task['execution_id'])) / 'artifacts'
+        sample = next(a for a in task['receipt']['artifacts'] if a.get('rel') == 'samples/page-1.png')
+        self.assertTrue((archive / sample['digest']).is_file())
+
+    def test_required_docx_md_chat_omits_office_and_opencl_junk(self):
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / '建议.docx').write_bytes(b'docx')\n"
+            "(d / '建议.md').write_text('md')\n"
+            "(d / 'opengl_devices.log').write_text('gl')\n"
+            "(d / 'opengl_profile.xml').write_text('<x/>')\n"
+            "(d / '_nop_fdiv4b.bin').write_bytes(b'\\0\\1')\n"
+            "(d / 'dump.ini').write_text('ini')\n"
+            "(d / 'dictionaries.xcu').write_text('xcu')\n"
+            "(d / 'backenddb.xml').write_text('<db/>')\n"
+            "(d / 'script.xlb').write_text('lb')\n"
+            "(d / 'word-page-6.png').write_bytes(b'\\x89PNG')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, ['建议.md'], ['建议.docx', '建议.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertGreater(len(task['receipt']['artifacts']), 2)
+        self._assert_chat_is_contract(task, ['建议.docx', '建议.md'])
+        turn = next(iter(self.app._all('turn', work_id=task['work_id'], status='queued')), None)
+        self.assertIsNotNone(turn)
+        ids = []
+        for message in self.app._work_inbox(task['work_id']):
+            message['consumed_by_turn_id'] = turn['id']
+            self.app.store.put('message', message)
+            ids.append(message['id'])
+        turn['message_ids'] = list(dict.fromkeys((turn.get('message_ids') or []) + ids))
+        self.app.store.put('turn', turn)
+        self.app.finish_turn(turn, '两份成稿已放好。')
+        delivery = [m for m in self.app.store.find('message', work_id=task['work_id'])
+                    if m.get('kind') == 'assistant'][-1]
+        self.assertEqual(delivery.get('artifact_refs'), task['artifact_refs'])
+
+    def test_missing_required_zip_is_not_replaced_by_unpacked_files(self):
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('md')\n"
+            "(d / 'unpacked').mkdir()\n"
+            "(d / 'unpacked' / 'page.txt').write_text('loose')\n"
+            "(d / 'opengl_devices.log').write_text('gl')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['bundle.zip', 'report.md'])
+        self.assertEqual(task['status'], 'failed')
+        self.assertEqual(task['error'], 'required_output_missing')
+        missing = [r['output'] for r in task['receipt']['required_output_results'] if not r.get('present')]
+        self.assertEqual(missing, ['bundle.zip'])
+        receipt_rels = {a.get('rel') for a in task['receipt']['artifacts']}
+        self.assertIn('unpacked/page.txt', receipt_rels)
+        self.assertNotIn('bundle.zip', receipt_rels)
+        self._assert_chat_is_contract(task, ['report.md'])
+        self.assertEqual(self.app.store.get('work', task['work_id']).get('pending_required_outputs'),
+                         ['bundle.zip'])
+
+    def test_hand_built_receipt_keeps_evidence_and_filters_chat_refs(self):
+        # Windows-shaped paths: the cloud adjudicates a device receipt without
+        # re-statting the files. Junk siblings must not become download refs.
+        self.cfg['installations'][0]['argv'] = [sys.executable, '-c', 'print(1)']
+        self.app = Service(self.cfg, self.root.parent / 'data')
+        self.app.probe('codex-local')
+        msg = self.app.send('bot-main', {'text': 't', 'allow_write': True}, 'win')
+        res = self.app.submit_task('bot-main', msg['work_id'], {
+            'prompt': 't', 'outputs': ['建议.md'],
+            'required_outputs': ['建议.docx', '建议.md']})
+        task = self.app.store.get('task', res['task_id'])
+        base = 'C:/Users/work/.xpp-out/' + task['execution_id']
+        def item(rel, digest):
+            return {'path': base + '/' + rel, 'digest': digest, 'size': 4,
+                    'source': 'output_dir', 'rel': rel}
+        receipt = {
+            'execution_id': task['execution_id'], 'spec_digest': task['spec_digest'],
+            'status': 'succeeded', 'process_tree_confirmed': True,
+            'supervision': 'windows-job-object', 'exit_code': 0,
+            'required_output_results': [
+                {'output': '建议.docx', 'present': True},
+                {'output': '建议.md', 'present': True}],
+            'artifacts': [
+                item('建议.docx', 'a' * 64),
+                item('_nop_fdiv4b.bin', 'b' * 64),
+                item('opengl_devices.log', 'c' * 64),
+                item('dump.ini', 'd' * 64),
+                item('word-page-6.png', 'e' * 64),
+                item('建议.md', 'f' * 64),
+            ],
+        }
+        done = self.app.complete_task(task, receipt)
+        self.assertEqual(len(done['receipt']['artifacts']), 6)
+        self._assert_chat_is_contract(done, ['建议.docx', '建议.md'])
 
     def test_undeclared_media_in_cwd_is_harvested_by_fallback(self):
         # A media file written straight to cwd (not the output dir, not declared)

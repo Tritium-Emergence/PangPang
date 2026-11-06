@@ -301,6 +301,21 @@ def _harvest_one(path, roots):
         os.close(fd)
 
 
+def _rel_under(path, root):
+    """Posix path of `path` inside `root`, or None when it is not inside."""
+    if not root:
+        return None
+    try:
+        rel = Path(path).resolve(strict=False).relative_to(
+            Path(root).expanduser().resolve(strict=False))
+    except (ValueError, OSError):
+        return None
+    text = rel.as_posix()
+    if not text or text == "." or ".." in text.split("/"):
+        return None
+    return text
+
+
 def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
                 new_only_names=None, exts=None):
     """Collect artifacts under `root`, bounded by a shared `budget`.
@@ -365,6 +380,9 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
             seen_digests.add(art["digest"])
             budget["files"] -= 1
             budget["bytes"] -= art["size"]
+            rel = _rel_under(art["path"], base)
+            if rel:
+                art = dict(art, rel=rel)
             out.append(dict(art, source=source))
     except OSError:
         pass
@@ -2711,7 +2729,11 @@ def supervise(directory):
                         seen_digests.add(art["digest"])
                         budget["files"] -= 1
                         budget["bytes"] -= art["size"]
-                        artifacts.append(dict(art, source="declared"))
+                        item = dict(art, source="declared")
+                        rel = _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd)
+                        if rel:
+                            item["rel"] = rel
+                        artifacts.append(item)
             except (ValueError, OSError, RuntimeError) as error:
                 # Any per-item failure — bad label, out-of-root, symlink loop, a file
                 # that vanished between is_file() and hash/stat — stays a warning of
@@ -2719,12 +2741,15 @@ def supervise(directory):
                 # is not declared_output_missing (that issue is the only outputs
                 # warning the control plane treats as a business failure).
                 output_warnings.append({"output": str(raw)[:200], "issue": type(error).__name__ + ":" + str(error)[:120]})
-        # (2) Dedicated output dir — the primary channel. Full recursive harvest;
-        # anything the executor wrote to $XPP_OUTPUT_DIR is a deliverable by
-        # construction, so no extension filter here. harvest_dir still does not
-        # walk toolchain trees (.venv*, venv, site-packages, __pycache__,
-        # *.dist-info, *.egg-info) or accept *.pyc / pyvenv.cfg / Activate*,
-        # so a venv created for isolation cannot fill the file budget.
+        # (2) Dedicated output dir — the primary channel. Full recursive harvest
+        # is recorded on this receipt and archived for evidence. No extension
+        # filter: a file written under $XPP_OUTPUT_DIR stays in the evidence set.
+        # Downloadable chat refs are chosen later, and only the hard contract
+        # plus declared outputs are registered when required_outputs is set.
+        # harvest_dir still does not walk toolchain trees (.venv*, venv,
+        # site-packages, __pycache__, *.dist-info, *.egg-info) or accept *.pyc /
+        # pyvenv.cfg / Activate*, so a venv created for isolation cannot fill
+        # the file budget.
         # Skipped if the dir could not be created/validated (read-only cwd, or
         # a rejected symlink seed).
         if output_dir is not None:
