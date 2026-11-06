@@ -518,7 +518,10 @@ def artifact_display_name(artifact):
                     return name
         path = artifact.get("path")
         if isinstance(path, str) and path:
-            return Path(path).name or "download"
+            # No contract rel. Split on both separators so a Windows path is not
+            # one Linux filename; the basename is taken before any length cap.
+            name = path.replace("\\", "/").rsplit("/", 1)[-1]
+            return name or "download"
     return "download"
 
 

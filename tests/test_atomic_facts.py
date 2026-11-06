@@ -78,6 +78,26 @@ class AtomicFactsTests(unittest.TestCase):
         self.assertNotIn('digest', v)
         self.assertEqual(v['verification_status'], 'recorded_metadata_only')
 
+    def test_windows_path_without_rel_keeps_filename(self):
+        # R6. Linux Path.name does not split on backslash, so the whole path
+        # becomes the name and a 120-character cap can drop the filename.
+        from pangpang.service import artifact_display_name
+        prefix = "C:\\Users\\" + ("verylongdirectoryname\\" * 8)
+        path = prefix + "final-report.docx"
+        self.assertGreater(len(path), 120)
+        whole = Path(path).name
+        self.assertGreater(len(whole), 120)
+        self.assertNotIn("final-report.docx", whole[:120])
+        self.assertEqual(artifact_display_name({"path": path}), "final-report.docx")
+        self.app.store.put("artifact", {"id": "artifact-win", "path": path, "digest": "c" * 64,
+            "size": 4, "host_id": "h1", "owner_bot_id": "bot-main", "work_id": None,
+            "source": "user_import"})
+        view = model_artifact_view(self.app, "artifact-win")
+        self.assertEqual(view["name"], "final-report.docx")
+        self.assertNotIn("C:", view["name"])
+        self.assertNotIn("verylongdirectoryname", view["name"])
+        self.assertLessEqual(len(view["name"]), 120)
+
     def test_unresolvable_ref_returns_stub(self):
         v = model_artifact_view(self.app, 'not-a-real-ref')
         self.assertEqual(v, {'ref': 'not-a-real-ref', 'resolved': False})
