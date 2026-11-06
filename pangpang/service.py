@@ -6133,18 +6133,19 @@ class Service:
 
     @staticmethod
     def _norm_contract_path(value):
-        """Relative contract path, slash-normalized. Absolute paths and `..` are not names."""
-        if not isinstance(value, str):
-            return None
-        text = value.replace("\\", "/").strip()
-        while text.startswith("./"):
-            text = text[2:]
-        text = text.strip("/")
-        if not text or ".." in text.split("/"):
-            return None
-        if text.startswith("/") or (len(text) >= 2 and text[1] == ":"):
-            return None
-        return text
+        """Same lexical relative path the runner stamps on a harvest."""
+        return runner.contract_rel(value)
+
+    def _contract_casefold(self, task):
+        """Windows hosts compare paths case-insensitively. POSIX and macOS do not."""
+        from .store import os_family
+        host = (getattr(self.execution, "hosts", None) or {}).get(task.get("host_id")) or {}
+        family = os_family(host.get("os"))
+        if family == "win":
+            return True
+        if family in {"posix", "mac"}:
+            return False
+        return os.name == "nt"
 
     @staticmethod
     def _chat_artifact_contract(task):
@@ -6165,37 +6166,61 @@ class Service:
         return names
 
     @staticmethod
-    def _rel_from_artifact_path(path, task):
-        """Contract-relative path of a harvested file, derived from its absolute path."""
-        if not isinstance(path, str) or not path or not isinstance(task, dict):
+    def _strip_rooted(path, root, *, casefold):
+        """Suffix of `path` under `root`, or None. Not a search for a later copy of `root`."""
+        if not path or not root or len(path) < len(root):
             return None
-        norm = path.replace("\\", "/")
-        execution_id = task.get("execution_id")
-        if (isinstance(execution_id, str) and execution_id
-                and "/" not in execution_id and "\\" not in execution_id):
-            marker = "/.xpp-out/" + execution_id + "/"
-            idx = norm.rfind(marker)
-            if idx >= 0:
-                return Service._norm_contract_path(norm[idx + len(marker):])
-        cwd = task.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            base = cwd.replace("\\", "/").rstrip("/")
-            head, tail = norm[:len(base)], norm[len(base):]
-            if base and head.lower() == base.lower() and tail.startswith("/"):
-                return Service._norm_contract_path(tail[1:])
+        head, tail = path[:len(root)], path[len(root):]
+        if casefold:
+            if head.casefold() != root.casefold():
+                return None
+        elif head != root:
+            return None
+        if tail.startswith("/"):
+            return tail[1:]
+        if tail == "":
+            return ""
         return None
 
     @staticmethod
-    def _artifact_matches_contract(item, names, task):
+    def _rel_from_artifact_path(path, task, *, casefold=False):
+        """Path relative to this execution's output dir, else to cwd.
+
+        The output root is `<cwd>/.xpp-out/<execution_id>` only. A later
+        `.xpp-out/<execution_id>` inside that tree is part of the relative
+        path, not a second root.
+        """
+        if not isinstance(path, str) or not path or not isinstance(task, dict):
+            return None
+        norm = path.replace("\\", "/")
+        cwd = task.get("cwd")
+        execution_id = task.get("execution_id")
+        if isinstance(cwd, str) and cwd:
+            base = cwd.replace("\\", "/").rstrip("/")
+            if (isinstance(execution_id, str) and execution_id
+                    and "/" not in execution_id and "\\" not in execution_id):
+                rooted = Service._strip_rooted(
+                    norm, base + "/.xpp-out/" + execution_id, casefold=casefold)
+                if rooted:
+                    return runner.contract_rel(rooted)
+            rooted = Service._strip_rooted(norm, base, casefold=casefold)
+            if rooted:
+                return runner.contract_rel(rooted)
+        return None
+
+    @staticmethod
+    def _artifact_matches_contract(item, names, task, *, casefold=False):
         if not isinstance(item, dict) or not names:
             return False
-        rel = Service._rel_from_artifact_path(item.get("path"), task)
+        rel = Service._rel_from_artifact_path(item.get("path"), task, casefold=casefold)
         if rel is None:
             rel = Service._norm_contract_path(item.get("rel"))
         if not rel:
             return False
         if rel in names:
             return True
+        if not casefold:
+            return False
         folded = rel.casefold()
         return any(name.casefold() == folded for name in names)
 
@@ -6261,8 +6286,10 @@ class Service:
             # artifact_refs do not: with a hard contract, only matching
             # required_outputs and declared outputs become downloadable refs.
             contract = self._chat_artifact_contract(current)
+            casefold = self._contract_casefold(current)
             for item in receipt.get("artifacts", []):
-                if contract is not None and not self._artifact_matches_contract(item, contract, current):
+                if contract is not None and not self._artifact_matches_contract(
+                        item, contract, current, casefold=casefold):
                     continue
                 a = self.store.put("artifact", dict(item, id=uid("artifact"), host_id=task["host_id"],
                                    owner_bot_id=task["owner_bot_id"], task_id=task["id"], work_id=task["work_id"]))

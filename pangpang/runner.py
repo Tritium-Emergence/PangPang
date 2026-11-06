@@ -301,6 +301,31 @@ def _harvest_one(path, roots):
         os.close(fd)
 
 
+def contract_rel(value):
+    """Lexical relative path shared by contracts and harvest names.
+
+    Slashes are folded, `.` and empty segments (`//`) drop out, and `..` or an
+    absolute path is not a name. The same string is what verify_required_outputs
+    resolves through pathlib, so a contract written as `sub/./a.md` or `sub//a.md`
+    names the file `sub/a.md`.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.replace("\\", "/").strip()
+    if not text or text.startswith("/") or (len(text) >= 2 and text[1] == ":"):
+        return None
+    parts = []
+    for part in text.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            return None
+        parts.append(part)
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
 def _rel_under(path, root):
     """Posix path of `path` inside `root`, or None when it is not inside."""
     if not root:
@@ -310,14 +335,48 @@ def _rel_under(path, root):
             Path(root).expanduser().resolve(strict=False))
     except (ValueError, OSError):
         return None
-    text = rel.as_posix()
-    if not text or text == "." or ".." in text.split("/"):
-        return None
-    return text
+    return contract_rel(rel.as_posix())
+
+
+def _in_contract(rel, contract):
+    """Host path case: Windows folds, every other host is exact."""
+    if not rel or not contract:
+        return False
+    if rel in contract:
+        return True
+    if os.name != "nt":
+        return False
+    folded = rel.casefold()
+    return any(name.casefold() == folded for name in contract)
+
+
+def _note_harvested(artifacts, seen, budget, art, *, source, rel, contract=None):
+    """Record one file. The same digest keeps a single slot; a contract path
+    replaces a non-contract path so dedup cannot drop the declared name."""
+    rel = contract_rel(rel) if isinstance(rel, str) else None
+    item = dict(art, source=source)
+    if rel:
+        item["rel"] = rel
+    digest = art["digest"]
+    if digest in seen:
+        if _in_contract(rel, contract) and not any(
+                old.get("digest") == digest and _in_contract(old.get("rel"), contract)
+                for old in artifacts):
+            for index, old in enumerate(artifacts):
+                if old.get("digest") == digest:
+                    artifacts[index] = item
+                    break
+        return
+    if budget["files"] <= 0 or art["size"] > budget["bytes"]:
+        return
+    seen.add(digest)
+    budget["files"] -= 1
+    budget["bytes"] -= art["size"]
+    artifacts.append(item)
 
 
 def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
-                new_only_names=None, exts=None):
+                new_only_names=None, exts=None, contract=None, into=None):
     """Collect artifacts under `root`, bounded by a shared `budget`.
 
     budget: mutable {"files": n, "bytes": n} decremented as we accept files.
@@ -328,7 +387,7 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
     Toolchain directories (`.venv*`, `venv`, `site-packages`, `__pycache__`,
     `*.dist-info`, `*.egg-info`) are not walked, and `*.pyc` / `pyvenv.cfg` /
     `Activate*` files are skipped. Neither spends `budget`."""
-    out = []
+    out = into if into is not None else []
     # Cap the number of entries we even LOOK at (independent of how many we
     # accept), and cap wall-clock, so a directory stuffed with millions of
     # tiny/duplicate files cannot stall the harvest (files that dedupe or fail
@@ -373,17 +432,18 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
             if exts is not None and entry.suffix.lower() not in exts:
                 continue
             art = _harvest_one(entry, roots)
-            if not art or art["digest"] in seen_digests:
+            if not art:
+                continue
+            rel = _rel_under(art["path"], base)
+            if art["digest"] in seen_digests:
+                # A contract path takes the slot a same-bytes sibling already holds.
+                _note_harvested(out, seen_digests, budget, art, source=source, rel=rel,
+                                contract=contract)
                 continue
             if art["size"] > budget["bytes"]:
                 continue
-            seen_digests.add(art["digest"])
-            budget["files"] -= 1
-            budget["bytes"] -= art["size"]
-            rel = _rel_under(art["path"], base)
-            if rel:
-                art = dict(art, rel=rel)
-            out.append(dict(art, source=source))
+            _note_harvested(out, seen_digests, budget, art, source=source, rel=rel,
+                            contract=contract)
     except OSError:
         pass
     return out
@@ -2698,6 +2758,28 @@ def supervise(directory):
         artifacts, output_warnings = [], []
         budget = {"files": HARVEST_MAX_FILES, "bytes": HARVEST_MAX_TOTAL_BYTES}
         seen_digests = set()
+        # Chat names. Lexical form, so `sub/./a.md` and the file `sub/a.md` agree.
+        # Required paths are recorded before the broad walk: a same-bytes sibling
+        # must not keep the only digest slot.
+        contract = set()
+        for raw in list(spec.get("required_outputs") or []) + list(spec.get("outputs") or []):
+            named = contract_rel(str(raw))
+            if named:
+                contract.add(named)
+        if output_dir is not None:
+            for raw in spec.get("required_outputs") or []:
+                named = contract_rel(str(raw))
+                if not named:
+                    continue
+                try:
+                    found = checked(str(Path(output_dir) / str(raw)), roots, False)
+                    if found.is_file():
+                        art = _harvest_one(found, roots)
+                        if art:
+                            _note_harvested(artifacts, seen_digests, budget, art,
+                                            source="output_dir", rel=named, contract=contract)
+                except (ValueError, OSError, RuntimeError):
+                    continue
         # (1) Declared outputs. `outputs` is the declared file list. This loop
         # NEVER overwrites receipt.status (that stays exit-code). A relative
         # entry is satisfied by output_dir/<raw> first — the directory the
@@ -2707,8 +2789,9 @@ def supervise(directory):
         # neither place has the file. No other directory is consulted. No
         # freshness check: a file that is present is enough. A hit is harvested
         # here; the output_dir pass below shares seen_digests, so the same
-        # bytes are not registered twice. Service.complete_task reads the
-        # declared_output_missing subset when it adjudicates business success.
+        # bytes are not registered twice. The declared name is the identity even
+        # when the resolved file sits in another allowed root. Service.complete_task
+        # reads the declared_output_missing subset when it adjudicates business success.
         for raw in spec.get("outputs", []):
             try:
                 places = []
@@ -2725,15 +2808,13 @@ def supervise(directory):
                     output_warnings.append({"output": str(raw)[:200], "issue": "declared_output_missing"})
                 else:
                     art = _harvest_one(found, roots)
-                    if art and art["digest"] not in seen_digests and art["size"] <= budget["bytes"] and budget["files"] > 0:
-                        seen_digests.add(art["digest"])
-                        budget["files"] -= 1
-                        budget["bytes"] -= art["size"]
-                        item = dict(art, source="declared")
-                        rel = _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd)
-                        if rel:
-                            item["rel"] = rel
-                        artifacts.append(item)
+                    if not art:
+                        continue
+                    rel = contract_rel(str(raw)) or _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd)
+                    if rel is None:
+                        output_warnings.append({"output": str(raw)[:200], "issue": "declared_output_unscoped"})
+                    _note_harvested(artifacts, seen_digests, budget, art, source="declared",
+                                    rel=rel, contract=contract)
             except (ValueError, OSError, RuntimeError) as error:
                 # Any per-item failure — bad label, out-of-root, symlink loop, a file
                 # that vanished between is_file() and hash/stat — stays a warning of
@@ -2746,6 +2827,7 @@ def supervise(directory):
         # filter: a file written under $XPP_OUTPUT_DIR stays in the evidence set.
         # Downloadable chat refs are chosen later, and only the hard contract
         # plus declared outputs are registered when required_outputs is set.
+        # A contract path wins its digest slot over a same-bytes sibling.
         # harvest_dir still does not walk toolchain trees (.venv*, venv,
         # site-packages, __pycache__, *.dist-info, *.egg-info) or accept *.pyc /
         # pyvenv.cfg / Activate*, so a venv created for isolation cannot fill
@@ -2753,8 +2835,9 @@ def supervise(directory):
         # Skipped if the dir could not be created/validated (read-only cwd, or
         # a rejected symlink seed).
         if output_dir is not None:
-            artifacts += harvest_dir(output_dir, roots, recursive=True, source="output_dir",
-                                     budget=budget, seen_digests=seen_digests)
+            harvest_dir(output_dir, roots, recursive=True, source="output_dir",
+                        budget=budget, seen_digests=seen_digests, contract=contract,
+                        into=artifacts)
         # (3) cwd shallow fallback — catches undeclared files (chart.png) written
         # straight to cwd. Only NEW first-layer files with a deliverable
         # extension qualify, so pre-existing source/input files are never
@@ -2762,9 +2845,10 @@ def supervise(directory):
         # Disabled entirely when the pre-run snapshot failed (cwd_before is None),
         # so we never mistake the whole pre-existing tree for new output.
         if cwd_before is not None:
-            artifacts += harvest_dir(cwd, roots, recursive=False, source="cwd_fallback",
-                                     budget=budget, seen_digests=seen_digests,
-                                     new_only_names=cwd_before, exts=HARVEST_FALLBACK_EXTS)
+            harvest_dir(cwd, roots, recursive=False, source="cwd_fallback",
+                        budget=budget, seen_digests=seen_digests,
+                        new_only_names=cwd_before, exts=HARVEST_FALLBACK_EXTS,
+                        contract=contract, into=artifacts)
         # (4) Required outputs — the HARD deliverable contract (distinct from the
         # soft `outputs` hint above, which NEVER gates). Evidence only; never flips
         # receipt.status (raw execution fact stays exit-code-driven). The control
