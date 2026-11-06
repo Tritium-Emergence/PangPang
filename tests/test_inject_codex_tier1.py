@@ -66,6 +66,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertNotIn("exec", argv)
         self.assertNotIn("-", argv)
         self.assertIn("--listen=stdio://", argv)
+        self.assertNotIn("--json", argv)
         self.assertNotIn(sentinel, argv)
         self.assertNotIn("fork", argv)
         self.assertNotIn("--approve-for-me", argv)
@@ -91,6 +92,49 @@ class CapabilityTests(unittest.TestCase):
             {"argv": stub, "stdin_protocol": "codex-app-server"}, sentinel), stub)
         self.assertIsNone(runner.stdin_session_protocol(
             {"stdin_protocol": "codex-app-server"}, stub))
+
+    def test_closed_stdin_codex_exec_emits_jsonl(self):
+        # No app-server protocol: `codex exec` would write a human transcript.
+        # `--json` makes stdout the JSONL activity already parses. The flag is
+        # not added to app-server, Claude stream-json, or a non-Codex binary.
+        sentinel = "SENTINEL_PROMPT_DO_NOT_LEAK"
+        argv = runner.executor_argv(
+            {"argv": ["codex", "exec", "--sandbox", "workspace-write", "-"]}, sentinel)
+        self.assertEqual(argv, ["codex", "exec", "--json", "--sandbox", "workspace-write", "-"])
+        self.assertNotIn(sentinel, argv)
+        prompted = runner.executor_argv({"argv": ["codex", "exec", "{prompt}"]}, "hello")
+        self.assertEqual(prompted, ["codex", "exec", "--json", "hello"])
+        windows = runner.executor_argv(
+            {"argv": ["C:\\Tools\\codex.EXE", "-m", "gpt", "exec", "-"]}, "prompt")
+        self.assertEqual(windows[:5], ["C:\\Tools\\codex.EXE", "-m", "gpt", "exec", "--json"])
+        already = runner.executor_argv({"argv": ["/usr/bin/codex", "exec", "--json", "-"]}, "prompt")
+        self.assertEqual(already, ["/usr/bin/codex", "exec", "--json", "-"])
+        self.assertNotIn("--json", runner.executor_argv({"argv": ["codex", "login"]}, "prompt"))
+        self.assertEqual(runner.executor_argv({"argv": ["codex", "app-server"]}, "prompt"),
+                         ["codex", "app-server"])
+        self.assertNotIn("--json", runner.executor_argv(
+            {"argv": ["python", "exec", "-"]}, "prompt"))
+        claude = runner.executor_argv({
+            "argv": ["claude", "-p"],
+            "execution_id": "exec-" + "ab" * 16,
+            "stdin_protocol": "claude-stream-json",
+        }, "prompt")
+        self.assertIn("--output-format=stream-json", claude)
+        self.assertNotIn("--json", claude)
+
+    def test_unknown_leading_option_is_not_treated_as_exec(self):
+        # Codex CLI 0.162.1: `--remote-auth-token-env` takes a value. Treating
+        # that value as the exec subcommand inserts --json and the CLI exits 2.
+        login_help = ["codex", "login", "--help"]
+        self.assertEqual(runner.executor_argv({"argv": login_help}, "prompt"), login_help)
+        token = ["codex", "--remote-auth-token-env", "exec", "login", "--help"]
+        self.assertEqual(runner.executor_argv({"argv": token}, "prompt"), token)
+        ended = ["codex", "--", "exec", "login", "--help"]
+        self.assertEqual(runner.executor_argv({"argv": ended}, "prompt"), ended)
+        # A known boolean before exec still reaches the subcommand.
+        strict = runner.executor_argv(
+            {"argv": ["codex", "--strict-config", "exec", "-"]}, "prompt")
+        self.assertEqual(strict, ["codex", "--strict-config", "exec", "--json", "-"])
 
     def test_fork_is_refused_and_bypass_is_not_an_accept(self):
         spec = {"argv": ["codex", "fork", "--last"], "execution_id": "exec-" + "cd" * 16,

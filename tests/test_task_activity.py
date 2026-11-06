@@ -198,6 +198,15 @@ class TaskActivityTests(unittest.TestCase):
         self.assertNotIn("ACP_THINK_SECRET", blob)
         self.assertNotIn("ACP_OTHER_SECRET", blob)
 
+    def test_unstructured_log_keeps_heartbeat_and_empty_recent(self):
+        activity = self._project(
+            "codex\nexec\ncommand: echo hi\nedited src/secret.py\n",
+            directory=self.root / "plain")
+        self._bounded(activity)
+        self.assertEqual(activity["recent"], [])
+        self.assertIsInstance(activity["last_log_at"], int)
+        self.assertNotIn("secret.py", json.dumps(activity))
+
     def test_fragments_are_dropped(self):
         kept = _line(_claude("Read", "kept-plain.py")).encode()
         malformed = self._project(b"{not json MALFORMED_TOKEN\n" + kept, directory=self.root / "malformed")
