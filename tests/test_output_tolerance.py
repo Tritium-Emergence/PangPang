@@ -529,6 +529,89 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(warned, [])
         self._assert_chat_is_contract(task, ['final.md', 'outside.md'])
 
+    def test_alias_does_not_drop_the_real_contract_file(self):
+        # R2-F1. link.md resolves to nested/other.md and shares report.md's bytes.
+        # The alias must not keep the only digest slot under a name the chat
+        # filter does not derive from that path.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'nested').mkdir()\n"
+            "payload = b'same-alias-bytes'\n"
+            "(d / 'nested' / 'other.md').write_bytes(payload)\n"
+            "(d / 'report.md').write_bytes(payload)\n"
+            "(d / 'link.md').symlink_to(d / 'nested' / 'other.md')\n"
+            "print('ok')\n"
+        )
+        try:
+            task = self._run(code, [], ['link.md', 'report.md'])
+        except OSError:
+            self.skipTest('symlink not permitted on this platform')
+        if task['status'] == 'failed' and task.get('error') != 'required_output_missing':
+            self.skipTest('symlink not permitted on this platform')
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertIn('report.md', {a.get('rel') for a in task['receipt']['artifacts']})
+        self._assert_chat_is_contract(task, ['report.md'])
+
+    def test_required_symlink_outside_output_dir_is_not_attached(self):
+        # R2-F2. required pre-collection must not follow a symlink out of the
+        # output dir just because the target is in allowed_roots.
+        side = self.root.parent / 'side-out'
+        side.mkdir()
+        target = side / 'secret.md'
+        target.write_text('outside')
+        self.cfg['hosts'][0]['allowed_roots'] = [str(self.root), str(side)]
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'ok.md').write_text('ok')\n"
+            "(d / 'secret.md').symlink_to(%r)\n"
+            "print('ok')\n" % str(target)
+        )
+        try:
+            task = self._run(code, [], ['secret.md', 'ok.md'])
+        except OSError:
+            self.skipTest('symlink not permitted on this platform')
+        self.assertEqual(task['status'], 'failed')
+        self.assertEqual(task['error'], 'required_output_missing')
+        paths = [a['path'] for a in task['receipt']['artifacts']]
+        self.assertFalse(any(str(side) in p for p in paths))
+        self.assertNotIn('secret.md', {a.get('rel') for a in task['receipt']['artifacts']})
+        host = self.app.execution.hosts[task['host_id']]
+        archive = Path(self.app.execution.directory(host, task['execution_id'])) / 'artifacts'
+        if archive.is_dir():
+            archived = {p.name for p in archive.iterdir()}
+            self.assertNotIn(__import__('hashlib').sha256(b'outside').hexdigest(), archived)
+        self._assert_chat_is_contract(task, ['ok.md'])
+
+    def test_posix_space_and_backslash_names_stay_distinct(self):
+        # R2-F3. A backslash or a trailing space is part of the filename.
+        # Lossy normalization must not pull that file onto the contract list.
+        from pangpang import runner
+        self.assertEqual(runner.contract_rel('sub\\final.md'), 'sub\\final.md')
+        self.assertEqual(runner.contract_rel('my report.md'), 'my report.md')
+        self.assertEqual(runner.contract_rel('my report.md '), 'my report.md ')
+        self.assertEqual(runner.contract_rel('sub/./final.md'), 'sub/final.md')
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'sub').mkdir()\n"
+            "(d / 'sub' / 'final.md').write_text('real')\n"
+            "(d / 'sub\\\\final.md').write_text('fake')\n"
+            "(d / 'my report.md').write_text('spaced')\n"
+            "(d / 'my report.md ').write_text('padded')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['sub/final.md', 'my report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        rels = {a.get('rel') for a in task['receipt']['artifacts']}
+        self.assertIn('sub\\final.md', rels)
+        self.assertIn('my report.md ', rels)
+        self._assert_chat_is_contract(task, ['sub/final.md', 'my report.md'])
+
     def test_undeclared_media_in_cwd_is_harvested_by_fallback(self):
         # A media file written straight to cwd (not the output dir, not declared)
         # is still caught by the shallow cwd fallback (source=cwd_fallback).

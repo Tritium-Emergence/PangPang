@@ -6132,9 +6132,9 @@ class Service:
         return unresolved
 
     @staticmethod
-    def _norm_contract_path(value):
+    def _norm_contract_path(value, *, windows=False):
         """Same lexical relative path the runner stamps on a harvest."""
-        return runner.contract_rel(value)
+        return runner.contract_rel(value, windows=windows)
 
     def _contract_casefold(self, task):
         """Windows hosts compare paths case-insensitively. POSIX and macOS do not."""
@@ -6148,7 +6148,7 @@ class Service:
         return os.name == "nt"
 
     @staticmethod
-    def _chat_artifact_contract(task):
+    def _chat_artifact_contract(task, *, windows=False):
         """Names allowed on the chat download list, or None when there is no hard contract.
 
         An empty required_outputs keeps today's harvest: a single undeclared
@@ -6160,7 +6160,7 @@ class Service:
             return None
         names = set()
         for raw in list(required) + list(task.get("outputs") or []):
-            norm = Service._norm_contract_path(raw)
+            norm = Service._norm_contract_path(raw, windows=windows)
             if norm:
                 names.add(norm)
         return names
@@ -6192,20 +6192,21 @@ class Service:
         """
         if not isinstance(path, str) or not path or not isinstance(task, dict):
             return None
-        norm = path.replace("\\", "/")
+        # POSIX keeps backslash as a filename character. Windows uses it as a separator.
+        norm = path.replace("\\", "/") if casefold else path
         cwd = task.get("cwd")
         execution_id = task.get("execution_id")
         if isinstance(cwd, str) and cwd:
-            base = cwd.replace("\\", "/").rstrip("/")
+            base = (cwd.replace("\\", "/") if casefold else cwd).rstrip("/")
             if (isinstance(execution_id, str) and execution_id
                     and "/" not in execution_id and "\\" not in execution_id):
                 rooted = Service._strip_rooted(
                     norm, base + "/.xpp-out/" + execution_id, casefold=casefold)
                 if rooted:
-                    return runner.contract_rel(rooted)
+                    return runner.contract_rel(rooted, windows=casefold)
             rooted = Service._strip_rooted(norm, base, casefold=casefold)
             if rooted:
-                return runner.contract_rel(rooted)
+                return runner.contract_rel(rooted, windows=casefold)
         return None
 
     @staticmethod
@@ -6214,7 +6215,7 @@ class Service:
             return False
         rel = Service._rel_from_artifact_path(item.get("path"), task, casefold=casefold)
         if rel is None:
-            rel = Service._norm_contract_path(item.get("rel"))
+            rel = Service._norm_contract_path(item.get("rel"), windows=casefold)
         if not rel:
             return False
         if rel in names:
@@ -6285,8 +6286,8 @@ class Service:
             # The receipt keeps the full harvest (evidence). Chat and result
             # artifact_refs do not: with a hard contract, only matching
             # required_outputs and declared outputs become downloadable refs.
-            contract = self._chat_artifact_contract(current)
             casefold = self._contract_casefold(current)
+            contract = self._chat_artifact_contract(current, windows=casefold)
             for item in receipt.get("artifacts", []):
                 if contract is not None and not self._artifact_matches_contract(
                         item, contract, current, casefold=casefold):

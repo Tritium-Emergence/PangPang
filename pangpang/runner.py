@@ -301,18 +301,20 @@ def _harvest_one(path, roots):
         os.close(fd)
 
 
-def contract_rel(value):
-    """Lexical relative path shared by contracts and harvest names.
+def contract_rel(value, *, windows=None):
+    """Lexical contract path shared by the runner and the chat filter.
 
-    Slashes are folded, `.` and empty segments (`//`) drop out, and `..` or an
-    absolute path is not a name. The same string is what verify_required_outputs
-    resolves through pathlib, so a contract written as `sub/./a.md` or `sub//a.md`
-    names the file `sub/a.md`.
+    `.` and empty `/` segments drop out, so `sub/./a.md` and `sub//a.md` name
+    `sub/a.md` — the path pathlib opens. `..` and an absolute path are not names.
+    On POSIX a backslash and a space are filename characters and stay put.
+    On Windows `\\` is a separator, same as `/`.
     """
-    if not isinstance(value, str):
+    if not isinstance(value, str) or value == "":
         return None
-    text = value.replace("\\", "/").strip()
-    if not text or text.startswith("/") or (len(text) >= 2 and text[1] == ":"):
+    if windows is None:
+        windows = os.name == "nt"
+    text = value.replace("\\", "/") if windows else value
+    if text.startswith("/") or (windows and len(text) >= 2 and text[1] == ":"):
         return None
     parts = []
     for part in text.split("/"):
@@ -326,8 +328,25 @@ def contract_rel(value):
     return "/".join(parts)
 
 
+def _inside(path, root):
+    """True when resolved `path` is inside resolved `root`."""
+    if not root:
+        return False
+    try:
+        Path(path).resolve(strict=False).relative_to(
+            Path(root).expanduser().resolve(strict=False))
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def _rel_under(path, root):
-    """Posix path of `path` inside `root`, or None when it is not inside."""
+    """Contract identity of `path` inside `root`, or None when it is not inside.
+
+    This is the only identity the chat filter re-derives from the absolute path.
+    A declaration string is not a substitute: a symlink alias must not take the
+    digest slot under the contract name while the bytes live somewhere else.
+    """
     if not root:
         return None
     try:
@@ -335,6 +354,8 @@ def _rel_under(path, root):
             Path(root).expanduser().resolve(strict=False))
     except (ValueError, OSError):
         return None
+    # as_posix uses the platform separator only. On POSIX a backslash in a
+    # filename stays a backslash; contract_rel must not turn it into a slash.
     return contract_rel(rel.as_posix())
 
 
@@ -2768,16 +2789,21 @@ def supervise(directory):
                 contract.add(named)
         if output_dir is not None:
             for raw in spec.get("required_outputs") or []:
-                named = contract_rel(str(raw))
-                if not named:
+                if not contract_rel(str(raw)):
                     continue
                 try:
                     found = checked(str(Path(output_dir) / str(raw)), roots, False)
-                    if found.is_file():
-                        art = _harvest_one(found, roots)
-                        if art:
-                            _note_harvested(artifacts, seen_digests, budget, art,
-                                            source="output_dir", rel=named, contract=contract)
+                    # Same boundary as verify_required_outputs. allowed_roots is
+                    # not enough: a symlink may resolve to another root.
+                    if not found.is_file() or not _inside(found, output_dir):
+                        continue
+                    art = _harvest_one(found, roots)
+                    if not art or not _inside(art["path"], output_dir):
+                        continue
+                    # Identity is where the bytes sit, not the declaration string.
+                    # A symlink alias must not hold the digest under the contract name.
+                    _note_harvested(artifacts, seen_digests, budget, art, source="output_dir",
+                                    rel=_rel_under(art["path"], output_dir), contract=contract)
                 except (ValueError, OSError, RuntimeError):
                     continue
         # (1) Declared outputs. `outputs` is the declared file list. This loop
@@ -2810,7 +2836,13 @@ def supervise(directory):
                     art = _harvest_one(found, roots)
                     if not art:
                         continue
-                    rel = contract_rel(str(raw)) or _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd)
+                    # Inside cwd or the output dir, the path is the identity (the
+                    # same string the chat filter derives). The declaration name
+                    # is used only when the file resolved outside both, so a
+                    # declared file in another allowed root is still named.
+                    rel = _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd)
+                    if rel is None:
+                        rel = contract_rel(str(raw))
                     if rel is None:
                         output_warnings.append({"output": str(raw)[:200], "issue": "declared_output_unscoped"})
                     _note_harvested(artifacts, seen_digests, budget, art, source="declared",
