@@ -260,3 +260,14 @@ class RestartDefaultData(unittest.TestCase):
                     argv = restart_argv("pangpang")
         self.assertEqual(argv[:4], ["/usr/bin/python3", "-m", "pangpang", "--data"])
         self.assertTrue(argv[4].endswith("data-v2"))
+
+
+class RestartLiveData(unittest.TestCase):
+    def test_explicit_live_data_overrides_cwd_default(self):
+        live = Path(tempfile.mkdtemp()) / "operator-cwd" / "data-v2"
+        live.mkdir(parents=True)
+        with mock.patch("pangpang.install_git.sys") as fake_sys:
+            fake_sys.executable = "/usr/bin/python3"
+            fake_sys.argv = ["/usr/bin/python3", "-m", "pangpang"]  # no --data
+            argv = restart_argv("pangpang", data=str(live))
+        self.assertEqual(argv[4], str(live.resolve()))

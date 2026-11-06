@@ -525,11 +525,12 @@ class Connector:
                 from .install_git import apply_upgrade, restart_argv, schedule_self_restart
                 if next(self._active_runs(), None) is not None:
                     raise Fault("upgrade_blocked_active_runs")
+                live_data = str(self.data)
                 # Fail closed on restartability *before* mutating the checkout.
-                restart_argv("pangpang.connector")
+                restart_argv("pangpang.connector", data=live_data)
                 result = apply_upgrade((body or {}).get("target_commit"))
                 if result.get("status") == "updated":
-                    schedule_self_restart("pangpang.connector", delay=1.5)
+                    schedule_self_restart("pangpang.connector", delay=1.5, data=live_data)
                     result = dict(result, restarting=True)
             else:
                 raise Fault("device_action_rejected")

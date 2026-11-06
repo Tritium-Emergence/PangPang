@@ -224,14 +224,21 @@ def _data_arg_from_argv(argv):
     return None
 
 
-def restart_argv(module):
-    """Rebuild a ``python -m <module> --data …`` argv for the current role."""
+def restart_argv(module, data=None):
+    """Rebuild a ``python -m <module> --data …`` argv for the current role.
+
+    Prefer the live process data directory (``data=``) when the caller has it —
+    ``python -m pangpang`` defaults ``--data`` to a *relative* ``data-v2`` that
+    follows cwd, which is not the same as ``resolve_data_dir``'s source-checkout
+    absolute path.
+    """
     if module not in {"pangpang", "pangpang.connector"}:
         raise Fault("invalid_restart_module", 400)
-    data = _data_arg_from_argv(sys.argv)
+    if data:
+        data = str(Path(data).expanduser().resolve())
+    else:
+        data = _data_arg_from_argv(sys.argv)
     if not data:
-        # Entry points allow omitting --data (defaults like data-v2 / connector-data).
-        # Resolve the same way cli/__main__ would, then pass it explicitly.
         from .cli import DataLocationError, resolve_data_dir
         role = "cloud" if module == "pangpang" else "connector"
         try:
@@ -268,13 +275,13 @@ def restart_argv(module):
     return [sys.executable, "-m", module, "--data", data, *rest]
 
 
-def schedule_self_restart(module, delay=1.0):
+def schedule_self_restart(module, delay=1.0, data=None):
     """Spawn ``python -m <module> --data …`` detached, then exit this process.
 
     Supervised installs (launchd KeepAlive / systemd Restart=always) can also
     simply exit; spawning a successor covers manually started sessions.
     """
-    argv = restart_argv(module)
+    argv = restart_argv(module, data=data)
 
     def _restart():
         time.sleep(max(0.2, float(delay)))
