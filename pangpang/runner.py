@@ -597,6 +597,14 @@ def _codex_cli_basename(token):
     return name == "codex"
 
 
+def _codex_known_bool(name):
+    """Flags that take no value. Unknown options are not guessed to be these."""
+    return name in (
+        _CODEX_APP_SERVER_BOOL_FLAGS | _CODEX_EXEC_ONLY_BOOL_FLAGS
+        | {"--dangerously-bypass-approvals-and-sandbox"}
+    )
+
+
 def codex_exec_json_argv(argv):
     """Add one `--json` to a closed-stdin `codex exec` launch.
 
@@ -605,6 +613,12 @@ def codex_exec_json_argv(argv):
     `item/started`). The app-server rewrite never calls this. A command that
     is not the Codex CLI is unchanged. `--json` is inserted once, immediately
     after `exec`, so it stays a flag rather than a positional after `-`.
+
+    Only a leading `exec` subcommand is rewritten. `--` ends options, so a
+    later `exec` is not the subcommand. A known value flag skips its value.
+    A known boolean flag is skipped alone. If a leading option's arity is
+    not known, the argv is left unchanged: the value of that option must not
+    be mistaken for `exec`.
     """
     if not argv or not _codex_cli_basename(argv[0]):
         return list(argv)
@@ -616,15 +630,25 @@ def codex_exec_json_argv(argv):
         token = argv[index]
         if not isinstance(token, str):
             return list(argv)
+        if token == "--":
+            return list(argv)
         if token == "exec":
             return [*argv[:index + 1], "--json", *argv[index + 1:]]
         if token in {"app-server", "-"} or not token.startswith("-"):
             return list(argv)
         name, inline = _codex_flag_name(token)
-        if inline is None and name in _CODEX_VALUE_FLAGS and index + 1 < len(argv):
+        if name in _CODEX_VALUE_FLAGS:
+            if inline is not None:
+                index += 1
+                continue
+            if index + 1 >= len(argv):
+                return list(argv)
             index += 2
             continue
-        index += 1
+        if _codex_known_bool(name):
+            index += 1
+            continue
+        return list(argv)
     return list(argv)
 
 

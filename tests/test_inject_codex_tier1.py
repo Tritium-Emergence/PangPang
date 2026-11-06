@@ -122,6 +122,20 @@ class CapabilityTests(unittest.TestCase):
         self.assertIn("--output-format=stream-json", claude)
         self.assertNotIn("--json", claude)
 
+    def test_unknown_leading_option_is_not_treated_as_exec(self):
+        # Codex CLI 0.162.1: `--remote-auth-token-env` takes a value. Treating
+        # that value as the exec subcommand inserts --json and the CLI exits 2.
+        login_help = ["codex", "login", "--help"]
+        self.assertEqual(runner.executor_argv({"argv": login_help}, "prompt"), login_help)
+        token = ["codex", "--remote-auth-token-env", "exec", "login", "--help"]
+        self.assertEqual(runner.executor_argv({"argv": token}, "prompt"), token)
+        ended = ["codex", "--", "exec", "login", "--help"]
+        self.assertEqual(runner.executor_argv({"argv": ended}, "prompt"), ended)
+        # A known boolean before exec still reaches the subcommand.
+        strict = runner.executor_argv(
+            {"argv": ["codex", "--strict-config", "exec", "-"]}, "prompt")
+        self.assertEqual(strict, ["codex", "--strict-config", "exec", "--json", "-"])
+
     def test_fork_is_refused_and_bypass_is_not_an_accept(self):
         spec = {"argv": ["codex", "fork", "--last"], "execution_id": "exec-" + "cd" * 16,
                 "stdin_protocol": "codex-app-server"}
