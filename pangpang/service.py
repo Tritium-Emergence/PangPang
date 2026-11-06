@@ -5538,7 +5538,7 @@ class Service:
         h = self._host(body.get("host_id"))
         info = self.execution.inspect_file(h, text(body.get("path")))
         artifact = dict(info, id=uid("artifact"), owner_bot_id=bot_id, host_id=h["id"], work_id=None,
-                        source="user_import", name=Path(info["path"]).name)
+                        source="user_import", name=artifact_display_name({"path": info.get("path")}))
         # An image the planner may look at: fetch its bytes once now (this route runs
         # outside any store transaction) so a turn never does host I/O to see it.
         if (Path(info["path"]).suffix.lower() in IMAGE_SUFFIXES
