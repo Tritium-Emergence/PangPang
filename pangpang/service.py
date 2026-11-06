@@ -3450,7 +3450,9 @@ class Service:
 
     def cloud_upgrade(self, body):
         """Panel: reset this cloud checkout to a confirmed tracking SHA, then restart."""
-        from .install_git import apply_upgrade, schedule_self_restart
+        from .install_git import apply_upgrade, restart_argv, schedule_self_restart
+        # Fail closed on restartability *before* mutating the checkout.
+        restart_argv("pangpang")
         result = apply_upgrade((body or {}).get("target_commit"))
         if result.get("status") == "updated":
             schedule_self_restart("pangpang", delay=1.5)

@@ -137,9 +137,6 @@ def require_target_commit(value):
     return commit
 
 
-def _tracking_tip_ref(remote, branch):
-    # Explicit remotes namespace — never ambiguous with tags/heads of the same name.
-    return "refs/remotes/%s/%s" % (remote, branch)
 
 
 def plan_upgrade(root=None):
@@ -156,7 +153,9 @@ def plan_upgrade(root=None):
             "git_fetch_failed", 400,
             advice=(fetch.stderr or fetch.stdout or "").strip()[:400] or None,
         )
-    tip = _rev_parse(root, _tracking_tip_ref(remote, branch))
+    # FETCH_HEAD is whatever this fetch just retrieved — independent of whether
+    # remote.origin.fetch maps the branch into refs/remotes/*.
+    tip = _rev_parse(root, "FETCH_HEAD")
     return {
         "version": __version__,
         "current_commit": current,
@@ -174,7 +173,6 @@ def apply_upgrade(target_commit, root=None):
         raise Fault("install_not_git_checkout", 400)
     target = require_target_commit(target_commit)
     remote, branch = tracking_ref()
-    tip_ref = _tracking_tip_ref(remote, branch)
     current = _rev_parse(root, "HEAD")
     fetch = _git(root, ["fetch", "--no-tags", "--", remote, branch], timeout=120)
     if fetch.returncode != 0:
@@ -182,7 +180,7 @@ def apply_upgrade(target_commit, root=None):
             "git_fetch_failed", 400,
             advice=(fetch.stderr or fetch.stdout or "").strip()[:400] or None,
         )
-    tip = _rev_parse(root, tip_ref)
+    tip = _rev_parse(root, "FETCH_HEAD")
     if current == target:
         # Still require target to sit on the fetched tracking history.
         ancestor = _git(root, ["merge-base", "--is-ancestor", target, tip], timeout=5)
@@ -232,7 +230,14 @@ def restart_argv(module):
         raise Fault("invalid_restart_module", 400)
     data = _data_arg_from_argv(sys.argv)
     if not data:
-        raise Fault("restart_data_arg_missing", 400)
+        # Entry points allow omitting --data (defaults like data-v2 / connector-data).
+        # Resolve the same way cli/__main__ would, then pass it explicitly.
+        from .cli import DataLocationError, resolve_data_dir
+        role = "cloud" if module == "pangpang" else "connector"
+        try:
+            data = str(resolve_data_dir(role, None, source_checkout=is_source_checkout()))
+        except DataLocationError as error:
+            raise Fault("restart_data_arg_missing", 400, advice=str(error)[:400]) from error
     rest = []
     argv = list(sys.argv)
     i = 0

@@ -522,9 +522,11 @@ class Connector:
                 result = self.execution.read_artifact({"host_id": self.host_id,
                     "snapshot_execution_id": body["execution_id"], "digest": body["digest"]})
             elif action == "upgrade":
-                from .install_git import apply_upgrade, schedule_self_restart
+                from .install_git import apply_upgrade, restart_argv, schedule_self_restart
                 if next(self._active_runs(), None) is not None:
                     raise Fault("upgrade_blocked_active_runs")
+                # Fail closed on restartability *before* mutating the checkout.
+                restart_argv("pangpang.connector")
                 result = apply_upgrade((body or {}).get("target_commit"))
                 if result.get("status") == "updated":
                     schedule_self_restart("pangpang.connector", delay=1.5)

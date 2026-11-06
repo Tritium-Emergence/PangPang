@@ -218,3 +218,45 @@ class TipNamespace(unittest.TestCase):
         with self.assertRaises(Fault) as raised:
             apply_upgrade(alien, root=root)
         self.assertEqual(raised.exception.code, "target_commit_not_on_tracking_ref")
+
+
+class FetchHeadTip(unittest.TestCase):
+    def test_fetch_head_tip_ignores_stale_remote_ref(self):
+        root, head = _repo()
+        remote = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", "--bare", str(root), str(remote)], check=True, capture_output=True)
+        subprocess.run(["git", "--git-dir", str(remote), "branch", "-M", "main"], check=True)
+        _git(root, "remote", "add", "origin", str(remote))
+        _git(root, "fetch", "origin", "main")
+        # Advance remote tip
+        work = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", str(remote), str(work)], check=True, capture_output=True)
+        _git(work, "config", "user.email", "t@example.com")
+        _git(work, "config", "user.name", "t")
+        _git(work, "checkout", "main")
+        (work / "README").write_text("c\n", encoding="utf-8")
+        _git(work, "add", "README")
+        _git(work, "commit", "-m", "three")
+        tip = subprocess.check_output(["git", "-C", str(work), "rev-parse", "HEAD"], text=True).strip()
+        _git(work, "push", "origin", "main")
+        # Point remote.fetch away from main so refs/remotes/origin/main stays stale (at head)
+        _git(root, "remote", "set-branches", "origin", "release")
+        # Stale remotes/origin/main still equals old head; FETCH_HEAD after fetch must be tip
+        plan = plan_upgrade(root=root)
+        self.assertEqual(plan["tip_commit"], tip)
+        self.assertNotEqual(plan["tip_commit"], head)
+        result = apply_upgrade(tip, root=root)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["commit"], tip)
+
+
+class RestartDefaultData(unittest.TestCase):
+    def test_omitted_data_resolves_default(self):
+        with mock.patch("pangpang.install_git.sys") as fake_sys:
+            fake_sys.executable = "/usr/bin/python3"
+            fake_sys.argv = ["/usr/bin/python3", "-m", "pangpang"]
+            with mock.patch("pangpang.install_git.is_source_checkout", return_value=True):
+                with mock.patch("pangpang.cli.source_root", return_value=Path("/tmp/repo")):
+                    argv = restart_argv("pangpang")
+        self.assertEqual(argv[:4], ["/usr/bin/python3", "-m", "pangpang", "--data"])
+        self.assertTrue(argv[4].endswith("data-v2"))
