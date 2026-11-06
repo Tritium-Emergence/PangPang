@@ -521,6 +521,14 @@ class Connector:
             elif action == "artifact_read":
                 result = self.execution.read_artifact({"host_id": self.host_id,
                     "snapshot_execution_id": body["execution_id"], "digest": body["digest"]})
+            elif action == "upgrade":
+                from .install_git import apply_upgrade, schedule_self_restart
+                if any(r.get("status") in {"launching", "active"} for r in self._active_runs()):
+                    raise Fault("upgrade_blocked_active_runs")
+                result = apply_upgrade((body or {}).get("target_commit"))
+                if result.get("status") == "updated":
+                    schedule_self_restart(delay=1.5)
+                    result = dict(result, restarting=True)
             else:
                 raise Fault("device_action_rejected")
         except Exception as error:
@@ -667,7 +675,13 @@ A run that has ALREADY been reported/acknowledged is IMMUTABLE — the
         except Exception:
             activities = []
         from .store import CONTRACT_VERSION
-        response = self.request({"version": __version__, "instance_id": self.instance_id,
+        from .install_git import install_identity
+        identity = install_identity()
+        response = self.request({"version": identity.get("version") or __version__,
+                                 "commit": identity.get("commit") or "unknown",
+                                 "ref": identity.get("ref") or "unknown",
+                                 "source": identity.get("source") or "unknown",
+                                 "instance_id": self.instance_id,
                                  "supported_contract_version": CONTRACT_VERSION,
                                  "reports": reports, "receipts": receipts,
                                  "activities": activities,
