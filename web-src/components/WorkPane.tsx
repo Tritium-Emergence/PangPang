@@ -5,7 +5,7 @@ import type {Routine, Task, Work, Artifact} from '../types';
 import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
-import {activitySummary, operatorStatement, pageWindow} from '../pure';
+import {activitySummary, displayedReachability, operatorStatement, pageWindow, progressPhaseText} from '../pure';
 import {attentionLabel, taskLabel, exchangeLabel, dateTime, scheduleText, friendlyError, fileSize, checkpointView} from '../display';
 import {MediaPreview} from './MediaPreview';
 import {Facts, Created, Value} from './Facts';
@@ -206,6 +206,7 @@ export function WorkPane({store}: {store: Store}) {
               <h4 className="font-medium">{botName(w.owner_bot_id)}</h4>
               <span className="text-xs text-muted" data-attn={w.attention}>{tr(attentionLabel[w.attention || 'unknown'] ?? 'attention.unknown')}</span>
             </div>
+            {w.attention === 'working' && progressPhaseText(w.progress_phase, tr) ? <p data-testid="work-progress-phase" data-progress-phase={w.progress_phase} className="mt-1 text-xs text-warn">{progressPhaseText(w.progress_phase, tr)}</p>: null}
             <p className="mt-1 line-clamp-2 text-sm">{w.goal}</p>
             <Created at={w.created} />
             <Facts value={checkpointView(w.checkpoint, tr)} labels={checkpointLabels(tr)} />
@@ -290,6 +291,7 @@ function WorkDetail({work, store, onClose}: {work: Work; store: Store; onClose: 
   return <Modal id="work-detail-dialog" title={tr('workpane.workDetail')} onClose={onClose}>
     <h2 className="font-semibold">{tr('workpane.workDetail')} · {name(work.owner_bot_id)}</h2>
     <p className="text-xs text-muted">{tr(attentionLabel[work.attention || 'unknown'] ?? 'attention.unknown')}</p>
+    {work.attention === 'working' && progressPhaseText(work.progress_phase, tr) ? <p data-testid="work-progress-phase" className="text-xs text-warn">{progressPhaseText(work.progress_phase, tr)}</p>: null}
     <Created at={work.created} />
     <h3 className="mt-3 text-sm font-semibold">{tr('workpane.fullRequirement')}</h3><p className="text-sm">{work.goal || tr('workpane.none')}</p>
     <Facts value={checkpointView(work.checkpoint, tr)} labels={checkpointLabels(tr)} />
@@ -302,10 +304,12 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
   const {t: tr} = useTranslation();
   const activity = activitySummary(t, tr);
   const note = operatorStatement(t);
+  const phase = displayedReachability(t);
+  const phaseText = phase === 'unreachable' || phase === 'dispatched' ? progressPhaseText(phase, tr) : null;
   return (
     <div className="panel task rounded-xl border border-line bg-raised p-4" data-status={t.status}>
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium">{taskLabel[t.status] ? tr(taskLabel[t.status]): t.status}</span>
+        <span className="text-xs font-medium">{phaseText || (taskLabel[t.status] ? tr(taskLabel[t.status]): t.status)}</span>
         <span className="text-xs text-muted">{t.installation_id} · {t.host_id}</span>
       </div>
       <p className="mt-1 line-clamp-2 text-sm">{(t.prompt || '').slice(0, 160)}</p>

@@ -2,6 +2,10 @@
 // labels only — never used for state/permission decisions (those use raw codes).
 export default {
   attention: {needs_attention: '需要处理', blocked: '受阻', working: '推进中', done_unread: '完成未读', settled: '已收妥', unknown: '状态待核验'},
+  progress: {
+    deviceUnreachable: '暂时联系不上设备，等待重新连接',
+    dispatchedWaiting: '已派发，等待设备进展',
+  },
   task: {queued: '排队中', pending: '待执行', running: '执行中', starting: '启动中', awaiting_approval: '待批准', unknown: '状态未知', cancel_requested: '正在取消', succeeded: '执行成功', failed: '执行失败', cancelled: '已取消', blocked: '受阻'},
   exchange: {pending: '等待回应', responded: '已回应', failed: '失败', cancelled: '已取消'},
   capability: {model: '对话模型', executor: '执行器', device: '设备', web_search: '联网搜索', semantic_gate: '语义校验'},
@@ -28,6 +32,7 @@ export default {
     local_file_receive_disabled: '这台电脑没有开启接收文件，请配置连接器后重启。',
     upload_too_large: '单个文件最大 8MB。',
     connector_offline: '这台电脑当前离线。',
+    routine_coalesced: '同一例程还有未结束的监督或待处理任务，这次没有新开工作，也不算已跑成。',
     connector_operation_pending: '电脑响应超时，请稍后重试。',
     runner_rejected_request: '电脑拒绝了该操作：路径不在授权目录内、不是目录，或文件已存在。',
     transport_unavailable: '连不上这台电脑。',
@@ -208,6 +213,7 @@ export default {
     workingComplex: '这个有点复杂，我正在处理，稍候给你结果…',
     delegatedTo: '已交给 {{name}}：{{text}}，执行中…', dispatchedTo: '已派 {{executor}} 执行：{{prompt}}，进行中…',
     awaitingResult: '正在等待执行结果…', awaitingApprovalLabel: '待你批准', needsConfirm: '⏸ 需你确认后才执行',
+    pendingApprovalHint: '有 {{n}} 项待你批准，点下方卡片',
     progressLastLog: '最后日志 {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
     progressAwaitingTool: '启动中 / 等待首条工具',
     executorPrefix: '执行器 {{id}}', approve: '批准执行', approveOnce: '仅此一次', approveAlways: '始终允许', cancel: '取消', needsAttention: '需要处理',
@@ -256,6 +262,7 @@ export default {
     },
     currentWork: '当前工作', noActiveWork: '还没有进行中的工作。', noGoal: '(无目标)', blockedReason: '受阻原因：',
     cancelling: '正在取消…（等待执行边界停止确认）', stopWork: '停止此工作', needsApproval: '⏸ 需你批准：{{prompt}}',
+    pendingApprovalElsewhere: '有 {{n}} 项待你批准，见对话底部卡片',
     approve: '批准执行', cancel: '取消', unknownStatus: '状态未知：{{installation}} · {{host}}。核验后收口。',
     reconcile: '核对执行结果', continueWork: '继续此 Work', operationFailed: '操作失败',
   },

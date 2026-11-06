@@ -837,6 +837,8 @@ class Runtime:
                 d, own=True, store=self.store, installations=service.execution.installations,
                 hosts=service.execution.hosts)
                 for d in self.store.find("dependency", source_work_id=selected["id"], newest=True, limit=20)]
+            from .activity import annotate_dependency_reachability
+            annotate_dependency_reachability(service, deps)
             return {"work": model_work_view(selected), "messages": messages,
                     "children": children, "exchanges": exchanges, "dependencies": deps}
         if name == "search_history":
@@ -931,6 +933,12 @@ class Runtime:
             view["inputs"] = task.get("inputs")
             from .context import ops_approval_fields
             view.update(ops_approval_fields(task))
+            from .activity import task_reachability
+            # Status stays as stored. Reachability is the current online bit,
+            # not last_observation_error, and is omitted when status copy wins.
+            fact = task_reachability(service, task)
+            if fact:
+                view["reachability"] = fact
             # Model-visible task inspection exposes only structured receipt facts.
             # Raw executor tail remains operator-only in the stored Task receipt.
             # Supervision evidence (process_tree_confirmed / supervision /

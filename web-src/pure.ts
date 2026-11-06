@@ -187,6 +187,7 @@ export interface ActivitySummaryTask {
   created?: number;
   started?: number;
   required_outputs?: unknown;
+  reachability?: {phase?: string; last_log_at?: number | null} | null;
   activity?: {
     status?: string;
     last_log_at?: number | null;
@@ -204,10 +205,89 @@ function clockHMS(unix: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+const REACH_HIDDEN = new Set(['succeeded', 'failed', 'cancelled', 'cancel_requested']);
+
+// Server phase, ignored once status copy wins (terminal or cancel_requested).
+export function displayedReachability(task: {status?: string; reachability?: {phase?: string} | null} | null | undefined): 'unreachable' | 'dispatched' | 'active' | null {
+  if (!task || REACH_HIDDEN.has(String(task.status || ''))) return null;
+  const phase = task.reachability?.phase;
+  if (phase === 'unreachable' || phase === 'dispatched' || phase === 'active') return phase;
+  return null;
+}
+
+export function progressPhaseText(phase: string | null | undefined, tr: Tr): string | null {
+  if (phase === 'unreachable') return tr('progress.deviceUnreachable');
+  if (phase === 'dispatched') return tr('progress.dispatchedWaiting');
+  return null;
+}
+
+// Bot-level awaiting_approval rows. Not derived from the live preview or from
+// the current conversation's activity.tasks.
+export function botAwaitingApproval<T extends {status?: string; work_id?: string}>(
+  tasks: readonly T[],
+  ownedWorkIds: ReadonlySet<string>,
+): T[] {
+  return tasks.filter((task) => task.status === 'awaiting_approval' && ownedWorkIds.has(task.work_id || ''));
+}
+
+export function outOfScopeApprovals<T extends {work_id?: string}>(
+  awaiting: readonly T[],
+  scope: ReadonlySet<string>,
+): T[] {
+  return awaiting.filter((task) => !scope.has(task.work_id || ''));
+}
+
+export function pendingApprovalHint(count: number, tr: Tr): string | null {
+  if (!Number.isInteger(count) || count <= 0) return null;
+  return tr('chat.pendingApprovalHint', {n: count});
+}
+
+const TASK_TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
+
+export interface ChatStatusInput {
+  streaming: boolean;
+  thinking: boolean;
+  recovering: boolean;
+  delegate: {name: string; text: string} | null;
+  task?: {
+    status?: string;
+    installation_id?: string;
+    prompt?: string;
+    reachability?: {phase?: string} | null;
+  } | null;
+  awaitingResult: boolean;
+}
+
+// One chat status sentence. An offline starting/running connector wins over
+// thinking, delegation, and “in progress”. cancel_requested and a terminal
+// status win over the dispatched “进行中” fallback.
+export function chatStatusSentence(input: ChatStatusInput, tr: Tr): string {
+  if (input.streaming) return '';
+  const task = input.task;
+  if (displayedReachability(task) === 'unreachable') return tr('progress.deviceUnreachable');
+  const status = String(task?.status || '');
+  if (status === 'cancel_requested') return tr('task.cancel_requested');
+  if (TASK_TERMINAL.has(status)) return tr('task.' + status);
+  if (input.thinking) return tr('chat.thinking');
+  if (input.recovering) return tr('chat.workingComplex');
+  if (input.delegate) return tr('chat.delegatedTo', {name: input.delegate.name, text: (input.delegate.text || '').slice(0, 40)});
+  if (displayedReachability(task) === 'dispatched') return tr('progress.dispatchedWaiting');
+  if (task) return tr('chat.dispatchedTo', {
+    executor: task.installation_id || tr('chat.executorFallback'),
+    prompt: (task.prompt || '').slice(0, 40),
+  });
+  if (input.awaitingResult) return tr('chat.awaitingResult');
+  return '';
+}
+
 // Absolute queue or start clock, last log time, latest step, and required files
 // already present. The snapshot activity has no age_s; that field stays on the planner packet.
 // starting uses its own clock — started is recorded before the process is running.
+// A connector reachability phase replaces that clock when there is no real report
+// or the device is offline. Terminal and cancel_requested keep their own copy.
 export function activitySummary(task: ActivitySummaryTask | null | undefined, tr: Tr): string | null {
+  const phaseText = progressPhaseText(displayedReachability(task), tr);
+  if (phaseText) return phaseText;
   const activity = task?.activity;
   if (!activity) return null;
   const status = String(activity.status || task?.status || '');
@@ -258,6 +338,7 @@ export interface ChatProgressTask {
   status?: string;
   started?: number;
   created?: number;
+  reachability?: {phase?: string} | null;
   activity?: {
     last_log_at?: number | null;
     recent?: {tool?: string; path?: string}[];
@@ -306,6 +387,10 @@ export function truncateChatProgressPath(path: string, max = CHAT_PROGRESS_PATH_
 export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): string | null {
   const picked = pickChatProgressTask(tasks);
   if (!picked?.task.activity) return null;
+  const phase = displayedReachability(picked.task);
+  // The coarse sentence already says unreachable or dispatched. An empty
+  // connector report must not add "waiting for the first tool".
+  if (phase === 'unreachable' || phase === 'dispatched') return null;
   const activity = picked.task.activity;
   const parts: string[] = [];
   if (typeof activity.last_log_at === 'number' && activity.last_log_at > 0) {
@@ -323,7 +408,7 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
   // Local projection always sends recent as an array. Empty means the run log
   // has no complete tool row yet (startup banner only). A missing recent is a
   // different activity shape and stays on the clock or the coarse sentence.
-  if (Array.isArray(activity.recent) && activity.recent.length === 0 && picked.task.status === 'running') {
+  if (phase !== 'active' && Array.isArray(activity.recent) && activity.recent.length === 0 && picked.task.status === 'running') {
     parts.push(tr('chat.progressAwaitingTool'));
   }
   if (!parts.length) return null;

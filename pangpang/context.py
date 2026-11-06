@@ -7,7 +7,7 @@ from .store import Fault, encode
 from .replies import history_reply_text
 from .history import compacted_history, corrections_for, corrected_into, COMPACTED_WORKS
 from .execution import task_interjection_tier
-from .activity import attach_dependency_activity
+from .activity import annotate_dependency_reachability, attach_dependency_activity
 from .planner_prompt import PLANNER_SYSTEM_HEAD, PLANNER_SYSTEM_TAIL, WEB_SEARCH_GUIDANCE, NOTICE, detect_language, response_language_block
 
 
@@ -315,6 +315,7 @@ def projection(service, turn):
     # Activity is attached after the dependency view is built. The view itself
     # stays free of file reads so read_work can keep using it inside a transaction.
     attach_dependency_activity(service, dependencies)
+    annotate_dependency_reachability(service, dependencies)
     packet = {"identity": identity,
               # System-authoritative current time — the model must use this, never
               # guess the date from memory (see prompt). Rebuilt every turn.

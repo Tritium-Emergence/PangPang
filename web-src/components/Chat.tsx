@@ -7,7 +7,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
-import {CHAT_PROGRESS_REFRESH_MS, chatActivityLine, chatProgressRefreshDue, pickChatProgressTask, splitPinnedTimeline, visibleChatMessages} from '../pure';
+import {CHAT_PROGRESS_REFRESH_MS, botAwaitingApproval, chatActivityLine, chatProgressRefreshDue, chatStatusSentence, pendingApprovalHint, pickChatProgressTask, splitPinnedTimeline, visibleChatMessages} from '../pure';
 import {conversationActivity, currentWorkId} from '../scope';
 
 // Chat log. RCB-critical:
@@ -33,7 +33,9 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   // growing pile of history in the conversation. The card is pinned after every
   // message so a later line cannot bury the one-tap approve control.
   const myWorkIds = new Set((snap.work || []).filter((w) => w.owner_bot_id === botId).map((w) => w.id));
-  const taskCards = (snap.tasks || []).filter((t) => myWorkIds.has(t.work_id!) && t.status === 'awaiting_approval');
+  // Bot-wide, not the conversation's activity.tasks and not the live preview.
+  const taskCards = botAwaitingApproval(snap.tasks || [], myWorkIds);
+  const approvalHint = pendingApprovalHint(taskCards.length, t);
 
   // Unknown recovery cards (named action, not anonymous spinner).
   const unknownTasks = (snap.tasks || []).filter((t) => t.owner_bot_id === botId && t.status === 'unknown');
@@ -109,7 +111,14 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   // A streaming preview still suppresses this whole bubble. The dispatched sentence
   // names the same task as the denseline, not whichever row the snapshot listed first.
   const progressTask = pickChatProgressTask(activity.tasks)?.task;
-  const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): progressTask ? t('chat.dispatchedTo', {executor: progressTask.installation_id || t('chat.executorFallback'), prompt: (progressTask.prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
+  const progress = chatStatusSentence({
+    streaming: livePreviews.length > 0,
+    thinking: active.length > 0,
+    recovering,
+    delegate: delegate ? {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot || '', text: delegate.text || ''}: null,
+    task: progressTask,
+    awaitingResult: !!progressWork,
+  }, t);
   const progressLine = progress ? chatActivityLine(activity.tasks, t) : null;
   const hasProgressWork = !!progressWork;
   const activeTaskCount = activity.tasks.length;
@@ -175,6 +184,7 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
       {progress && progressLine ? <div data-testid="chat-progress-line" aria-hidden="true" className="-mt-1 mb-2 max-w-[80%] px-4 text-xs text-muted">{progressLine}</div>: null}
       {pinned.length ? (
         <div data-testid="approval-pin" className="sticky bottom-0 z-10 bg-surface">
+          {approvalHint ? <div data-testid="approval-hint" role="status" className="px-1 py-2 text-sm text-warn">{approvalHint}</div>: null}
           {pinned.map((item) => <div key={item.key} data-timeline={item.key} data-created={item.at} data-pinned="approval">{item.node}</div>)}
         </div>
       ): null}

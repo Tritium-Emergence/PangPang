@@ -6,6 +6,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {friendlyError} from '../display';
+import {botAwaitingApproval, outOfScopeApprovals, progressPhaseText} from '../pure';
 import {RecoveryActions} from './WorkPane';
 import {AttentionPanel, type Goto} from './AttentionBar';
 
@@ -36,6 +37,10 @@ export function Inspector({store, botId, goto}: {store: Store; botId?: string; g
   // Action targets are strictly within the current-Work subtree (activity.scope).
   const scopeTasks = (snap.tasks || []).filter((t) => activity.scope.has(t.work_id || ''));
   const awaiting = scopeTasks.filter((t) => t.status === 'awaiting_approval');
+  const ownedWorkIds = new Set((snap.work || []).filter((w) => w.owner_bot_id === botId).map((w) => w.id));
+  // Out of the current Work subtree: point at the sticky card. No approve/stop.
+  const elsewhere = outOfScopeApprovals(botAwaitingApproval(snap.tasks || [], ownedWorkIds), activity.scope);
+  const progressText = current?.attention === 'working' ? progressPhaseText(current?.progress_phase, t) : null;
   const unknownInScope = scopeTasks.filter((t) => t.status === 'unknown');
   // Work-level Stop truth: "stopping" comes from the current WORK's own
   // cancel_requested (durable), NOT derived from a task's status. Stop is offered for
@@ -65,6 +70,17 @@ export function Inspector({store, botId, goto}: {store: Store; botId?: string; g
       <div id="work-inspector" data-testid="work-inspector" className="flex min-h-0 flex-1 flex-col">
         <div className="border-b border-line px-4 py-3 text-xs font-semibold tracking-widest text-muted">{t('inspector.currentWork')}</div>
         <div className="flex-1 overflow-auto p-3">
+          {elsewhere.length ? (
+            <button
+              type="button"
+              data-testid="approval-scope-hint"
+              className="mb-3 text-left text-xs text-brand hover:underline"
+              onClick={() => {
+                (window as any).__gotoChat?.();
+                window.setTimeout(() => document.querySelector('[data-testid="approval-pin"]')?.scrollIntoView({block: 'nearest'}), 0);
+              }}
+            >{t('inspector.pendingApprovalElsewhere', {n: elsewhere.length})}</button>
+          ): null}
           {!current ? (
             <p className="text-sm text-muted">{t('inspector.noActiveWork')}</p>
 ): (
@@ -72,6 +88,7 @@ export function Inspector({store, botId, goto}: {store: Store; botId?: string; g
               {/* attention label read verbatim; fail-closed to `unknown` if absent (RCB) */}
               {(() => { const a = (current.attention || 'unknown') as AttentionState;
                 return <div className={`text-xs font-medium ${ATTN_TONE[a]}`}>{t(ATTN_LABEL[a])}</div>; })()}
+              {progressText ? <p data-testid="work-progress-phase" className="mt-1 text-xs text-warn">{progressText}</p>: null}
               <p className="mt-1 text-sm">{current.goal || t('inspector.noGoal')}</p>
               {blockedTurn ? <p data-testid="blocked-reason" className="mt-1 text-xs text-warn">{t('inspector.blockedReason')}{friendlyError(blockedTurn.error)}</p>: null}
 

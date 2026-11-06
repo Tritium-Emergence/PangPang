@@ -2,6 +2,10 @@
 // asserts this). Display labels only — never used for state/permission decisions.
 export default {
   attention: {needs_attention: 'Needs attention', blocked: 'Blocked', working: 'In progress', done_unread: 'Done, unread', settled: 'Settled', unknown: 'Pending review'},
+  progress: {
+    deviceUnreachable: 'The machine cannot be reached. Waiting to reconnect.',
+    dispatchedWaiting: 'Dispatched. Waiting for the device to report progress.',
+  },
   task: {queued: 'Queued', pending: 'Pending', running: 'Running', starting: 'Starting', awaiting_approval: 'Awaiting approval', unknown: 'Unknown', cancel_requested: 'Cancelling', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled', blocked: 'Blocked'},
   exchange: {pending: 'Awaiting reply', responded: 'Replied', failed: 'Failed', cancelled: 'Cancelled'},
   capability: {model: 'Chat model', executor: 'Executor', device: 'Device', web_search: 'Web search', semantic_gate: 'Semantic check'},
@@ -28,6 +32,7 @@ export default {
     local_file_receive_disabled: 'This computer has file receiving disabled. Configure the connector and restart.',
     upload_too_large: 'Each file is at most 8MB.',
     connector_offline: 'This computer is currently offline.',
+    routine_coalesced: 'This routine still has unfinished supervision or a pending task, so this run did not start.',
     connector_operation_pending: 'The computer timed out. Please retry shortly.',
     runner_rejected_request: 'The computer rejected the operation: the path is outside the authorized directory, is not a directory, or the file already exists.',
     transport_unavailable: 'Cannot reach this computer.',
@@ -326,6 +331,7 @@ export default {
     delegatedTo: 'Handed off to {{name}}: {{text}} — in progress…', dispatchedTo: 'Dispatched to {{executor}}: {{prompt}}, in progress…',
 
     awaitingResult: 'Waiting for the result…', awaitingApprovalLabel: 'Awaiting your approval', needsConfirm: '⏸ Needs your confirmation before running',
+    pendingApprovalHint: '{{n}} waiting for your approval. Use the card below.',
     progressLastLog: 'last log {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
     progressAwaitingTool: 'starting / waiting for the first tool',
 
@@ -407,6 +413,7 @@ export default {
     currentWork: 'Current work', noActiveWork: 'No work in progress yet.', noGoal: '(no goal)', blockedReason: 'Blocked by: ',
 
     cancelling: 'Cancelling… (waiting for the execution boundary to confirm it stopped)', stopWork: 'Stop this work', needsApproval: '⏸ Needs your approval: {{prompt}}',
+    pendingApprovalElsewhere: '{{n}} waiting for your approval. See the card at the bottom of the chat.',
 
     approve: 'Approve', cancel: 'Cancel', unknownStatus: 'Status unknown: {{installation}} · {{host}}. Resolve after verification.',
 

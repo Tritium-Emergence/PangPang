@@ -7683,6 +7683,69 @@ class Service:
             routine["next_run_at"] = next_run(routine["schedule"], routine["timezone"], time.time()) if active else None
             return self.store.put("routine", routine)
 
+    def _connector_task_online(self, task):
+        """True unless this task's connector device is offline right now.
+
+        Local and ssh tasks are not a reachability question. Connector online
+        is broker.online (the same bit as devices.online), never
+        last_observation_error.
+        """
+        host = self.execution.hosts.get(task.get("host_id")) or {}
+        if host.get("transport") != "connector":
+            return True
+        try:
+            return self.broker.online(task.get("host_id")) is True
+        except Exception:
+            return False
+
+    def _matching_rows(self, kind, **where):
+        """Every row matching the filter. find()'s limit is a silent cap."""
+        cursor = None
+        while True:
+            page, cursor = self.store.find_page(kind, cursor=cursor, limit=1000, **where)
+            yield from page
+            if cursor is None:
+                return
+
+    def _routine_coalesce_reason(self, routine_id):
+        """Why this routine must not open another supervisor Work, or None.
+
+        Same routine_id only. An unfinished supervisor turn blocks a new shell.
+        A real task blocks only when it is awaiting_approval, unknown, or
+        starting/running on a connector that is offline now. An online
+        in-progress task stays eligible for stage review. Another routine's
+        task is never consulted. The scan is the whole matching set: a page
+        cap must not hide a later blocked task and open an empty Work.
+        """
+        seen = set()
+        for status in ("active", "waiting", "blocked"):
+            for work in self._matching_rows("work", routine_id=routine_id, status=status):
+                wid = work.get("id")
+                if not wid or wid in seen:
+                    continue
+                seen.add(wid)
+                reason = self._work_coalesce_reason(wid)
+                if reason:
+                    return reason
+        return None
+
+    def _work_coalesce_reason(self, work_id):
+        if self.store.running_turn_id(work_id):
+            return "supervisor_open"
+        for status in ("queued", "running", "starting"):
+            # Status is part of the filter, so one hit is the whole existence
+            # answer. It is not a truncated page of mixed rows.
+            if self.store.find("turn", work_id=work_id, status=status, limit=1):
+                return "supervisor_open"
+        for status in ("awaiting_approval", "unknown"):
+            if self.store.find("task", work_id=work_id, status=status, limit=1):
+                return status
+        for status in ("starting", "running"):
+            for task in self._matching_rows("task", work_id=work_id, status=status):
+                if not self._connector_task_online(task):
+                    return "unreachable"
+        return None
+
     def _materialize_routine(self, routine, scheduled_for, reason):
         with self.store.atomic():
             routine = self.store.get("routine", routine["id"])
@@ -7696,6 +7759,17 @@ class Service:
             except Fault as error:
                 if error.status != 404:
                     raise
+            # Same routine already blocked: record the slot and do not open an
+            # empty supervisor Work. No parent_work_id, no link_work change.
+            # Backpressure is not consulted: this path does not enqueue a turn.
+            blocked = self._routine_coalesce_reason(routine["id"])
+            if blocked:
+                log.info("routine %s coalesced (%s)", routine["id"], blocked)
+                return self.store.put("routine_run", {
+                    "id": identity, "routine_id": routine["id"], "work_id": None,
+                    "turn_id": None, "scheduled_for": scheduled_for, "reason": reason,
+                    "outcome": "coalesced", "coalesce_reason": blocked,
+                    "created": time.time()})
             # Routine fire is new background work -> subject to backpressure. If the
             # queue is full, do not materialize now; routine_step retries on the next
             # tick (the run identity keeps it idempotent, so nothing is duplicated).
@@ -7747,6 +7821,13 @@ class Service:
                 raise Fault("backpressure", 429, reason="queue_full",
                             retryable_in_same_turn=False,
                             advice="后台队列已满，本次手动触发未执行；稍后重试或先让在跑的工作完成。")
+            # Coalesced means this click did not start work. Raising rolls the
+            # slot back with this transaction and leaves last_manual_run_at unset,
+            # so the UI and the model cannot treat it as a successful run.
+            if run.get("outcome") == "coalesced":
+                raise Fault("routine_coalesced", 409, reason=run.get("coalesce_reason"),
+                            retryable_in_same_turn=False,
+                            advice="同一例程还有未结束的监督或待处理任务，这次没有新开工作，也不算已跑成。")
             routine["last_manual_run_at"] = time.time()
             self.store.put("routine", routine)
             return run
@@ -7763,9 +7844,13 @@ class Service:
                 if (not routine.get("active") or due is None or due > now
                         or not self._routine_approved(routine)):
                     continue
-                if self._materialize_routine(routine, due, "scheduled") is None:
+                run = self._materialize_routine(routine, due, "scheduled")
+                if run is None:
                     continue
-                routine["last_run_at"] = due
+                # A coalesced slot advances the schedule but is not a real run.
+                # last_run_at stays on the previous fire that actually opened work.
+                if run.get("outcome") != "coalesced":
+                    routine["last_run_at"] = due
                 nxt = next_run(routine["schedule"], routine["timezone"], due + 0.001)
                 routine["next_run_at"] = nxt
                 if nxt is None:
