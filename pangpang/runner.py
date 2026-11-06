@@ -371,22 +371,41 @@ def _in_contract(rel, contract):
     return any(name.casefold() == folded for name in contract)
 
 
-def _note_harvested(artifacts, seen, budget, art, *, source, rel, contract=None):
-    """Record one file. The same digest keeps a single slot; a contract path
-    replaces a non-contract path so dedup cannot drop the declared name."""
-    rel = contract_rel(rel) if isinstance(rel, str) else None
+def _path_rel(art, output_dir, cwd):
+    """Where the bytes sit, relative to the output dir or cwd. Not a declaration."""
+    if not isinstance(art, dict):
+        return None
+    return _rel_under(art.get("path"), output_dir) or _rel_under(art.get("path"), cwd)
+
+
+def _note_harvested(artifacts, seen, budget, art, *, source, rel, contract=None,
+                    output_dir=None, cwd=None):
+    """Record one file. One digest, one slot.
+
+    `rel` is the chat name (the contract name when this lookup found the file
+    inside the boundary). The path is where the bytes sit. A later file whose
+    path is itself a contract name replaces an alias that only borrowed one.
+    """
+    chat = contract_rel(rel) if isinstance(rel, str) else None
+    located = _path_rel(art, output_dir, cwd)
+    if chat is None:
+        chat = located
     item = dict(art, source=source)
-    if rel:
-        item["rel"] = rel
+    if chat:
+        item["rel"] = chat
     digest = art["digest"]
     if digest in seen:
-        if _in_contract(rel, contract) and not any(
-                old.get("digest") == digest and _in_contract(old.get("rel"), contract)
-                for old in artifacts):
-            for index, old in enumerate(artifacts):
-                if old.get("digest") == digest:
-                    artifacts[index] = item
-                    break
+        for index, old in enumerate(artifacts):
+            if old.get("digest") != digest:
+                continue
+            old_located = _path_rel(old, output_dir, cwd)
+            if _in_contract(located, contract) and not _in_contract(old_located, contract):
+                artifacts[index] = item
+            elif (_in_contract(chat, contract)
+                  and not _in_contract(old.get("rel"), contract)
+                  and not _in_contract(old_located, contract)):
+                artifacts[index] = item
+            break
         return
     if budget["files"] <= 0 or art["size"] > budget["bytes"]:
         return
@@ -397,7 +416,8 @@ def _note_harvested(artifacts, seen, budget, art, *, source, rel, contract=None)
 
 
 def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
-                new_only_names=None, exts=None, contract=None, into=None):
+                new_only_names=None, exts=None, contract=None, into=None,
+                output_dir=None, cwd=None):
     """Collect artifacts under `root`, bounded by a shared `budget`.
 
     budget: mutable {"files": n, "bytes": n} decremented as we accept files.
@@ -459,12 +479,12 @@ def harvest_dir(root, roots, *, recursive, source, budget, seen_digests,
             if art["digest"] in seen_digests:
                 # A contract path takes the slot a same-bytes sibling already holds.
                 _note_harvested(out, seen_digests, budget, art, source=source, rel=rel,
-                                contract=contract)
+                                contract=contract, output_dir=output_dir, cwd=cwd)
                 continue
             if art["size"] > budget["bytes"]:
                 continue
             _note_harvested(out, seen_digests, budget, art, source=source, rel=rel,
-                            contract=contract)
+                            contract=contract, output_dir=output_dir, cwd=cwd)
     except OSError:
         pass
     return out
@@ -2800,10 +2820,12 @@ def supervise(directory):
                     art = _harvest_one(found, roots)
                     if not art or not _inside(art["path"], output_dir):
                         continue
-                    # Identity is where the bytes sit, not the declaration string.
-                    # A symlink alias must not hold the digest under the contract name.
+                    # In-boundary alias: the contract name is the chat item.
+                    # Path identity still decides digest ties, so a real
+                    # report.md is not dropped for a same-bytes symlink.
                     _note_harvested(artifacts, seen_digests, budget, art, source="output_dir",
-                                    rel=_rel_under(art["path"], output_dir), contract=contract)
+                                    rel=contract_rel(str(raw)), contract=contract,
+                                    output_dir=output_dir, cwd=cwd)
                 except (ValueError, OSError, RuntimeError):
                     continue
         # (1) Declared outputs. `outputs` is the declared file list. This loop
@@ -2836,17 +2858,17 @@ def supervise(directory):
                     art = _harvest_one(found, roots)
                     if not art:
                         continue
-                    # Inside cwd or the output dir, the path is the identity (the
-                    # same string the chat filter derives). The declaration name
-                    # is used only when the file resolved outside both, so a
-                    # declared file in another allowed root is still named.
-                    rel = _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd)
-                    if rel is None:
-                        rel = contract_rel(str(raw))
+                    # Inside the boundary, the declared name is the chat item
+                    # even when a symlink resolves to another relative path.
+                    # Outside both roots, the name is all we can carry.
+                    named = contract_rel(str(raw))
+                    inside = _inside(art["path"], output_dir) or _inside(art["path"], cwd)
+                    rel = named if (inside and named) else (
+                        _rel_under(art["path"], output_dir) or _rel_under(art["path"], cwd) or named)
                     if rel is None:
                         output_warnings.append({"output": str(raw)[:200], "issue": "declared_output_unscoped"})
                     _note_harvested(artifacts, seen_digests, budget, art, source="declared",
-                                    rel=rel, contract=contract)
+                                    rel=rel, contract=contract, output_dir=output_dir, cwd=cwd)
             except (ValueError, OSError, RuntimeError) as error:
                 # Any per-item failure — bad label, out-of-root, symlink loop, a file
                 # that vanished between is_file() and hash/stat — stays a warning of
@@ -2869,7 +2891,7 @@ def supervise(directory):
         if output_dir is not None:
             harvest_dir(output_dir, roots, recursive=True, source="output_dir",
                         budget=budget, seen_digests=seen_digests, contract=contract,
-                        into=artifacts)
+                        into=artifacts, output_dir=output_dir, cwd=cwd)
         # (3) cwd shallow fallback — catches undeclared files (chart.png) written
         # straight to cwd. Only NEW first-layer files with a deliverable
         # extension qualify, so pre-existing source/input files are never
@@ -2880,7 +2902,7 @@ def supervise(directory):
             harvest_dir(cwd, roots, recursive=False, source="cwd_fallback",
                         budget=budget, seen_digests=seen_digests,
                         new_only_names=cwd_before, exts=HARVEST_FALLBACK_EXTS,
-                        contract=contract, into=artifacts)
+                        contract=contract, into=artifacts, output_dir=output_dir, cwd=cwd)
         # (4) Required outputs — the HARD deliverable contract (distinct from the
         # soft `outputs` hint above, which NEVER gates). Evidence only; never flips
         # receipt.status (raw execution fact stays exit-code-driven). The control

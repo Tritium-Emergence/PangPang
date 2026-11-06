@@ -6210,13 +6210,8 @@ class Service:
         return None
 
     @staticmethod
-    def _artifact_matches_contract(item, names, task, *, casefold=False):
-        if not isinstance(item, dict) or not names:
-            return False
-        rel = Service._rel_from_artifact_path(item.get("path"), task, casefold=casefold)
-        if rel is None:
-            rel = Service._norm_contract_path(item.get("rel"), windows=casefold)
-        if not rel:
+    def _rel_in_contract(rel, names, *, casefold):
+        if not rel or not names:
             return False
         if rel in names:
             return True
@@ -6224,6 +6219,16 @@ class Service:
             return False
         folded = rel.casefold()
         return any(name.casefold() == folded for name in names)
+
+    @staticmethod
+    def _artifact_matches_contract(item, names, task, *, casefold=False):
+        """Path identity or the contract name the runner stamped for an in-boundary alias."""
+        if not isinstance(item, dict) or not names:
+            return False
+        derived = Service._rel_from_artifact_path(item.get("path"), task, casefold=casefold)
+        stamped = Service._norm_contract_path(item.get("rel"), windows=casefold)
+        return (Service._rel_in_contract(derived, names, casefold=casefold)
+                or Service._rel_in_contract(stamped, names, casefold=casefold))
 
     def complete_task(self, task, receipt):
         current = self.store.get("task", task["id"])

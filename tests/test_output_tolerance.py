@@ -265,7 +265,7 @@ class OutputToleranceTests(unittest.TestCase):
         rels = []
         for ref in task.get('artifact_refs') or []:
             art = self.app.store.get('artifact', ref)
-            rel = self.app._rel_from_artifact_path(art.get('path'), task) or art.get('rel')
+            rel = art.get('rel') or self.app._rel_from_artifact_path(art.get('path'), task)
             rels.append(rel or art['path'].replace('\\', '/').rsplit('/', 1)[-1])
         return rels
 
@@ -585,6 +585,40 @@ class OutputToleranceTests(unittest.TestCase):
             archived = {p.name for p in archive.iterdir()}
             self.assertNotIn(__import__('hashlib').sha256(b'outside').hexdigest(), archived)
         self._assert_chat_is_contract(task, ['ok.md'])
+
+    def test_required_symlink_inside_output_dir_is_attached(self):
+        # R3. report.md -> samples/actual.md stays inside the output dir.
+        # The task succeeds and the contract name is a download.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'samples').mkdir()\n"
+            "(d / 'samples' / 'actual.md').write_text('actual')\n"
+            "(d / 'report.md').symlink_to(d / 'samples' / 'actual.md')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertTrue(all(item['present'] for item in task['receipt']['required_output_results']))
+        self._assert_chat_is_contract(task, ['report.md'])
+
+    def test_declared_symlink_inside_cwd_is_attached(self):
+        # R3. notes.md -> scratch.md stays inside cwd. Chat keeps that name
+        # along with the required report.md, not report.md alone.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('report')\n"
+            "cwd = Path.cwd()\n"
+            "(cwd / 'scratch.md').write_text('scratch')\n"
+            "(cwd / 'notes.md').symlink_to(cwd / 'scratch.md')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, ['notes.md'], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self._assert_chat_is_contract(task, ['report.md', 'notes.md'])
 
     def test_posix_space_and_backslash_names_stay_distinct(self):
         # R2-F3. A backslash or a trailing space is part of the filename.
