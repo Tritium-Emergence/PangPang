@@ -159,3 +159,61 @@ class RoutineCoalesceTests(unittest.TestCase):
         self.assertEqual(len(self._works(other["id"])), 2)
         self.assertEqual(len(self._works(blocked["id"])), 1)
         self.assertTrue(all(item.get("parent_work_id") is None for item in self._works(other["id"])))
+
+    def test_blocked_task_past_the_old_page_cap_still_coalesces(self):
+        routine = self._routine("扫全量")
+        self._due(routine)
+        self.app.routine_step()
+        work = self._works(routine["id"])[0]
+        self._finish_turns(routine["id"])
+        # Oldest 20 running rows are online. The offline connector is later.
+        # A limit=20 scan would miss it and open another supervisor Work.
+        now = time.time()
+        for i in range(20):
+            self.app.store.put("task", {
+                "id": "task-online-%02d" % i, "work_id": work["id"], "owner_bot_id": "bot-main",
+                "status": "running", "host_id": "local", "created": now + i,
+            })
+        self.app.store.put("task", {
+            "id": "task-offline-late", "work_id": work["id"], "owner_bot_id": "bot-main",
+            "status": "running", "host_id": "pc", "created": now + 50,
+            "last_observation_error": "connector_offline",
+        })
+        before = self.app.store.get("routine", routine["id"])
+        self.assertFalse(self.app.broker.online("pc"))
+        self._due(routine)
+        self.assertTrue(self.app.routine_step())
+        self.assertEqual(self.app.store.count("work", routine_id=routine["id"]), 1)
+        after = self.app.store.get("routine", routine["id"])
+        self.assertEqual(after["last_run_at"], before["last_run_at"])
+        self.assertTrue(any(
+            run.get("outcome") == "coalesced" and run.get("coalesce_reason") == "unreachable"
+            for run in self._runs(routine["id"])))
+        for task_id in ["task-offline-late"] + ["task-online-%02d" % i for i in range(20)]:
+            task = self.app.store.get("task", task_id)
+            task["status"] = "succeeded"
+            self.app.store.put("task", task)
+
+        # The blocked work is past the old 200-work page. It must still be seen.
+        for i in range(200):
+            self.app.store.put("work", {
+                "id": "work-fill-%03d" % i, "owner_bot_id": "bot-main", "routine_id": routine["id"],
+                "goal": "filler", "status": "active", "parent_work_id": None, "created": now + 100 + i,
+            })
+        blocked = self.app.store.put("work", {
+            "id": "work-blocked-late", "owner_bot_id": "bot-main", "routine_id": routine["id"],
+            "goal": "late approval", "status": "active", "parent_work_id": None, "created": now + 1000,
+        })
+        self.app.store.put("task", {
+            "id": "task-approve-late", "work_id": blocked["id"], "owner_bot_id": "bot-main",
+            "status": "awaiting_approval", "host_id": "local", "created": now + 1001,
+        })
+        held = self.app.store.get("routine", routine["id"])
+        count = self.app.store.count("work", routine_id=routine["id"])
+        self.assertGreater(count, 200)
+        self._due(routine)
+        self.app.routine_step()
+        self.assertEqual(self.app.store.count("work", routine_id=routine["id"]), count)
+        self.assertEqual(self.app.store.get("routine", routine["id"])["last_run_at"], held["last_run_at"])
+        self.assertTrue(any(run.get("coalesce_reason") == "awaiting_approval" for run in self._runs(routine["id"])))
+        self.assertIsNone(self.app.store.get("work", blocked["id"]).get("parent_work_id"))

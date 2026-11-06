@@ -242,6 +242,44 @@ export function pendingApprovalHint(count: number, tr: Tr): string | null {
   return tr('chat.pendingApprovalHint', {n: count});
 }
 
+const TASK_TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
+
+export interface ChatStatusInput {
+  streaming: boolean;
+  thinking: boolean;
+  recovering: boolean;
+  delegate: {name: string; text: string} | null;
+  task?: {
+    status?: string;
+    installation_id?: string;
+    prompt?: string;
+    reachability?: {phase?: string} | null;
+  } | null;
+  awaitingResult: boolean;
+}
+
+// One chat status sentence. An offline starting/running connector wins over
+// thinking, delegation, and “in progress”. cancel_requested and a terminal
+// status win over the dispatched “进行中” fallback.
+export function chatStatusSentence(input: ChatStatusInput, tr: Tr): string {
+  if (input.streaming) return '';
+  const task = input.task;
+  if (displayedReachability(task) === 'unreachable') return tr('progress.deviceUnreachable');
+  const status = String(task?.status || '');
+  if (status === 'cancel_requested') return tr('task.cancel_requested');
+  if (TASK_TERMINAL.has(status)) return tr('task.' + status);
+  if (input.thinking) return tr('chat.thinking');
+  if (input.recovering) return tr('chat.workingComplex');
+  if (input.delegate) return tr('chat.delegatedTo', {name: input.delegate.name, text: (input.delegate.text || '').slice(0, 40)});
+  if (displayedReachability(task) === 'dispatched') return tr('progress.dispatchedWaiting');
+  if (task) return tr('chat.dispatchedTo', {
+    executor: task.installation_id || tr('chat.executorFallback'),
+    prompt: (task.prompt || '').slice(0, 40),
+  });
+  if (input.awaitingResult) return tr('chat.awaitingResult');
+  return '';
+}
+
 // Absolute queue or start clock, last log time, latest step, and required files
 // already present. The snapshot activity has no age_s; that field stays on the planner packet.
 // starting uses its own clock — started is recorded before the process is running.

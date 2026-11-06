@@ -7,7 +7,7 @@ import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
 import {clock, dateTime} from '../display';
-import {CHAT_PROGRESS_REFRESH_MS, botAwaitingApproval, chatActivityLine, chatProgressRefreshDue, displayedReachability, pendingApprovalHint, pickChatProgressTask, progressPhaseText, splitPinnedTimeline, visibleChatMessages} from '../pure';
+import {CHAT_PROGRESS_REFRESH_MS, botAwaitingApproval, chatActivityLine, chatProgressRefreshDue, chatStatusSentence, pendingApprovalHint, pickChatProgressTask, splitPinnedTimeline, visibleChatMessages} from '../pure';
 import {conversationActivity, currentWorkId} from '../scope';
 
 // Chat log. RCB-critical:
@@ -111,8 +111,14 @@ export function Chat({store, botId}: {store: Store; botId: string}) {
   // A streaming preview still suppresses this whole bubble. The dispatched sentence
   // names the same task as the denseline, not whichever row the snapshot listed first.
   const progressTask = pickChatProgressTask(activity.tasks)?.task;
-  const reachPhrase = progressPhaseText(displayedReachability(progressTask), t);
-  const progress = livePreviews.length ? '': active.length ? t('chat.thinking'): recovering ? t('chat.workingComplex'): delegate ? t('chat.delegatedTo', {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot, text: (delegate.text || '').slice(0, 40)}): reachPhrase ? reachPhrase: progressTask ? t('chat.dispatchedTo', {executor: progressTask.installation_id || t('chat.executorFallback'), prompt: (progressTask.prompt || '').slice(0, 40)}): progressWork ? t('chat.awaitingResult'): '';
+  const progress = chatStatusSentence({
+    streaming: livePreviews.length > 0,
+    thinking: active.length > 0,
+    recovering,
+    delegate: delegate ? {name: snap.bots.find((b) => b.id === delegate.bot)?.name || delegate.bot || '', text: delegate.text || ''}: null,
+    task: progressTask,
+    awaitingResult: !!progressWork,
+  }, t);
   const progressLine = progress ? chatActivityLine(activity.tasks, t) : null;
   const hasProgressWork = !!progressWork;
   const activeTaskCount = activity.tasks.length;

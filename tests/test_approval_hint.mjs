@@ -8,6 +8,7 @@ import {
   activitySummary,
   botAwaitingApproval,
   chatActivityLine,
+  chatStatusSentence,
   displayedReachability,
   outOfScopeApprovals,
   pendingApprovalHint,
@@ -61,7 +62,7 @@ test('chat keeps the sticky card and renders the hint outside the stream gate', 
   assert.equal(hintWindow.includes('livePreviews'), false);
   assert.equal(hintWindow.includes('activity.tasks'), false);
   assert.equal(hintWindow.includes('api('), false);
-  assert.match(chat, /displayedReachability/);
+  assert.match(chat, /chatStatusSentence/);
 });
 
 test('inspector points at the sticky card and does not approve out of scope', () => {
@@ -125,4 +126,43 @@ test('connector copy follows the phase and does not claim execution without a re
   assert.equal(cancelling.includes('暂时联系不上'), false);
   assert.equal(displayedReachability({status: 'succeeded', reachability: {phase: 'unreachable'}}), null);
   assert.equal(displayedReachability({status: 'cancel_requested', reachability: {phase: 'dispatched'}}), null);
+});
+
+test('offline reachability wins over delegated in-progress copy', () => {
+  const delegate = {name: '编辑', text: '去写周报'};
+  const offline = chatStatusSentence({
+    streaming: false,
+    thinking: true,
+    recovering: true,
+    delegate,
+    task: {status: 'running', installation_id: 'codex', prompt: '整理', reachability: {phase: 'unreachable'}},
+    awaitingResult: true,
+  }, zh);
+  assert.equal(offline, '暂时联系不上设备，等待重新连接');
+  assert.equal(offline.includes('执行中'), false);
+  assert.equal(offline.includes('进行中'), false);
+  const starting = chatStatusSentence({
+    streaming: false, thinking: false, recovering: false, delegate,
+    task: {status: 'starting', reachability: {phase: 'unreachable'}},
+    awaitingResult: false,
+  }, zh);
+  assert.equal(starting, '暂时联系不上设备，等待重新连接');
+});
+
+test('cancel_requested and terminal copy do not fall back to in-progress', () => {
+  const base = {streaming: false, thinking: true, recovering: false, delegate: {name: '编辑', text: '继续'}, awaitingResult: true};
+  const cancelling = chatStatusSentence({...base, task: {status: 'cancel_requested', installation_id: 'codex', prompt: '停'}}, zh);
+  assert.equal(cancelling, '正在取消');
+  assert.equal(cancelling.includes('进行中'), false);
+  assert.equal(cancelling.includes('执行中'), false);
+  for (const [status, label] of [['succeeded', '执行成功'], ['failed', '执行失败'], ['cancelled', '已取消']]) {
+    const text = chatStatusSentence({...base, task: {status, prompt: '完'}}, zh);
+    assert.equal(text, label);
+    assert.equal(text.includes('进行中'), false);
+  }
+  const quietCancel = chatActivityLine([{
+    id: 'stop', status: 'cancel_requested', activity: {last_log_at: null, recent: []},
+  }], zh);
+  assert.equal(quietCancel, null);
+  assert.notEqual(quietCancel, '进行中');
 });

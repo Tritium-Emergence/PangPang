@@ -283,7 +283,9 @@ test('the progress clock is outside the live region and previews still suppress 
   assert.ok(liveAt > 0 && liveAt < noteAt && noteAt < lineAt);
   assert.equal(chat.slice(liveAt, noteAt).includes('chat-progress-line'), false);
   assert.match(chat, /aria-hidden="true"/);
-  assert.match(chat, /livePreviews\.length \? '':/);
+  assert.match(chat, /streaming: livePreviews\.length > 0/);
+  const pure = fs.readFileSync('web-src/pure.ts', 'utf8');
+  assert.match(pure, /if \(input\.streaming\) return '';/);
   assert.match(chat, /progress && progressLine/);
   assert.match(chat, /pickChatProgressTask\(activity\.tasks\)/);
   assert.equal(chat.includes('activity.tasks[0]'), false);

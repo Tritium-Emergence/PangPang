@@ -7698,6 +7698,15 @@ class Service:
         except Exception:
             return False
 
+    def _matching_rows(self, kind, **where):
+        """Every row matching the filter. find()'s limit is a silent cap."""
+        cursor = None
+        while True:
+            page, cursor = self.store.find_page(kind, cursor=cursor, limit=1000, **where)
+            yield from page
+            if cursor is None:
+                return
+
     def _routine_coalesce_reason(self, routine_id):
         """Why this routine must not open another supervisor Work, or None.
 
@@ -7705,29 +7714,36 @@ class Service:
         A real task blocks only when it is awaiting_approval, unknown, or
         starting/running on a connector that is offline now. An online
         in-progress task stays eligible for stage review. Another routine's
-        task is never consulted.
+        task is never consulted. The scan is the whole matching set: a page
+        cap must not hide a later blocked task and open an empty Work.
         """
-        works = []
-        for status in ("active", "waiting", "blocked"):
-            works.extend(self.store.find("work", routine_id=routine_id, status=status, limit=200))
         seen = set()
-        open_turn = {"queued", "running", "starting"}
-        for work in works:
-            wid = work.get("id")
-            if not wid or wid in seen:
-                continue
-            seen.add(wid)
-            if self.store.running_turn_id(wid):
+        for status in ("active", "waiting", "blocked"):
+            for work in self._matching_rows("work", routine_id=routine_id, status=status):
+                wid = work.get("id")
+                if not wid or wid in seen:
+                    continue
+                seen.add(wid)
+                reason = self._work_coalesce_reason(wid)
+                if reason:
+                    return reason
+        return None
+
+    def _work_coalesce_reason(self, work_id):
+        if self.store.running_turn_id(work_id):
+            return "supervisor_open"
+        for status in ("queued", "running", "starting"):
+            # Status is part of the filter, so one hit is the whole existence
+            # answer. It is not a truncated page of mixed rows.
+            if self.store.find("turn", work_id=work_id, status=status, limit=1):
                 return "supervisor_open"
-            for status in open_turn:
-                if self.store.find("turn", work_id=wid, status=status, limit=1):
-                    return "supervisor_open"
-            for status in ("awaiting_approval", "unknown", "starting", "running"):
-                for task in self.store.find("task", work_id=wid, status=status, limit=20):
-                    if status in ("awaiting_approval", "unknown"):
-                        return status
-                    if not self._connector_task_online(task):
-                        return "unreachable"
+        for status in ("awaiting_approval", "unknown"):
+            if self.store.find("task", work_id=work_id, status=status, limit=1):
+                return status
+        for status in ("starting", "running"):
+            for task in self._matching_rows("task", work_id=work_id, status=status):
+                if not self._connector_task_online(task):
+                    return "unreachable"
         return None
 
     def _materialize_routine(self, routine, scheduled_for, reason):
