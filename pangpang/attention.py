@@ -45,6 +45,34 @@ UNREAD_KINDS = ("result", "peer_message")
 STATES = ("needs_attention", "blocked", "working", "done_unread", "settled", "unknown")
 
 
+_PROGRESS_RANK = {"dispatched": 2, "unreachable": 3}
+
+
+def work_progress_phase(work, tasks):
+    """Connector display phase for one non-terminal Work, or None.
+
+    Reads ``task['reachability']`` already projected from the current online
+    bit. Does not change the attention state and does not read
+    ``last_observation_error``. ``active`` stays on the activity line (time +
+    step); only unreachable and dispatched replace the working sentence.
+    A terminal Work keeps its own copy.
+    """
+    if not isinstance(work, dict) or work.get("status") in WORK_TERMINAL:
+        return None
+    best = None
+    rank = 0
+    wid = work.get("id")
+    for task in tasks or []:
+        if not isinstance(task, dict) or task.get("work_id") != wid:
+            continue
+        reach = task.get("reachability")
+        phase = reach.get("phase") if isinstance(reach, dict) else None
+        score = _PROGRESS_RANK.get(phase, 0)
+        if score > rank:
+            best, rank = phase, score
+    return best
+
+
 def project(work, turns, tasks, exchanges, routines, notifications, claims, *, bot_id=None, now=None, complete=True, notifications_complete=True):
     """Project durable facts into attention states.
 

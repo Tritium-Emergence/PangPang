@@ -15,6 +15,7 @@ export interface Work {
   kind?: string;
   parent_work_id?: string | null;
   attention?: AttentionState; // server-projected — read, never compute
+  progress_phase?: 'unreachable' | 'dispatched';
   created?: number;
   checkpoint?: Record<string, unknown>;
   continued_from?: string;
@@ -70,6 +71,11 @@ export interface Task {
   };
   created?: number;
   started?: number;
+  reachability?: {
+    phase?: 'unreachable' | 'dispatched' | 'active';
+    last_log_at?: number | null;
+    note?: string;
+  };
   required_outputs?: string[];
   activity?: {
     status?: string;

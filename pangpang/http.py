@@ -13,8 +13,8 @@ from urllib.parse import parse_qs, urlsplit, quote
 
 from .store import Fault, encode, uid
 from .execution import artifact_bytes
-from .activity import annotate_snapshot_tasks
-from .attention import project
+from .activity import annotate_snapshot_tasks, task_reachability
+from .attention import project, work_progress_phase
 from .logs import get_logger
 
 log = get_logger("http")
@@ -257,14 +257,26 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     # `complete` propagates to BOTH the summary AND per-Work attention:
                     # when a live domain was truncated, a Work we cannot prove idle is
                     # reported `unknown` (fail-closed) instead of a false `settled`.
+                    fact_tasks = union(tasks, live_tasks)
+                    # Activity file reads stay on the display window. Reachability
+                    # is broker online only, so the live union can carry the same
+                    # sentence without opening run logs.
+                    annotate_snapshot_tasks(service, tasks)
+                    for task in fact_tasks:
+                        if isinstance(task, dict) and not task.get("reachability"):
+                            fact = task_reachability(service, task, task.get("activity"))
+                            if fact:
+                                task["reachability"] = fact
                     states, attention_summary = project(
-                        union(work, live_work), public_turns, union(tasks, live_tasks),
+                        union(work, live_work), public_turns, fact_tasks,
                         union(exchanges, live_exch), routines, unread, claims,
                         now=time.time(), complete=complete,
                         notifications_complete=unread_cursor is None)
                     for w in work:
                         w["attention"] = states.get(w["id"], "settled" if complete else "unknown")
-                    annotate_snapshot_tasks(service, tasks)
+                        phase = work_progress_phase(w, fact_tasks)
+                        if phase:
+                            w["progress_phase"] = phase
                     self.respond({"setup": service.onboarding.status(), "bots": service.store.find("bot"),
                                   "work": work,
                                   "tasks": tasks,

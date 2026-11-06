@@ -8,7 +8,8 @@ to the run log. Fragments and unrecognized records are ignored.
 A connector's log stays on the device. The connector reuses this projection
 and may report last_log_at and recent on the sync it already sends. The cloud
 keeps that report in memory and the snapshot attaches it. A connector that
-sends nothing leaves the task unchanged.
+sends nothing leaves the activity object absent. Reachability is a separate
+display fact: current broker online, never a leftover observation error.
 """
 import json
 import os
@@ -25,6 +26,13 @@ _TAIL_BYTES = 16384
 _DEFAULT_LOG_BYTES = 4 * 1024 * 1024
 _PATH_MAX = 160
 _ACTIVE = frozenset({"queued", "starting", "running", "cancel_requested"})
+# Terminal and cancel copy win. Reachability never rewrites those statuses.
+_REACH_SILENT = frozenset({"succeeded", "failed", "cancelled", "cancel_requested"})
+_REACH_NOTE = {
+    "unreachable": "The machine cannot be reached right now. Waiting to reconnect. This is not in-progress execution.",
+    "dispatched": "Dispatched and waiting for the device to report progress. This is not in-progress execution.",
+    "active": "The device reported recent activity. last_log_at is the unix time of that report.",
+}
 _REDACTED = "<redacted-path>"
 # Same bound as a connector receipt batch. A progress report must not outgrow
 # the sync that already carries execution receipts.
@@ -48,6 +56,100 @@ _SECRET_PREFIXES = ("sk-", "ghp_", "AKIA")
 _HEX_SECRET = re.compile(r"^[0-9a-fA-F]{32,}$")
 _B64_SECRET = re.compile(r"^[A-Za-z0-9+/]{32,}={0,2}$")
 _B64URL_SECRET = re.compile(r"^[A-Za-z0-9_-]{32,}$")
+
+
+def _activity_clock(activity):
+    """(has_report, last_log_at) from a closed-set activity object.
+
+    A status/age stub is not a report. ``last_observation_error`` is not read.
+    """
+    if not isinstance(activity, dict):
+        return False, None
+    if "last_log_at" not in activity and "recent" not in activity:
+        return False, None
+    last = activity.get("last_log_at")
+    last_ok = type(last) is int and last > 0
+    recent = activity.get("recent")
+    step = isinstance(recent, list) and any(
+        isinstance(item, dict) and item.get("tool") for item in recent)
+    if last_ok or step:
+        return True, last if last_ok else None
+    return False, None
+
+
+def connector_reachability(task, *, transport, online, activity=None):
+    """Display fact for one connector task. Does not change ``task['status']``.
+
+    ``online`` is this call's devices.online / broker.online bit. A leftover
+    ``last_observation_error`` is not an input: that field is not cleared on a
+    successful poll, so it cannot say whether the device is reachable now.
+
+    None means the caller keeps the status's own copy (not a connector, or
+    terminal / cancel_requested). Otherwise ``phase`` is:
+
+    * ``unreachable`` — starting or running, and the device is offline now
+    * ``dispatched`` — queued, or starting/running online with no report yet
+    * ``active`` — starting or running, online, and a report has a time or step
+    """
+    if transport != "connector" or not isinstance(task, dict):
+        return None
+    status = task.get("status")
+    if status in _REACH_SILENT or status not in {"queued", "starting", "running"}:
+        return None
+    reported, last = _activity_clock(activity)
+    if status in {"starting", "running"} and online is not True:
+        phase = "unreachable"
+    elif status in {"starting", "running"} and reported:
+        phase = "active"
+    else:
+        phase = "dispatched"
+    return {"phase": phase, "last_log_at": last if phase == "active" else None, "note": _REACH_NOTE[phase]}
+
+
+def task_reachability(service, task, activity=None):
+    """``connector_reachability`` using this service's live broker online bit."""
+    if not isinstance(task, dict):
+        return None
+    execution = getattr(service, "execution", None)
+    host = {}
+    if execution is not None:
+        host = (getattr(execution, "hosts", None) or {}).get(task.get("host_id")) or {}
+    if host.get("transport") != "connector":
+        return None
+    report = activity if _activity_clock(activity)[0] or (
+        isinstance(activity, dict) and ("last_log_at" in activity or "recent" in activity)
+    ) else None
+    broker = getattr(service, "broker", None)
+    if report is None and broker is not None:
+        report = broker.reported_activity(task.get("execution_id"))
+    online = False
+    if broker is not None:
+        try:
+            online = broker.online(task.get("host_id")) is True
+        except Exception:
+            online = False
+    return connector_reachability(task, transport="connector", online=online, activity=report)
+
+
+def annotate_dependency_reachability(service, dependencies):
+    """Attach ``target.reachability`` on pending task dependencies.
+
+    Same fact as the snapshot and inspect_task. A missing task is skipped.
+    """
+    for view in dependencies or []:
+        if not isinstance(view, dict):
+            continue
+        target = view.get("target")
+        if not isinstance(target, dict) or not target.get("task_id") or target.get("reachability"):
+            continue
+        try:
+            task = service.store.get("task", target["task_id"])
+        except Fault:
+            continue
+        fact = task_reachability(service, task, target.get("activity"))
+        if fact:
+            target["reachability"] = fact
+    return dependencies
 
 
 def activity_projection(task, *, now=None, directory=None, local=True, roots=None, cwd=None):
@@ -142,6 +244,11 @@ def annotate_snapshot_tasks(service, tasks, *, now=None):
             task["activity"] = activity
     for task in reported:
         _attach_reported_activity(service, task)
+        # cancel_requested is in the active set so a report can still attach,
+        # but its own copy wins: connector_reachability returns None for it.
+        fact = task_reachability(service, task, task.get("activity"))
+        if fact:
+            task["reachability"] = fact
     return tasks
 
 
