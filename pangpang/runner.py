@@ -528,7 +528,10 @@ def executor_argv(spec, prompt, *, resume=False):
     Codex app-server rewrites a stored `exec` invocation into `app-server` on
     stdio. Sandbox and approval values are not renamed here; the session sends
     them on `thread/start`. An argv that is not the Codex CLI is left alone so
-    a non-Codex command keeps the closed-stdin path.
+    a non-Codex command keeps the closed-stdin path. Closed-stdin `codex exec`
+    (no app-server protocol) gains one `--json` so stdout is JSONL. The
+    app-server launch does not: that flag is exec-only, and the session
+    already writes `item/started` events.
 
     Tier 2 session-resume appends `--session-id` or, once `resume` is set,
     `--resume` of that same derived id. It never passes both, and it never
@@ -580,7 +583,49 @@ def executor_argv(spec, prompt, *, resume=False):
         raise ValueError("stdin_protocol_unsupported:" + str(protocol))
     if resume_protocol:
         raise ValueError("resume_protocol_unsupported:" + str(resume_protocol))
-    return [part.replace("{prompt}", prompt) for part in raw]
+    return codex_exec_json_argv([part.replace("{prompt}", prompt) for part in raw])
+
+
+def _codex_cli_basename(token):
+    if not isinstance(token, str) or not token:
+        return False
+    name = os.path.basename(token.replace("\\", "/")).lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return name == "codex"
+
+
+def codex_exec_json_argv(argv):
+    """Add one `--json` to a closed-stdin `codex exec` launch.
+
+    Without it, stdout is a human transcript. Activity reads only complete
+    JSONL lines (`item.started` / `item.completed`, or app-server
+    `item/started`). The app-server rewrite never calls this. A command that
+    is not the Codex CLI is unchanged. `--json` is inserted once, immediately
+    after `exec`, so it stays a flag rather than a positional after `-`.
+    """
+    if not argv or not _codex_cli_basename(argv[0]):
+        return list(argv)
+    if any(part == "--json" or (isinstance(part, str) and part.startswith("--json="))
+           for part in argv):
+        return list(argv)
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if not isinstance(token, str):
+            return list(argv)
+        if token == "exec":
+            return [*argv[:index + 1], "--json", *argv[index + 1:]]
+        if token in {"app-server", "-"} or not token.startswith("-"):
+            return list(argv)
+        name, inline = _codex_flag_name(token)
+        if inline is None and name in _CODEX_VALUE_FLAGS and index + 1 < len(argv):
+            index += 2
+            continue
+        index += 1
+    return list(argv)
 
 
 _SESSION_FLAG_NAMES = {"--session-id", "--resume", "-r"}
