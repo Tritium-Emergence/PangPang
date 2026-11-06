@@ -120,6 +120,21 @@ const MEDIA_EXT: Record<string, string[]> = {
   audio: ['mp3', 'wav', 'ogg', 'm4a'],
 };
 
+// Contract `rel` is the name the user was promised. Split that on `/` only, so a
+// POSIX name that contains a backslash stays intact. A stored `name` with no
+// contract rel may be a Windows path written by Path.name on Linux; that one
+// is a basename on both separators, same as the path fallback.
+export function artifactFileName(artifact: {path?: string; rel?: string; name?: string}): string {
+  const rel = typeof artifact.rel === 'string' ? artifact.rel : '';
+  if (rel && !rel.startsWith('/') && !rel.startsWith('\\') && !rel.split('/').includes('..')) {
+    const base = rel.split('/').pop();
+    if (base && base !== '.' && base !== '..') return base;
+  }
+  const stored = typeof artifact.name === 'string' && artifact.name ? artifact.name : (artifact.path || '');
+  const base = stored.split(/[\\/]/).filter((part) => part.length > 0).pop();
+  return base && base !== '.' && base !== '..' ? base : 'file';
+}
+
 // Classify an artifact by file extension (case-insensitive); unknown -> 'other'.
 export function mediaKind(name: string): string {
   const e = String(name).split('.').pop()!.toLowerCase();

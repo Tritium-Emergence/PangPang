@@ -249,7 +249,8 @@ class OutputToleranceTests(unittest.TestCase):
 
     def test_undeclared_file_in_output_dir_is_harvested(self):
         # The core fix: a file the model NEVER declared, written to $XPP_OUTPUT_DIR,
-        # is auto-registered as an artifact (source=output_dir).
+        # is auto-registered as an artifact (source=output_dir). No required_outputs
+        # means the chat still receives that single file.
         code = ("import os; d=os.environ['XPP_OUTPUT_DIR']; "
                 "open(os.path.join(d,'chart.png'),'wb').write(b'\\x89PNG_data'); print('ok')")
         task = self._run(code, []) # NOTHING declared
@@ -258,6 +259,481 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(len(arts), 1)
         self.assertTrue(arts[0]['path'].endswith('chart.png'))
         self.assertEqual(arts[0]['source'], 'output_dir')
+        self.assertEqual(self._chat_rels(task), ['chart.png'])
+
+    def _chat_rels(self, task):
+        rels = []
+        for ref in task.get('artifact_refs') or []:
+            art = self.app.store.get('artifact', ref)
+            rel = art.get('rel') or self.app._rel_from_artifact_path(art.get('path'), task)
+            rels.append(rel or art['path'].replace('\\', '/').rsplit('/', 1)[-1])
+        return rels
+
+    def _assert_chat_is_contract(self, task, expected):
+        self.assertEqual(set(self._chat_rels(task)), set(expected))
+        messages = [m for m in self.app.store.find('message', work_id=task['work_id'])
+                    if m.get('kind') == 'execution_result']
+        self.assertTrue(messages)
+        self.assertEqual(messages[-1].get('artifact_refs'), task.get('artifact_refs'))
+        payload = messages[-1]['content']
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        self.assertEqual(payload.get('artifact_refs'), task.get('artifact_refs'))
+        self.assertEqual(len(self.app.store.find('artifact', task_id=task['id'])), len(set(expected)))
+
+    def test_required_outputs_chat_omits_samples_and_keeps_finals(self):
+        # Same shape as a multi-file deliverable: finals are the contract,
+        # samples and working files stay on the receipt only.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('md')\n"
+            "(d / 'data.csv').write_text('a,b\\n')\n"
+            "(d / 'meta.json').write_text('{}')\n"
+            "(d / 'bundle.zip').write_bytes(b'PK')\n"
+            "(d / 'samples').mkdir()\n"
+            "(d / 'samples' / 'page-1.png').write_bytes(b'\\x89PNG')\n"
+            "(d / 'notes.tmp').write_text('scratch')\n"
+            "print('ok')\n"
+        )
+        required = ['report.md', 'data.csv', 'meta.json', 'bundle.zip']
+        task = self._run(code, [], required)
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        receipt_rels = sorted(a.get('rel') for a in task['receipt']['artifacts'])
+        self.assertIn('samples/page-1.png', receipt_rels)
+        self.assertIn('notes.tmp', receipt_rels)
+        self._assert_chat_is_contract(task, required)
+        host = self.app.execution.hosts[task['host_id']]
+        archive = Path(self.app.execution.directory(host, task['execution_id'])) / 'artifacts'
+        sample = next(a for a in task['receipt']['artifacts'] if a.get('rel') == 'samples/page-1.png')
+        self.assertTrue((archive / sample['digest']).is_file())
+
+    def test_required_docx_md_chat_omits_office_and_opencl_junk(self):
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / '建议.docx').write_bytes(b'docx')\n"
+            "(d / '建议.md').write_text('md')\n"
+            "(d / 'opengl_devices.log').write_text('gl')\n"
+            "(d / 'opengl_profile.xml').write_text('<x/>')\n"
+            "(d / '_nop_fdiv4b.bin').write_bytes(b'\\0\\1')\n"
+            "(d / 'dump.ini').write_text('ini')\n"
+            "(d / 'dictionaries.xcu').write_text('xcu')\n"
+            "(d / 'backenddb.xml').write_text('<db/>')\n"
+            "(d / 'script.xlb').write_text('lb')\n"
+            "(d / 'word-page-6.png').write_bytes(b'\\x89PNG')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, ['建议.md'], ['建议.docx', '建议.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertGreater(len(task['receipt']['artifacts']), 2)
+        self._assert_chat_is_contract(task, ['建议.docx', '建议.md'])
+        turn = next(iter(self.app._all('turn', work_id=task['work_id'], status='queued')), None)
+        self.assertIsNotNone(turn)
+        ids = []
+        for message in self.app._work_inbox(task['work_id']):
+            message['consumed_by_turn_id'] = turn['id']
+            self.app.store.put('message', message)
+            ids.append(message['id'])
+        turn['message_ids'] = list(dict.fromkeys((turn.get('message_ids') or []) + ids))
+        self.app.store.put('turn', turn)
+        self.app.finish_turn(turn, '两份成稿已放好。')
+        delivery = [m for m in self.app.store.find('message', work_id=task['work_id'])
+                    if m.get('kind') == 'assistant'][-1]
+        self.assertEqual(delivery.get('artifact_refs'), task['artifact_refs'])
+
+    def test_missing_required_zip_is_not_replaced_by_unpacked_files(self):
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('md')\n"
+            "(d / 'unpacked').mkdir()\n"
+            "(d / 'unpacked' / 'page.txt').write_text('loose')\n"
+            "(d / 'opengl_devices.log').write_text('gl')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['bundle.zip', 'report.md'])
+        self.assertEqual(task['status'], 'failed')
+        self.assertEqual(task['error'], 'required_output_missing')
+        missing = [r['output'] for r in task['receipt']['required_output_results'] if not r.get('present')]
+        self.assertEqual(missing, ['bundle.zip'])
+        receipt_rels = {a.get('rel') for a in task['receipt']['artifacts']}
+        self.assertIn('unpacked/page.txt', receipt_rels)
+        self.assertNotIn('bundle.zip', receipt_rels)
+        self._assert_chat_is_contract(task, ['report.md'])
+        self.assertEqual(self.app.store.get('work', task['work_id']).get('pending_required_outputs'),
+                         ['bundle.zip'])
+
+    def test_hand_built_receipt_keeps_evidence_and_filters_chat_refs(self):
+        # Windows-shaped paths: the cloud adjudicates a device receipt without
+        # re-statting the files. Junk siblings must not become download refs.
+        self.cfg['installations'][0]['argv'] = [sys.executable, '-c', 'print(1)']
+        self.app = Service(self.cfg, self.root.parent / 'data')
+        self.app.probe('codex-local')
+        msg = self.app.send('bot-main', {'text': 't', 'allow_write': True}, 'win')
+        res = self.app.submit_task('bot-main', msg['work_id'], {
+            'prompt': 't', 'outputs': ['建议.md'],
+            'required_outputs': ['建议.docx', '建议.md']})
+        task = self.app.store.get('task', res['task_id'])
+        base = 'C:/Users/work/.xpp-out/' + task['execution_id']
+        def item(rel, digest):
+            return {'path': base + '/' + rel, 'digest': digest, 'size': 4,
+                    'source': 'output_dir', 'rel': rel}
+        receipt = {
+            'execution_id': task['execution_id'], 'spec_digest': task['spec_digest'],
+            'status': 'succeeded', 'process_tree_confirmed': True,
+            'supervision': 'windows-job-object', 'exit_code': 0,
+            'required_output_results': [
+                {'output': '建议.docx', 'present': True},
+                {'output': '建议.md', 'present': True}],
+            'artifacts': [
+                item('建议.docx', 'a' * 64),
+                item('_nop_fdiv4b.bin', 'b' * 64),
+                item('opengl_devices.log', 'c' * 64),
+                item('dump.ini', 'd' * 64),
+                item('word-page-6.png', 'e' * 64),
+                item('建议.md', 'f' * 64),
+            ],
+        }
+        done = self.app.complete_task(task, receipt)
+        self.assertEqual(len(done['receipt']['artifacts']), 6)
+        self._assert_chat_is_contract(done, ['建议.docx', '建议.md'])
+
+    def _contract_receipt(self, task, artifacts, required_results):
+        return {
+            'execution_id': task['execution_id'], 'spec_digest': task['spec_digest'],
+            'status': 'succeeded', 'process_tree_confirmed': True,
+            'supervision': 'windows-job-object', 'exit_code': 0,
+            'required_output_results': required_results, 'artifacts': artifacts,
+        }
+
+    def test_linux_case_does_not_attach_contract_extras(self):
+        # B1. POSIX identity is exact. REPORT.MD is not the contracted report.md.
+        # A Windows host still folds, so Report.md satisfies report.md.
+        from pangpang import runner
+        self.cfg['installations'][0]['argv'] = [sys.executable, '-c', 'print(1)']
+        self.app = Service(self.cfg, self.root.parent / 'data')
+        self.app.probe('codex-local')
+        msg = self.app.send('bot-main', {'text': 't', 'allow_write': True}, 'b1')
+        res = self.app.submit_task('bot-main', msg['work_id'], {
+            'prompt': 't', 'required_outputs': ['report.md']})
+        task = self.app.store.get('task', res['task_id'])
+        base = str(runner.execution_output_dir(task['cwd'], task['execution_id'])).replace('\\', '/')
+        def item(name, digest):
+            return {'path': base + '/' + name, 'digest': digest, 'size': 4, 'source': 'output_dir'}
+        done = self.app.complete_task(task, self._contract_receipt(task, [
+            item('report.md', 'a' * 64), item('REPORT.MD', 'b' * 64),
+        ], [{'output': 'report.md', 'present': True}]))
+        self.assertEqual(len(done['receipt']['artifacts']), 2)
+        self._assert_chat_is_contract(done, ['report.md'])
+        self.app.execution.hosts['local']['os'] = 'Windows'
+        res2 = self.app.submit_task('bot-main', msg['work_id'], {
+            'prompt': 't', 'required_outputs': ['report.md']})
+        task2 = self.app.store.get('task', res2['task_id'])
+        base2 = str(runner.execution_output_dir(task2['cwd'], task2['execution_id'])).replace('\\', '/')
+        folded = self.app.complete_task(task2, self._contract_receipt(task2, [
+            {'path': base2 + '/REPORT.MD', 'digest': 'c' * 64, 'size': 4, 'source': 'output_dir'},
+        ], [{'output': 'report.md', 'present': True}]))
+        self._assert_chat_is_contract(folded, ['REPORT.MD'])
+
+    def test_nested_output_marker_is_not_the_contract_root(self):
+        # B2. samples/.xpp-out/<execution_id>/report.md is not the top-level final.
+        from pangpang import runner
+        self.cfg['installations'][0]['argv'] = [sys.executable, '-c', 'print(1)']
+        self.app = Service(self.cfg, self.root.parent / 'data')
+        self.app.probe('codex-local')
+        msg = self.app.send('bot-main', {'text': 't', 'allow_write': True}, 'b2')
+        res = self.app.submit_task('bot-main', msg['work_id'], {
+            'prompt': 't', 'required_outputs': ['report.md']})
+        task = self.app.store.get('task', res['task_id'])
+        base = str(runner.execution_output_dir(task['cwd'], task['execution_id'])).replace('\\', '/')
+        nested = 'samples/.xpp-out/' + task['execution_id'] + '/report.md'
+        done = self.app.complete_task(task, self._contract_receipt(task, [
+            {'path': base + '/report.md', 'digest': 'a' * 64, 'size': 4, 'source': 'output_dir'},
+            {'path': base + '/' + nested, 'digest': 'b' * 64, 'size': 4, 'source': 'output_dir'},
+        ], [{'output': 'report.md', 'present': True}]))
+        self.assertEqual(len(done['receipt']['artifacts']), 2)
+        self._assert_chat_is_contract(done, ['report.md'])
+
+    def test_lexical_contract_paths_still_attach(self):
+        # B3. `./` and `//` satisfy the file check and must still be downloadable.
+        from pangpang import runner
+        self.assertEqual(runner.contract_rel('sub/./report.md'), 'sub/report.md')
+        self.assertEqual(runner.contract_rel('notes//plain.md'), 'notes/plain.md')
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'sub').mkdir()\n"
+            "(d / 'sub' / 'report.md').write_text('report')\n"
+            "(d / 'notes').mkdir()\n"
+            "(d / 'notes' / 'plain.md').write_text('plain')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['sub/./report.md', 'notes//plain.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertTrue(all(item['present'] for item in task['receipt']['required_output_results']))
+        self._assert_chat_is_contract(task, ['sub/report.md', 'notes/plain.md'])
+
+    def test_digest_dedup_keeps_the_contract_path(self):
+        # B4. The same bytes in a root sibling must not consume the only slot
+        # for sub/report.md. os.walk yields the root file first.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "payload = b'same-bytes'\n"
+            "(d / 'decoy.md').write_bytes(payload)\n"
+            "(d / 'sub').mkdir()\n"
+            "(d / 'sub' / 'report.md').write_bytes(payload)\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['sub/report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        rels = {a.get('rel') for a in task['receipt']['artifacts']}
+        self.assertIn('sub/report.md', rels)
+        self.assertNotIn('decoy.md', rels)
+        self._assert_chat_is_contract(task, ['sub/report.md'])
+
+    def test_declared_file_outside_cwd_keeps_its_name(self):
+        # B5. A declared file that resolves into another allowed root still
+        # carries the declared name onto the chat list.
+        side = self.root.parent / 'side'
+        side.mkdir()
+        target = side / 'outside.md'
+        target.write_text('side')
+        link = self.root / 'outside.md'
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest('symlink not permitted on this platform')
+        self.cfg['hosts'][0]['allowed_roots'] = [str(self.root), str(side)]
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "p = Path(os.environ['XPP_OUTPUT_DIR']) / 'final.md'\n"
+            "p.write_text('final')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, ['outside.md'], ['final.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        outside = [a for a in task['receipt']['artifacts'] if a.get('rel') == 'outside.md']
+        self.assertEqual(len(outside), 1)
+        self.assertIn(str(side), outside[0]['path'])
+        self.assertNotIn('.xpp-out', outside[0]['path'])
+        warned = [w for w in task['receipt'].get('output_warnings', [])
+                  if w.get('issue') == 'declared_output_unscoped']
+        self.assertEqual(warned, [])
+        self._assert_chat_is_contract(task, ['final.md', 'outside.md'])
+
+    def test_alias_does_not_drop_the_real_contract_file(self):
+        # R2-F1. link.md resolves to nested/other.md and shares report.md's bytes.
+        # The alias must not keep the only digest slot under a name the chat
+        # filter does not derive from that path.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'nested').mkdir()\n"
+            "payload = b'same-alias-bytes'\n"
+            "(d / 'nested' / 'other.md').write_bytes(payload)\n"
+            "(d / 'report.md').write_bytes(payload)\n"
+            "(d / 'link.md').symlink_to(d / 'nested' / 'other.md')\n"
+            "print('ok')\n"
+        )
+        try:
+            task = self._run(code, [], ['link.md', 'report.md'])
+        except OSError:
+            self.skipTest('symlink not permitted on this platform')
+        if task['status'] == 'failed' and task.get('error') != 'required_output_missing':
+            self.skipTest('symlink not permitted on this platform')
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertIn('report.md', {a.get('rel') for a in task['receipt']['artifacts']})
+        self._assert_chat_is_contract(task, ['report.md'])
+
+    def test_required_symlink_outside_output_dir_is_not_attached(self):
+        # R2-F2. required pre-collection must not follow a symlink out of the
+        # output dir just because the target is in allowed_roots.
+        side = self.root.parent / 'side-out'
+        side.mkdir()
+        target = side / 'secret.md'
+        target.write_text('outside')
+        self.cfg['hosts'][0]['allowed_roots'] = [str(self.root), str(side)]
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'ok.md').write_text('ok')\n"
+            "(d / 'secret.md').symlink_to(%r)\n"
+            "print('ok')\n" % str(target)
+        )
+        try:
+            task = self._run(code, [], ['secret.md', 'ok.md'])
+        except OSError:
+            self.skipTest('symlink not permitted on this platform')
+        self.assertEqual(task['status'], 'failed')
+        self.assertEqual(task['error'], 'required_output_missing')
+        paths = [a['path'] for a in task['receipt']['artifacts']]
+        self.assertFalse(any(str(side) in p for p in paths))
+        self.assertNotIn('secret.md', {a.get('rel') for a in task['receipt']['artifacts']})
+        host = self.app.execution.hosts[task['host_id']]
+        archive = Path(self.app.execution.directory(host, task['execution_id'])) / 'artifacts'
+        if archive.is_dir():
+            archived = {p.name for p in archive.iterdir()}
+            self.assertNotIn(__import__('hashlib').sha256(b'outside').hexdigest(), archived)
+        self._assert_chat_is_contract(task, ['ok.md'])
+
+    def test_required_symlink_inside_output_dir_is_attached(self):
+        # R3. report.md -> samples/actual.md stays inside the output dir.
+        # The task succeeds and the contract name is a download.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'samples').mkdir()\n"
+            "(d / 'samples' / 'actual.md').write_text('actual')\n"
+            "(d / 'report.md').symlink_to(d / 'samples' / 'actual.md')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertTrue(all(item['present'] for item in task['receipt']['required_output_results']))
+        self._assert_chat_is_contract(task, ['report.md'])
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual(shown[0]['name'], 'report.md')
+        self.assertTrue(shown[0]['path'].replace('\\', '/').endswith('samples/actual.md'))
+        self.assertEqual(shown[0]['path'], next(a['path'] for a in task['receipt']['artifacts']
+                                                if a.get('rel') == 'report.md'))
+        evidence = self.app.read_evidence('bot-main', shown[0]['id'],
+                                           self.app.store.get('work', task['work_id']))
+        self.assertEqual(evidence['metadata']['name'], 'report.md')
+        self.assertTrue(evidence['metadata']['path'].replace('\\', '/').endswith('samples/actual.md'))
+        self.assertEqual(evidence['digest'], shown[0]['digest'])
+        from pangpang.context import model_artifact_view
+        view = model_artifact_view(self.app, shown[0]['id'])
+        self.assertEqual(view['name'], 'report.md')
+        self.assertNotIn('actual.md', view['name'])
+        self.assertNotIn(shown[0]['path'], json.dumps(view))
+
+    def test_declared_symlink_inside_cwd_is_attached(self):
+        # R3. notes.md -> scratch.md stays inside cwd. Chat keeps that name
+        # along with the required report.md, not report.md alone.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('report')\n"
+            "cwd = Path.cwd()\n"
+            "(cwd / 'scratch.md').write_text('scratch')\n"
+            "(cwd / 'notes.md').symlink_to(cwd / 'scratch.md')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, ['notes.md'], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self._assert_chat_is_contract(task, ['report.md', 'notes.md'])
+        notes = next(self.app.store.get('artifact', ref) for ref in task['artifact_refs']
+                     if self.app.store.get('artifact', ref).get('rel') == 'notes.md')
+        self.assertEqual(notes['name'], 'notes.md')
+        self.assertTrue(notes['path'].replace('\\', '/').endswith('/scratch.md'))
+
+    def test_same_digest_cwd_file_does_not_steal_output_alias(self):
+        # R5-F1. report.md -> samples/actual.md, and cwd/report.md has the same
+        # bytes. cwd_fallback must not replace the output_dir binding, or the
+        # source filter then leaves the chat with nothing.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'samples').mkdir()\n"
+            "(d / 'samples' / 'actual.md').write_text('SAME')\n"
+            "(d / 'report.md').symlink_to(d / 'samples' / 'actual.md')\n"
+            "Path('report.md').write_text('SAME')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        self.assertTrue(task.get('artifact_refs'))
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual([a.get('source') for a in shown], ['output_dir'])
+        self.assertEqual(shown[0]['rel'], 'report.md')
+        self.assertTrue(shown[0]['path'].replace('\\', '/').endswith('samples/actual.md'))
+        from pangpang.context import model_artifact_view
+        self.assertEqual(model_artifact_view(self.app, shown[0]['id'])['name'], 'report.md')
+
+    def test_cwd_same_name_draft_is_not_a_final(self):
+        # R4-F1. cwd/report.md is a draft. Only the output-dir binding is chat.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('FINAL')\n"
+            "Path('report.md').write_text('DRAFT')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        receipt_paths = [a['path'] for a in task['receipt']['artifacts']]
+        self.assertTrue(any(p.endswith('report.md') and '.xpp-out' in p.replace('\\', '/') for p in receipt_paths))
+        self.assertTrue(any(p.endswith('report.md') and '.xpp-out' not in p.replace('\\', '/') for p in receipt_paths))
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual([a.get('rel') for a in shown], ['report.md'])
+        self.assertTrue(all('.xpp-out' in a['path'].replace('\\', '/') for a in shown))
+        self.assertTrue(all(a.get('source') != 'cwd_fallback' for a in shown))
+
+    def test_rejected_symlink_does_not_reenter_via_cwd(self):
+        # R4-F1. The required symlink leaves the output dir, so pre-collection
+        # rejects it. A same-named cwd file must not fill the chat list.
+        side = self.root.parent / 'side-reentry'
+        side.mkdir()
+        target = side / 'secret.md'
+        target.write_text('outside')
+        self.cfg['hosts'][0]['allowed_roots'] = [str(self.root), str(side)]
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'ok.md').write_text('ok')\n"
+            "Path('secret.md').write_text('cwd-draft')\n"
+            "(d / 'secret.md').symlink_to(%r)\n"
+            "print('ok')\n" % str(target)
+        )
+        task = self._run(code, [], ['secret.md', 'ok.md'])
+        self.assertEqual(task['status'], 'failed')
+        self.assertEqual(task['error'], 'required_output_missing')
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual([a.get('rel') for a in shown], ['ok.md'])
+        self.assertFalse(any(a.get('rel') == 'secret.md' or str(side) in a['path'] for a in shown))
+        self.assertTrue(any(a.get('source') == 'cwd_fallback' and a.get('rel') == 'secret.md'
+                            for a in task['receipt']['artifacts']))
+
+    def test_posix_space_and_backslash_names_stay_distinct(self):
+        # R2-F3. A backslash or a trailing space is part of the filename.
+        # Lossy normalization must not pull that file onto the contract list.
+        from pangpang import runner
+        self.assertEqual(runner.contract_rel('sub\\final.md'), 'sub\\final.md')
+        self.assertEqual(runner.contract_rel('my report.md'), 'my report.md')
+        self.assertEqual(runner.contract_rel('my report.md '), 'my report.md ')
+        self.assertEqual(runner.contract_rel('sub/./final.md'), 'sub/final.md')
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'sub').mkdir()\n"
+            "(d / 'sub' / 'final.md').write_text('real')\n"
+            "(d / 'sub\\\\final.md').write_text('fake')\n"
+            "(d / 'my report.md').write_text('spaced')\n"
+            "(d / 'my report.md ').write_text('padded')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['sub/final.md', 'my report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        rels = {a.get('rel') for a in task['receipt']['artifacts']}
+        self.assertIn('sub\\final.md', rels)
+        self.assertIn('my report.md ', rels)
+        self._assert_chat_is_contract(task, ['sub/final.md', 'my report.md'])
 
     def test_undeclared_media_in_cwd_is_harvested_by_fallback(self):
         # A media file written straight to cwd (not the output dir, not declared)

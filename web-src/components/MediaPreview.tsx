@@ -1,7 +1,7 @@
 import {useState} from 'react';
 import {useTranslation} from 'react-i18next';
 import type {Artifact} from '../types';
-import {mediaKind, safeUrl} from '../pure';
+import {artifactFileName, mediaKind, safeUrl} from '../pure';
 import {Modal} from './Modal';
 
 export function ZoomImage({src, alt, className = '', onError}: {src: string; alt: string; className?: string; onError?: () => void}) {
@@ -23,7 +23,7 @@ export function ZoomImage({src, alt, className = '', onError}: {src: string; alt
 export function MediaPreview({artifact}: {artifact: Artifact}) {
   const {t} = useTranslation();
   const [failed, setFailed] = useState(false);
-  const name = artifact.path.split(/[\\/]/).pop() || 'file';
+  const name = artifactFileName(artifact);
   const url = `/api/v1/artifacts/${encodeURIComponent(artifact.id)}?download=1`;
   const kind = mediaKind(name), big = artifact.size != null && artifact.size > 8 * 1024 * 1024;
   const download = <a className="media-fallback text-brand" href={url} download={name}>{t('media.download', {name})}</a>;

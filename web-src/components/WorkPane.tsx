@@ -5,7 +5,7 @@ import type {Routine, Task, Work, Artifact} from '../types';
 import {api} from '../api';
 import {RunPreview} from './RunPreview';
 import {ApprovalButtons} from './ApprovalButtons';
-import {activitySummary, displayedReachability, operatorStatement, pageWindow, progressPhaseText} from '../pure';
+import {activitySummary, artifactFileName, displayedReachability, operatorStatement, pageWindow, progressPhaseText} from '../pure';
 import {attentionLabel, taskLabel, exchangeLabel, dateTime, scheduleText, friendlyError, fileSize, checkpointView} from '../display';
 import {MediaPreview} from './MediaPreview';
 import {Facts, Created, Value} from './Facts';
@@ -256,12 +256,12 @@ export function WorkPane({store}: {store: Store}) {
       <div id="artifacts" ref={artifactRef} className="mt-2 grid grid-cols-2 gap-3">
         {ap.items.map((a: Artifact) => (
           <div key={a.id} data-artifact={a.id} className="panel artifact-card rounded-xl border border-line bg-raised p-4">
-            <h4 className="truncate font-medium">{a.path.split(/[\\/]/).pop()}</h4>
+            <h4 className="truncate font-medium">{artifactFileName(a)}</h4>
             <p className="text-xs text-muted">{a.host_id} · {fileSize(a.size)}</p>
             <MediaPreview artifact={a} />
             <div className="mt-2 flex flex-wrap gap-2">
               <button className="rounded-lg border border-line px-2 py-1 text-xs" onClick={() => {
-                store.setAttached((prev) => prev.some((x) => x.id === a.id) ? prev: [...prev, {id: a.id, name: a.path.split(/[\\/]/).pop() || a.id}]);
+                store.setAttached((prev) => prev.some((x) => x.id === a.id) ? prev: [...prev, {id: a.id, name: artifactFileName(a)}]);
                 (window as any).__gotoChat?.();
               }}>{tr('workpane.referenceInChat')}</button>
               <Act ghost label={tr('workpane.copyToHost')} store={store} run={async () => {

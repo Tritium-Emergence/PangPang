@@ -109,6 +109,8 @@ export interface Artifact {
   size?: number | null;
   source?: string;
   work_id?: string | null;
+  rel?: string;
+  name?: string;
 }
 
 export interface Routine {

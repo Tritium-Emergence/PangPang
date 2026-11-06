@@ -275,6 +275,18 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(response.headers['Content-Type'], 'application/octet-stream')
                 self.assertEqual(response.headers['Content-Disposition'],
                                  'attachment; filename="download"; filename*=UTF-8\'\'' + quote(name, safe=''))
+        # The contract name is the download filename. The path stays the real target.
+        alias = {'id': 'artifact-alias', 'host_id': 'local',
+                 'path': str(self.root / 'samples' / 'actual.md'),
+                 'rel': 'report.md', 'digest': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+        self.app.store.put('artifact', alias)
+        with patch.object(self.app.execution, 'read_artifact', return_value={
+                'data': base64.b64encode(raw).decode(), 'digest': alias['digest']}):
+            with self.request('artifacts/artifact-alias?download=1') as response:
+                self.assertEqual(response.read(), raw)
+                disposition = response.headers['Content-Disposition']
+                self.assertIn(quote('report.md', safe=''), disposition)
+                self.assertNotIn('actual.md', disposition)
                 self.assertEqual(response.headers['Content-Security-Policy'], "default-src 'none'; sandbox")
                 self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
         with patch.object(self.app.execution, 'read_artifact', return_value={
