@@ -120,6 +120,21 @@ const MEDIA_EXT: Record<string, string[]> = {
   audio: ['mp3', 'wav', 'ogg', 'm4a'],
 };
 
+// Contract `rel` is the name the user was promised. The path may be a symlink target.
+export function artifactFileName(artifact: {path?: string; rel?: string; name?: string}): string {
+  const named = typeof artifact.name === 'string' ? artifact.name : '';
+  const rel = !named && typeof artifact.rel === 'string' ? artifact.rel : '';
+  const raw = named || rel;
+  if (raw && !raw.startsWith('/') && !raw.startsWith('\\')) {
+    const parts = raw.split('/');
+    if (!parts.includes('..')) {
+      const base = parts[parts.length - 1];
+      if (base && base !== '.' && base !== '..') return base;
+    }
+  }
+  return (artifact.path || '').split(/[\\/]/).pop() || 'file';
+}
+
 // Classify an artifact by file extension (case-insensitive); unknown -> 'other'.
 export function mediaKind(name: string): string {
   const e = String(name).split('.').pop()!.toLowerCase();

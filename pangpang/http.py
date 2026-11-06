@@ -357,7 +357,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         # Finite preview exceptions preserve the existing media/PDF
                         # UI. PDF is not claimed to be free of active content; public
                         # deployments still require the isolation acceptance checks.
-                        name = Path(str(artifact.get("path", ""))).name or "download"
+                        from .service import artifact_display_name
+                        name = artifact_display_name(artifact)
                         safe = "".join(c for c in name if c.isprintable() and c not in '"\\/:*?<>|\r\n')[:120] or "download"
                         guessed = mimetypes.guess_type(name)[0] or ""
                         if guessed in ARTIFACT_PREVIEW_TYPES:

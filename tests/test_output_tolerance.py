@@ -602,6 +602,16 @@ class OutputToleranceTests(unittest.TestCase):
         self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
         self.assertTrue(all(item['present'] for item in task['receipt']['required_output_results']))
         self._assert_chat_is_contract(task, ['report.md'])
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual(shown[0]['name'], 'report.md')
+        self.assertTrue(shown[0]['path'].replace('\\', '/').endswith('samples/actual.md'))
+        self.assertEqual(shown[0]['path'], next(a['path'] for a in task['receipt']['artifacts']
+                                                if a.get('rel') == 'report.md'))
+        evidence = self.app.read_evidence('bot-main', shown[0]['id'],
+                                           self.app.store.get('work', task['work_id']))
+        self.assertEqual(evidence['metadata']['name'], 'report.md')
+        self.assertTrue(evidence['metadata']['path'].replace('\\', '/').endswith('samples/actual.md'))
+        self.assertEqual(evidence['digest'], shown[0]['digest'])
 
     def test_declared_symlink_inside_cwd_is_attached(self):
         # R3. notes.md -> scratch.md stays inside cwd. Chat keeps that name
@@ -619,6 +629,56 @@ class OutputToleranceTests(unittest.TestCase):
         task = self._run(code, ['notes.md'], ['report.md'])
         self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
         self._assert_chat_is_contract(task, ['report.md', 'notes.md'])
+        notes = next(self.app.store.get('artifact', ref) for ref in task['artifact_refs']
+                     if self.app.store.get('artifact', ref).get('rel') == 'notes.md')
+        self.assertEqual(notes['name'], 'notes.md')
+        self.assertTrue(notes['path'].replace('\\', '/').endswith('/scratch.md'))
+
+    def test_cwd_same_name_draft_is_not_a_final(self):
+        # R4-F1. cwd/report.md is a draft. Only the output-dir binding is chat.
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'report.md').write_text('FINAL')\n"
+            "Path('report.md').write_text('DRAFT')\n"
+            "print('ok')\n"
+        )
+        task = self._run(code, [], ['report.md'])
+        self.assertEqual(task['status'], 'succeeded', task.get('receipt'))
+        receipt_paths = [a['path'] for a in task['receipt']['artifacts']]
+        self.assertTrue(any(p.endswith('report.md') and '.xpp-out' in p.replace('\\', '/') for p in receipt_paths))
+        self.assertTrue(any(p.endswith('report.md') and '.xpp-out' not in p.replace('\\', '/') for p in receipt_paths))
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual([a.get('rel') for a in shown], ['report.md'])
+        self.assertTrue(all('.xpp-out' in a['path'].replace('\\', '/') for a in shown))
+        self.assertTrue(all(a.get('source') != 'cwd_fallback' for a in shown))
+
+    def test_rejected_symlink_does_not_reenter_via_cwd(self):
+        # R4-F1. The required symlink leaves the output dir, so pre-collection
+        # rejects it. A same-named cwd file must not fill the chat list.
+        side = self.root.parent / 'side-reentry'
+        side.mkdir()
+        target = side / 'secret.md'
+        target.write_text('outside')
+        self.cfg['hosts'][0]['allowed_roots'] = [str(self.root), str(side)]
+        code = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "d = Path(os.environ['XPP_OUTPUT_DIR'])\n"
+            "(d / 'ok.md').write_text('ok')\n"
+            "Path('secret.md').write_text('cwd-draft')\n"
+            "(d / 'secret.md').symlink_to(%r)\n"
+            "print('ok')\n" % str(target)
+        )
+        task = self._run(code, [], ['secret.md', 'ok.md'])
+        self.assertEqual(task['status'], 'failed')
+        self.assertEqual(task['error'], 'required_output_missing')
+        shown = [self.app.store.get('artifact', ref) for ref in task['artifact_refs']]
+        self.assertEqual([a.get('rel') for a in shown], ['ok.md'])
+        self.assertFalse(any(a.get('rel') == 'secret.md' or str(side) in a['path'] for a in shown))
+        self.assertTrue(any(a.get('source') == 'cwd_fallback' and a.get('rel') == 'secret.md'
+                            for a in task['receipt']['artifacts']))
 
     def test_posix_space_and_backslash_names_stay_distinct(self):
         # R2-F3. A backslash or a trailing space is part of the filename.

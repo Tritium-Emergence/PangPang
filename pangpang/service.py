@@ -502,6 +502,26 @@ def _take_startup_overrides(live, file_config):
     return replacements, other
 
 
+def artifact_display_name(artifact):
+    """Filename the user sees and saves. The contract `rel` wins over the path.
+
+    The archive and the digest still use the real path. A symlink target named
+    actual.md is downloaded as report.md when that is the contract name.
+    """
+    if isinstance(artifact, dict):
+        rel = artifact.get("rel")
+        if isinstance(rel, str) and rel and not rel.startswith(("/", "\\")):
+            parts = rel.split("/")
+            if ".." not in parts:
+                name = parts[-1]
+                if name and name not in {".", ".."}:
+                    return name
+        path = artifact.get("path")
+        if isinstance(path, str) and path:
+            return Path(path).name or "download"
+    return "download"
+
+
 class Service:
     # Execution-plane liveness & observation policy.
     RECONCILE_CADENCE_S = 1.0 # active-task cheap reconcile period (spawn-free for local)
@@ -6183,7 +6203,7 @@ class Service:
         return None
 
     @staticmethod
-    def _rel_from_artifact_path(path, task, *, casefold=False):
+    def _rel_from_artifact_path(path, task, *, casefold=False, allow_cwd=True):
         """Path relative to this execution's output dir, else to cwd.
 
         The output root is `<cwd>/.xpp-out/<execution_id>` only. A later
@@ -6204,9 +6224,10 @@ class Service:
                     norm, base + "/.xpp-out/" + execution_id, casefold=casefold)
                 if rooted:
                     return runner.contract_rel(rooted, windows=casefold)
-            rooted = Service._strip_rooted(norm, base, casefold=casefold)
-            if rooted:
-                return runner.contract_rel(rooted, windows=casefold)
+            if allow_cwd:
+                rooted = Service._strip_rooted(norm, base, casefold=casefold)
+                if rooted:
+                    return runner.contract_rel(rooted, windows=casefold)
         return None
 
     @staticmethod
@@ -6222,12 +6243,23 @@ class Service:
 
     @staticmethod
     def _artifact_matches_contract(item, names, task, *, casefold=False):
-        """Path identity or the contract name the runner stamped for an in-boundary alias."""
+        """Verified binding only. A cwd draft with the same name is not the final.
+
+        `output_dir` is the required-file harvest (including an in-boundary
+        symlink stamped with the contract name). `declared` is the explicit
+        outputs lookup. `cwd_fallback` never satisfies a contract name.
+        """
         if not isinstance(item, dict) or not names:
             return False
-        derived = Service._rel_from_artifact_path(item.get("path"), task, casefold=casefold)
+        source = item.get("source")
+        if source not in {"output_dir", "declared"}:
+            return False
         stamped = Service._norm_contract_path(item.get("rel"), windows=casefold)
-        return (Service._rel_in_contract(derived, names, casefold=casefold)
+        under_out = Service._rel_from_artifact_path(
+            item.get("path"), task, casefold=casefold, allow_cwd=False)
+        if source == "declared":
+            return Service._rel_in_contract(stamped, names, casefold=casefold)
+        return (Service._rel_in_contract(under_out, names, casefold=casefold)
                 or Service._rel_in_contract(stamped, names, casefold=casefold))
 
     def complete_task(self, task, receipt):
@@ -6297,8 +6329,10 @@ class Service:
                 if contract is not None and not self._artifact_matches_contract(
                         item, contract, current, casefold=casefold):
                     continue
-                a = self.store.put("artifact", dict(item, id=uid("artifact"), host_id=task["host_id"],
-                                   owner_bot_id=task["owner_bot_id"], task_id=task["id"], work_id=task["work_id"]))
+                stored = dict(item, id=uid("artifact"), host_id=task["host_id"],
+                              owner_bot_id=task["owner_bot_id"], task_id=task["id"],
+                              work_id=task["work_id"], name=artifact_display_name(item))
+                a = self.store.put("artifact", stored)
                 refs.append(a["id"])
             current["artifact_refs"] = refs
             self.store.put("task", current)
