@@ -173,7 +173,23 @@ export interface Exchange {
   source_work_id?: string; target_work_id?: string; work_id?: string; summary?: string; request?: string;
 }
 export interface Host {id: string; name?: string; os?: string; transport?: string; execution_level?: string}
-export interface Device {id: string; online?: boolean; revoked?: boolean; last_seen?: number}
+export interface InstallBuild {
+  version?: string;
+  commit?: string;
+  ref?: string;
+  built_at?: string;
+  source?: 'build' | 'git' | 'unknown' | string;
+}
+export interface Device {
+  id: string;
+  online?: boolean;
+  revoked?: boolean;
+  last_seen?: number;
+  version?: string;
+  commit?: string;
+  ref?: string;
+  source?: string;
+}
 export interface Installation {id: string; host_id?: string; [k: string]: unknown}
 export interface Probe {id: string; available?: boolean; version?: string; reason?: string}
 export interface Model {id: string; model?: string; configured?: boolean; context_window_tokens?: number}
@@ -193,6 +209,7 @@ export interface Snapshot {
   notifications: Notification[];
   exchanges: Exchange[];
   attention_summary: AttentionSummary; // server projection — read verbatim
+  cloud_build?: InstallBuild;
   devices: Device[];
   hosts: Host[];
   installations: Installation[];

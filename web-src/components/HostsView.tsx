@@ -6,6 +6,31 @@ import {api} from '../api';
 import {SettingsDialog} from './Setup';
 import {clock, dateTime, friendlyError} from '../display';
 import {executionFactsFor, installationSetupTone} from '../pure';
+import type {Host, InstallBuild} from '../types';
+
+function shortHash(commit?: string | null) {
+  if (!commit || commit === 'unknown') return '';
+  return commit.length >= 7 ? commit.slice(0, 7) : commit;
+}
+
+function versionLabel(
+  t: (key: string, opts?: Record<string, string>) => string,
+  build?: {version?: string; commit?: string} | null,
+) {
+  const version = String(build?.version || '').trim();
+  const commit = String(build?.commit || '').trim();
+  const hash = shortHash(commit);
+  if (!version && (!commit || commit === 'unknown')) return t('hosts.installVersionUnknown');
+  return t('hosts.installVersion', {
+    version: version || t('hosts.versionUnregistered'),
+    hash: hash || t('hosts.versionHashUnknown'),
+  });
+}
+
+function commitsDiffer(cloud?: string | null, device?: string | null) {
+  if (!cloud || cloud === 'unknown' || !device || device === 'unknown') return false;
+  return cloud !== device;
+}
 
 // Hosts view (#hosts-view): devices + their executors, the global-model settings
 // entry, and device pairing. Reads server truth (hosts/devices/installations/probes);
@@ -13,8 +38,66 @@ import {executionFactsFor, installationSetupTone} from '../pure';
 export function HostsView({store}: {store: Store}) {
   const {t} = useTranslation();
   const snap = store.snapshot!;
+  const cloud = (snap.cloud_build || {}) as InstallBuild;
   const [pairCode, setPairCode] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function upgradeCloud() {
+    setBusy('cloud-plan');
+    try {
+      const plan = await api<{
+        tip_commit: string;
+        current_commit: string;
+        already_current?: boolean;
+      }>('setup/upgrade-plan', {});
+      if (plan.already_current) {
+        store.setNotice(t('hosts.upgradeCurrent'));
+        return;
+      }
+      if (!confirm(t('hosts.upgradeConfirmCloud', {sha: plan.tip_commit}))) return;
+      setBusy('cloud-upgrade');
+      const result = await api<{status?: string; restarting?: boolean}>('setup/upgrade', {
+        target_commit: plan.tip_commit,
+      });
+      if (result.restarting || result.status === 'updated') {
+        store.setNotice(t('hosts.upgradeRestarting'));
+      } else {
+        store.setNotice(t('hosts.upgradeCurrent'));
+      }
+      try { await store.refresh(); } catch { /* cloud may already be restarting */ }
+    } catch (e: any) {
+      store.setNotice(friendlyError(e) || t('hosts.upgradePlanFailed'));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function upgradeDevice(host: Host) {
+    const target = String(cloud.commit || '');
+    if (!/^[0-9a-f]{40}$/i.test(target)) {
+      store.setNotice(t('hosts.upgradeNeedCommit'));
+      return;
+    }
+    if (!confirm(t('hosts.upgradeConfirmDevice', {name: host.name || host.id, sha: target}))) return;
+    setBusy('device:' + host.id);
+    try {
+      const queued = await api<{status?: string; result?: {error?: string}}>(`devices/${host.id}/upgrade`, {target_commit: target});
+      if (queued?.status === 'done' && queued?.result?.error) {
+        store.setNotice(String(queued.result.error));
+      } else {
+        store.setNotice(t('hosts.upgradeQueued'));
+      }
+      await store.refresh();
+    } catch (e: any) {
+      store.setNotice(friendlyError(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const cloudMismatchable = Boolean(cloud.commit && cloud.commit !== 'unknown');
+  const canUpgradeCloud = cloud.source === 'git';
 
   return (
     <section id="hosts-view" className="scroll-none flex-1 overflow-auto p-5">
@@ -23,6 +106,24 @@ export function HostsView({store}: {store: Store}) {
         <p className="text-sm text-muted">{t('hosts.connectWorkspaceDesc')}</p>
         <div id="models" className="model-line mt-2 text-sm text-muted">
           {(snap.models || []).map((m) => <p key={m.id}>{m.id} · {m.model || t('hosts.noModelSet')} · {m.configured ? t('hosts.endpointConfigured'): t('hosts.endpointUnconfigured')}</p>)}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+          <span className="font-medium">{t('hosts.cloudServer')}</span>
+          <span
+            className="text-xs text-muted"
+            title={cloud.commit && cloud.commit !== 'unknown' ? cloud.commit : undefined}
+          >
+            {versionLabel(t, cloud)}
+            {cloud.ref && cloud.ref !== 'unknown' ? ` · ${cloud.ref}` : ''}
+          </span>
+          {canUpgradeCloud ? (
+            <button
+              id="upgrade-cloud"
+              className="rounded-lg border border-line px-2 py-1 text-xs"
+              disabled={busy != null}
+              onClick={() => { void upgradeCloud(); }}
+            >{t('hosts.upgradeCloud')}</button>
+          ) : null}
         </div>
         <div className="setup-actions mt-2 flex gap-2">
           <button id="settings" className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={() => setShowSettings(true)}>{t('hosts.setGlobalModel')}</button>
@@ -48,14 +149,34 @@ export function HostsView({store}: {store: Store}) {
           const pendingAdapters = new Set((snap.setup.requests || [])
             .filter((r) => r.host_id === h.id && ['needs_approval', 'configuring'].includes(r.status))
             .map((r) => String((r.proposal || {}).adapter || '')));
+          const deviceBuild = h.transport === 'local'
+            ? cloud
+            : {version: device?.version, commit: device?.commit};
+          const mismatch = h.transport === 'connector'
+            && cloudMismatchable
+            && commitsDiffer(cloud.commit, device?.commit);
+          const canUpgradeDevice = h.transport === 'connector'
+            && !device?.revoked
+            && device?.online
+            && cloudMismatchable
+            && (commitsDiffer(cloud.commit, device?.commit)
+              || !device?.commit
+              || device?.commit === 'unknown');
           return (
             <section key={h.id} className="device-section rounded-xl border border-line bg-raised p-4">
               <div className="device-head flex items-start justify-between gap-3">
-                <div className="device-meta">
+                <div className="device-meta min-w-0">
                   <h3 className="device-name font-medium">{h.name || h.id}</h3>
                   <span className="device-os text-xs text-muted">{h.os || t('hosts.osUnregistered')}</span>
+                  <p
+                    className={`mt-1 text-xs ${mismatch ? 'text-warn' : 'text-muted'}`}
+                    title={deviceBuild.commit && deviceBuild.commit !== 'unknown' ? deviceBuild.commit : undefined}
+                  >
+                    {versionLabel(t, deviceBuild)}
+                    {mismatch ? ` · ${t('hosts.versionMismatch')}` : ''}
+                  </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   <span className={`device-status text-xs ${device?.online || h.transport === 'local' ? 'text-good': 'text-muted'}`}>{statusText}{device?.last_seen ? <span title={dateTime(device.last_seen)}> · {t('hosts.asOf', {time: clock(device.last_seen)})}</span>: null}</span>
                   {h.transport === 'connector' ? (
                     <label className="flex items-center gap-1 text-xs text-muted" title={t('hosts.executionLevelHint')}>
@@ -66,6 +187,13 @@ export function HostsView({store}: {store: Store}) {
                       }}>{['L0', 'L1', 'L2'].map((lv) => <option key={lv} value={lv}>{lv}</option>)}</select>
                     </label>
 ): null}
+                  {canUpgradeDevice ? (
+                    <button
+                      className="rounded-lg border border-line px-2 py-1 text-xs"
+                      disabled={busy != null}
+                      onClick={() => { void upgradeDevice(h); }}
+                    >{t('hosts.upgradeDevice')}</button>
+                  ) : null}
                   {h.transport === 'connector' && !device?.revoked ? (
                     <button className="rounded-lg border border-line px-2 py-1 text-xs" onClick={async () => {
                       if (!confirm(t('hosts.revokeConfirm'))) return;

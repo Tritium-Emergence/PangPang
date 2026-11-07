@@ -3443,7 +3443,41 @@ class Service:
                 pass
             time.sleep(1.0)
 
+    def cloud_upgrade_plan(self):
+        """Panel: fetch tracking tip for this cloud checkout."""
+        from .install_git import plan_upgrade
+        return plan_upgrade()
+
+    def cloud_upgrade(self, body):
+        """Panel: reset this cloud checkout to a confirmed tracking SHA, then restart."""
+        from .install_git import apply_upgrade, restart_argv, schedule_self_restart
+        live_data = str(self.data)
+        # Fail closed on restartability *before* mutating the checkout.
+        # Pass the live data dir so a relative argparse default cannot switch trees.
+        restart_argv("pangpang", data=live_data)
+        result = apply_upgrade((body or {}).get("target_commit"))
+        if result.get("status") == "updated":
+            schedule_self_restart("pangpang", delay=1.5, data=live_data)
+            result = dict(result, restarting=True)
+        return result
+
+    def device_upgrade(self, host_id, body):
+        """Panel: enqueue a bounded self-upgrade on one online connector.
+
+        No durable key: a finished failure must not block a later retry of the
+        same target SHA (panel click = new command).
+        """
+        from .install_git import require_target_commit
+        host = self.execution.hosts.get(host_id) or {}
+        if host.get("transport") != "connector":
+            raise Fault("upgrade_requires_connector", 400)
+        target = require_target_commit((body or {}).get("target_commit"))
+        if not self.broker.online(host_id):
+            raise Fault("connector_offline")
+        return self.broker.enqueue(host_id, "upgrade", {"target_commit": target})
+
     def set_host_execution_level(self, host_id, body):
+
         """Operator-only: declare the isolation level that governs a CONNECTOR
         device's supervision admission. Server-authored and operator-
         authenticated (http do_POST authenticate(mutation=True)) — a device

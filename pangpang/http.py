@@ -277,6 +277,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         phase = work_progress_phase(w, fact_tasks)
                         if phase:
                             w["progress_phase"] = phase
+                    from .install_git import install_identity
                     self.respond({"setup": service.onboarding.status(), "bots": service.store.find("bot"),
                                   "work": work,
                                   "tasks": tasks,
@@ -289,6 +290,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                                   "notifications": notifications,
                                   "exchanges": exchanges,
                                   "attention_summary": attention_summary,
+                                  "cloud_build": install_identity(),
                                   "devices": service.broker.devices(),
                                   "hosts": public_config(list(service.execution.hosts.values())),
                                   "installations": public_config(list(service.execution.installations.values())),
@@ -511,6 +513,10 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     self.respond(service.onboarding.set_coordinator_env(body)); return
                 if parts == ["setup", "coordinator-env", "clear"]:
                     self.respond(service.onboarding.clear_coordinator_env(body)); return
+                if parts == ["setup", "upgrade-plan"]:
+                    self.respond(service.cloud_upgrade_plan()); return
+                if parts == ["setup", "upgrade"]:
+                    self.respond(service.cloud_upgrade(body)); return
                 if parts == ["setup", "pairing"]:
                     self.respond(service.onboarding.pairing_code()); return
                 if len(parts) == 3 and parts[0] == "setup":
@@ -532,6 +538,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         return service.onboarding.operator_request(body)
                     if len(parts) == 3 and parts[0] == "devices" and parts[2] == "revoke":
                         return service.broker.revoke(parts[1])
+                    if len(parts) == 3 and parts[0] == "devices" and parts[2] == "upgrade":
+                        return service.device_upgrade(parts[1], body)
                     if len(parts) == 3 and parts[0] == "hosts" and parts[2] == "execution-level":
                         return service.set_host_execution_level(parts[1], body)
                     if parts == ["bots"]:

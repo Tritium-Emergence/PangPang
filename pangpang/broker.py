@@ -95,7 +95,7 @@ class Broker:
                 if error.status != 404:
                     raise
             durable = {"start", "cancel", "resolve_run", "configure", "credential_install",
-                       "credential_delete", "declare_adapter"}
+                       "credential_delete", "declare_adapter", "upgrade"}
             return self.store.put("command", {"id": identity, "host_id": host_id, "action": action,
                 "payload": payload, "status": "pending", "created": time.time(),
                 "expires": None if action in durable else time.time() + 120})
@@ -422,6 +422,17 @@ class Broker:
             except Fault:
                 device = {"id": host_id}
             facts = {"instance_id": instance_id, "version": str(body.get("version", ""))[:40]}
+            # Install identity (package version + commit). Truncate defensively;
+            # never invent a commit when the device omitted one.
+            commit = str(body.get("commit") or "").strip().lower()
+            if len(commit) == 40 and all(c in "0123456789abcdef" for c in commit):
+                facts["commit"] = commit
+            else:
+                facts["commit"] = "unknown"
+            ref = str(body.get("ref") or "").strip()
+            facts["ref"] = (ref[:80] if ref else "unknown")
+            source = str(body.get("source") or "").strip()
+            facts["source"] = source if source in {"build", "git", "unknown"} else "unknown"
             # capability handshake: record the contract version the device
             # PROVED it understands (0 if it did not report one — a legacy device).
             # broker.start consults this so we never send a v2 contract to a device that
