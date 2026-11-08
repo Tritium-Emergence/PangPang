@@ -173,9 +173,10 @@ class GitCreationFlags(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["git", "-C", str(root), "rev-parse", "HEAD"])
 
     def test_non_nt_omits_create_no_window(self):
+        root = Path("/repo")
         with mock.patch.object(install_git_mod.os, "name", "posix"), \
              mock.patch.object(install_git_mod.subprocess, "run") as run:
-            install_git_mod._git(Path("/repo"), ["rev-parse", "HEAD"])
+            install_git_mod._git(root, ["rev-parse", "HEAD"])
         self.assertNotIn("creationflags", run.call_args.kwargs)
 
 
