@@ -3462,10 +3462,14 @@ class Service:
         return result
 
     def device_upgrade(self, host_id, body):
-        """Panel: enqueue a bounded self-upgrade on one online connector.
+        """Panel: run a bounded self-upgrade on one online connector and wait for it.
 
-        No durable key: a finished failure must not block a later retry of the
-        same target SHA (panel click = new command).
+        The HTTP route is now on the transaction-free `external` path, so this call
+        may poll outside Store.once. Unlike a keyed HTTP replay, this route creates a
+        fresh command per click and does not retain a same-key replay result: an
+        identical retry while the first is still running creates a second command.
+        A wait timeout raises `connector_operation_pending` without cancelling the
+        already-durable command, so the device may still finish it later.
         """
         from .install_git import require_target_commit
         host = self.execution.hosts.get(host_id) or {}
@@ -3474,7 +3478,19 @@ class Service:
         target = require_target_commit((body or {}).get("target_commit"))
         if not self.broker.online(host_id):
             raise Fault("connector_offline")
-        return self.broker.enqueue(host_id, "upgrade", {"target_commit": target})
+        # Preflight only the two sources the device itself declared as not-a-git
+        # checkout. A missing device row or a missing `source` field is unknown,
+        # not a rejection: the connector still adjudicates (and its own
+        # install_git failure surfaces as the command's real result).
+        try:
+            device = self.store.get("device", host_id)
+        except Fault as error:
+            if error.status != 404:
+                raise
+            device = {}
+        if device.get("source") in ("build", "unknown"):
+            raise Fault("install_not_git_checkout", 400)
+        return self.broker.request(host_id, "upgrade", {"target_commit": target})
 
     def set_host_execution_level(self, host_id, body):
 

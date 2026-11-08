@@ -552,6 +552,32 @@ export function executorSetupTone(row: {capability?: string; state?: string; det
   return facts?.execution_verified === true && facts?.discovered === true ? 'ready' : 'discovered_not_verified';
 }
 
+/** True only when both commits are known and differ; "unknown" is not a difference. */
+export function commitsDiffer(cloud?: string | null, device?: string | null): boolean {
+  if (!cloud || cloud === 'unknown' || !device || device === 'unknown') return false;
+  return cloud !== device;
+}
+
+/**
+ * Whether the panel may offer an online upgrade for this device. A device
+ * upgrade resets a git checkout on the device, so a build/unknown source (or
+ * a device that never reported one) is not a candidate. This mirrors, but does
+ * not replace, the server preflight: the server keeps deciding the cases the
+ * UI cannot see (and a missing source still goes to the connector).
+ */
+export function canUpgradeDevice(
+  host: {transport?: string} | null | undefined,
+  device: {revoked?: boolean; online?: boolean; commit?: string; source?: string} | null | undefined,
+  cloudCommit?: string | null,
+): boolean {
+  return host?.transport === 'connector'
+    && !device?.revoked
+    && device?.online === true
+    && device?.source === 'git'
+    && Boolean(cloudCommit && cloudCommit !== 'unknown')
+    && (commitsDiffer(cloudCommit, device?.commit) || !device?.commit || device?.commit === 'unknown');
+}
+
 /**
  * Per-installation card. Ready only when a fenced receipt exists and the
  * executor is currently discovered. A probe row is that current check; without

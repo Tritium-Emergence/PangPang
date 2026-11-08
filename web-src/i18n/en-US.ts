@@ -78,6 +78,12 @@ export default {
 
     invalid_context_window: 'Invalid context window. Use an integer of at least 5120, and not above the catalog window for this model.',
     executor_cleanup_unsupported: 'This device’s supervision tier does not allow this run (reliable stopping is not confirmed). Fix steps are on the task card below.',
+    install_not_git_checkout: 'This installation is not confirmed to be a git checkout that supports online upgrade.',
+    upgrade_blocked_active_runs: 'The device still has a run in progress, so the upgrade was blocked. Wait for it to finish and retry.',
+    git_fetch_failed: 'The device failed to fetch git updates.',
+    target_commit_unavailable: 'The target commit does not exist on this device, so it cannot be upgraded.',
+    target_commit_not_on_tracking_ref: 'The target commit is not on the device’s upgrade tracking ref; the upgrade was rejected.',
+    git_reset_failed: 'The device failed to reset to the target commit.',
 
   },
 
@@ -328,10 +334,12 @@ export default {
     upgradePlanFailed: 'Could not check for updates',
     upgradeConfirmCloud: 'Upgrade this cloud server to the following commit?\n{{sha}}',
     upgradeConfirmDevice: 'Upgrade "{{name}}" to the same commit as the cloud?\n{{sha}}',
-    upgradeQueued: 'Upgrade queued; the device will fetch and restart itself',
     upgradeRestarting: 'Updated; restarting…',
     upgradeCurrent: 'Already on the target version',
+    upgradeUnconfirmed: 'The upgrade result is not confirmed yet; refresh the device status',
+    upgradePending: 'The upgrade result is not confirmed yet. The operation may still be running; refresh the device status later.',
     upgradeUnavailable: 'This install is not an upgradable git checkout',
+    upgradeSourceUnknown: 'This installation is not confirmed to support online upgrade',
     upgradeNeedCommit: 'Cloud has not reported a valid commit yet',
     executionLevelHint: 'Affects this device only. L0 (personal use): allows the device-proven cooperative supervision tiers (on macOS or cgroup-less Linux the device must also record process-group consent). L1/L2: strong supervision (Windows Job Object) only.',
     hostLimitsTitle: 'Task limits',

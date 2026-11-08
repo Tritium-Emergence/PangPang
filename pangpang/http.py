@@ -638,8 +638,12 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         claim.update(status="released", operator_evidence=evidence, resolved_at=time.time(), operator_action_id=audit["id"])
                         return service.store.put("claim", claim)
                     raise Fault("not_found", 404)
+                # `upgrade` waits on the device's own command result, which a
+                # concurrent connector sync must be able to commit. It therefore
+                # runs outside Store.once: no transaction and no DB lock is held
+                # while broker.request polls.
                 external = len(parts) == 3 and (parts[2] in {"probe", "files", "uploads", "browse", "copy", "cancel",
-                                                             "reconcile", "resolve"})
+                                                             "reconcile", "resolve", "upgrade"})
                 if len(parts) == 3 and parts[0] == "installations" and parts[2] == "config":
                     committed = service.store.once_lookup("http:" + path, key, body)
                     if committed is not None:
