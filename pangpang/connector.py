@@ -53,16 +53,18 @@ def cloud_connection_fault(exc):
 
 
 def policy_digest(config, installation_id):
+    from .host_limits import host_without_scheduling
     installation = next(e for e in config["installations"] if e["id"] == installation_id)
-    host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
+    host = host_without_scheduling(next(h for h in config["hosts"] if h["id"] == installation["host_id"]))
     resources = [r for r in config.get("resources", []) if r["key"] in installation.get("resource_keys", [])]
     return digest({"installation": installation, "host": host, "resources": resources})
 
 
 def _authorization_material(config, installation_id, include_name):
+    from .host_limits import host_without_scheduling
     installation = next(e for e in config["installations"] if e["id"] == installation_id)
     installation = {k: v for k, v in installation.items() if k not in ("priority", "use_when")}
-    host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
+    host = host_without_scheduling(next(h for h in config["hosts"] if h["id"] == installation["host_id"]))
     if not include_name:
         host = {k: v for k, v in host.items() if k != "name"}
     resources = [r for r in config.get("resources", []) if r["key"] in installation.get("resource_keys", [])]
@@ -78,7 +80,9 @@ def authorization_digest(config, installation_id):
     outside the installation, so it is not hashed either.
 
     hosts[].name is the operator-facing label. A rename must not change this
-    digest. Every other host field stays in the hash, including id, os,
+    digest. Scheduling knobs (max_concurrency, timeout_s, parallel) are stripped
+    too — changing a computer's task concurrency or time limit must not force
+    re-approval. Every other host field stays in the hash, including id, os,
     transport, allowed_roots, credential_hash, execution_level, and consent.
     """
     return _authorization_material(config, installation_id, include_name=False)
@@ -290,7 +294,15 @@ class Connector:
         # may already be running (unknown != idle).
         active = [r["task"] for r in self._active_runs()
                   if r.get("task", {}).get("execution_id") != task["execution_id"]]
-        if sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= int(inst.get("max_concurrency", 1)):
+        host_cap = task.get("host_max_concurrency")
+        if host_cap is not None:
+            try:
+                cap = int(host_cap)
+            except (TypeError, ValueError):
+                cap = int(inst.get("max_concurrency", 1))
+            if sum(1 for _ in active) >= cap:
+                raise Fault("local_installation_at_capacity")
+        elif sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= int(inst.get("max_concurrency", 1)):
             raise Fault("local_installation_at_capacity")
         for other in active:
             if workspace_overlaps(my_ws, ws(other)):

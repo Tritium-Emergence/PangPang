@@ -3507,6 +3507,35 @@ class Service:
         self.commit_managed_config(candidate, base_revision=revision)
         return {"host_id": host_id, "execution_level": level}
 
+    def set_host_limits(self, host_id, body):
+        """Operator-only: set per-computer task concurrency and/or timeout.
+
+        Stored on the cloud host record (survives device reports). Scheduling
+        knobs are excluded from authorization/policy digests so edits do not
+        force re-approval. Applies to new admissions / new submit snapshots.
+        """
+        from .host_limits import apply_host_limits
+        candidate, revision = self.managed_snapshot()
+        hosts = candidate.get("hosts", [])
+        target = next((h for h in hosts if h.get("id") == host_id), None)
+        if target is None:
+            raise Fault("host_not_found", 404)
+        try:
+            updated = apply_host_limits(target, body or {})
+        except ValueError as err:
+            code = str(err) or "invalid_host_limits"
+            raise Fault(code, 400) from None
+        # replace in-place within the candidate list
+        for i, h in enumerate(hosts):
+            if h.get("id") == host_id:
+                hosts[i] = updated
+                break
+        candidate["hosts"] = hosts
+        self.commit_managed_config(candidate, base_revision=revision)
+        from .host_limits import limits_view
+        return {"host_id": host_id, "limits": limits_view(updated)}
+
+
     def _rewrite_denormalized_host_labels(self, host_id, label):
         """Write the canonical display name onto rows that snapshot it.
 
@@ -4523,6 +4552,7 @@ class Service:
         return result
 
     def submit_task(self, bot_id, work_id, body, *, root_request_id=None, route_quality=None, authorization=None):
+        from .host_limits import task_timeout_s
         work, authority = self._work_for_route(
             self.store.get("work", work_id), root_request_id, authorization)
         if work["owner_bot_id"] != bot_id:
@@ -4686,11 +4716,9 @@ class Service:
                 "user_prompt": user_prompt, "prompt": execution_prompt, "route": route, "created": time.time(),
                 "cwd": cwd, "workspace_key": [ws_host, list(ws_segs)],
                 "authorization": authority, "root_request_id": root_request_id,
-                # Snapshot timeout_s at submit so a later installation.timeout_s edit
-                # cannot make execution.spec launch a task with a timeout different
-                # from the one baked into its spec_digest (the receipt would then
-                # prove the wrong timeout). Frozen with the rest of the spec.
-                "timeout_s": int(e.get("timeout_s", 3600)),
+                # Snapshot timeout_s at submit (host default / per-task override /
+                # installation / 3600). Frozen with the rest of the spec.
+                "timeout_s": task_timeout_s(body, self.execution.hosts.get(e["host_id"], {}), e),
                 "access_mode": "verified_read" if verified_read else "write",
                 "resource_keys": e.get("resource_keys", []),
                 "authorization_digest": self._captured_authorization_digest(e),
@@ -6492,7 +6520,7 @@ class Service:
         """Atomic executor admission. Called INSIDE the
         claim transaction. Rejects if: the task is already past its own
         queue_deadline (the sweep may not have run yet — never launch an expired
-        task), the installation is at max_concurrency, or an active task
+        task), the host/installation concurrency cap is full, or an active task
         (starting/running/cancel_requested/unknown — unknown quarantines)
         holds an overlapping workspace with a conflicting access mode (write/write,
         write/read conflict; verified_read/verified_read concurrent), or a shared
@@ -6512,9 +6540,15 @@ class Service:
         # cannot see the later disable).
         if inst.get("enabled") is False:
             return False
-        cap = int(inst.get("max_concurrency", 1))
-        if sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= cap:
-            return False
+        from .host_limits import host_concurrency_limit
+        host = self.execution.hosts.get(task.get("host_id"), {})
+        cap, scope = host_concurrency_limit(host, inst)
+        if scope == "host":
+            if sum(1 for t in active if t.get("host_id") == task.get("host_id")) >= cap:
+                return False
+        else:
+            if sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= cap:
+                return False
         my_ws = self._task_workspace(task)
         my_write = task.get("access_mode", "write") != "verified_read"
         for other in active:

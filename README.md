@@ -229,6 +229,11 @@ With no stored `scheduler` object the process runs four simultaneous model conve
 
 Set it in the Web UI. Open **Set global chat model** (or **Set up model**), then **Simultaneous model conversations**, an integer from 1 to 16, and save. The save stores `scheduler.model_max_concurrency` on the managed row. A value of 1 also stores `reserved_user_slots` as 0 so the next start accepts the config. A value above 1 keeps the stored `reserved_user_slots` when that integer is already in range, and otherwise stores 1. No other scheduler key is written. Restart the coordinator before the new limit runs. No environment variable sets this limit.
 
+### Task limits per computer
+
+Each computer (host) can set **task concurrency** (`max_concurrency`, 1–16) and a **default task timeout** (`timeout_s`, 30–86400 seconds) from **My computers**. Blank keeps the previous rule: executor `max_concurrency` defaults to the catalog value `1`, and a missing task timeout falls through to **3600** seconds. An unused `parallel` field in older host examples is treated as the same concurrency knob until you save. Changing these limits does not invalidate executor grants. Optional `submit_task.timeout_s` overrides the computer default for one dispatch.
+
+
 After the managed row exists, `main_bot_max_active_turns`, `main_bot_reserved_user_slots`, and `service_bot_max_active_turns` have no supported change path.
 
 Executor capacity and workspace claims are a separate resource domain and must not be coupled back into planner resource locks.

@@ -1,0 +1,227 @@
+"""Host scheduling limits: concurrency + task timeout.
+
+Documents where the old pins lived:
+- concurrency 1: adapter catalog concurrency, installation.max_concurrency
+  defaults, Service._task_admissible / Connector._reject_workspace_conflict
+  counting by installation; unused hosts.example.json ``parallel``.
+- timeout 3600: submit_task / launch_contract / runner missing-field fallthrough.
+"""
+import copy
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from pangpang import consent
+from pangpang.connector import Connector, authorization_digest, policy_digest
+from pangpang.host_limits import (
+    apply_host_limits,
+    explicit_host_concurrency,
+    host_concurrency_limit,
+    limits_view,
+    parse_concurrency,
+    parse_timeout,
+    task_timeout_s,
+)
+from pangpang.http import project_host
+from pangpang.service import Service
+from pangpang.store import Fault
+
+from test_bot_runtime import config
+
+
+class HostLimitsUnitTests(unittest.TestCase):
+    def test_parse_bounds_and_bool_reject(self):
+        self.assertEqual(parse_concurrency(3), 3)
+        self.assertEqual(parse_timeout(7200), 7200)
+        with self.assertRaises(ValueError):
+            parse_concurrency(True)
+        with self.assertRaises(ValueError):
+            parse_timeout(True)
+        with self.assertRaises(ValueError):
+            parse_concurrency(0)
+        with self.assertRaises(ValueError):
+            parse_timeout(10)
+
+    def test_legacy_parallel_and_apply(self):
+        self.assertEqual(explicit_host_concurrency({"parallel": 4}), 4)
+        host = {"id": "h", "parallel": 1}
+        out = apply_host_limits(host, {"max_concurrency": 3, "timeout_s": 7200})
+        self.assertEqual(out["max_concurrency"], 3)
+        self.assertEqual(out["timeout_s"], 7200)
+        self.assertNotIn("parallel", out)
+        cleared = apply_host_limits(out, {"max_concurrency": None, "timeout_s": None})
+        self.assertNotIn("max_concurrency", cleared)
+        self.assertNotIn("timeout_s", cleared)
+        with self.assertRaises(ValueError):
+            apply_host_limits(host, {})
+        with self.assertRaises(ValueError):
+            apply_host_limits(host, {"nope": 1})
+
+    def test_task_timeout_order(self):
+        self.assertEqual(task_timeout_s({}, {}, {}), 3600)
+        self.assertEqual(task_timeout_s({}, {}, {"timeout_s": 120}), 120)
+        self.assertEqual(task_timeout_s({}, {"timeout_s": 7200}, {"timeout_s": 120}), 7200)
+        self.assertEqual(task_timeout_s({"timeout_s": 900}, {"timeout_s": 7200}, {"timeout_s": 120}), 900)
+
+    def test_limits_view_and_project_host(self):
+        view = limits_view({"max_concurrency": 2})
+        self.assertEqual(view["max_concurrency"], 2)
+        self.assertEqual(view["scope"], "host")
+        row = project_host({"id": "local", "transport": "local", "timeout_s": 4000})
+        self.assertEqual(row["limits"]["timeout_s"], 4000)
+        self.assertEqual(row["id"], "local")
+
+
+class HostLimitsServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "workspace"
+        self.root.mkdir()
+        self.cfg = config(self.root)
+        self.app = Service(self.cfg, self.root.parent / "data")
+        self.app.probe("codex-local")
+
+    def tearDown(self):
+        self.app.store.close()
+        self.tmp.cleanup()
+
+    def test_set_host_limits_and_digest_stable(self):
+        before_auth = authorization_digest(self.app.config, "codex-local")
+        before_pol = policy_digest(self.app.config, "codex-local")
+        out = self.app.set_host_limits("local", {"max_concurrency": 3, "timeout_s": 7200})
+        self.assertEqual(out["limits"]["max_concurrency"], 3)
+        self.assertEqual(out["limits"]["timeout_s"], 7200)
+        after_auth = authorization_digest(self.app.config, "codex-local")
+        after_pol = policy_digest(self.app.config, "codex-local")
+        self.assertEqual(before_auth, after_auth)
+        self.assertEqual(before_pol, after_pol)
+        # consent still changes digests
+        host = next(h for h in self.app.config["hosts"] if h["id"] == "local")
+        host = dict(host)
+        host[consent.CONSENT_KEY] = "other-version"
+        cfg2 = copy.deepcopy(self.app.config)
+        cfg2["hosts"] = [host if h["id"] == "local" else h for h in cfg2["hosts"]]
+        self.assertNotEqual(authorization_digest(cfg2, "codex-local"), after_auth)
+
+    def test_admissible_host_cap(self):
+        self.app.set_host_limits("local", {"max_concurrency": 2})
+        # two active tasks on host fill the cap
+        for i, status in enumerate(("running", "running")):
+            self.app.store.put("task", {
+                "id": f"t-active-{i}", "status": status, "host_id": "local",
+                "installation_id": "codex-local", "cwd": str(self.root / f"a{i}"),
+                "access_mode": "verified_read", "workspace_key": ["local", [f"a{i}"]],
+            })
+        candidate = {
+            "id": "t-new", "status": "queued", "host_id": "local",
+            "installation_id": "codex-local", "cwd": str(self.root / "b"),
+            "access_mode": "verified_read", "workspace_key": ["local", ["b"]],
+        }
+        self.assertFalse(self.app._task_admissible(candidate))
+        self.app.set_host_limits("local", {"max_concurrency": 3})
+        self.assertTrue(self.app._task_admissible(candidate))
+        # clearing host cap falls back to installation default 1
+        self.app.set_host_limits("local", {"max_concurrency": None})
+        # with 2 actives and install cap 1, still not admissible for a third on same install
+        self.assertFalse(self.app._task_admissible(candidate))
+
+    def test_submit_timeout_uses_host_and_override(self):
+        self.app.set_host_limits("local", {"timeout_s": 7200})
+        msg = self.app.send("bot-main", {"text": "task", "allow_write": True}, "hl-timeout")
+        res = self.app.submit_task(
+            "bot-main", msg["work_id"],
+            {"prompt": "hi", "installation_id": "codex-local", "outputs": ["result.txt"]},
+        )
+        task = self.app.store.get("task", res["task_id"])
+        if task["status"] == "awaiting_approval":
+            task = self.app.approve(task["id"], {"spec_digest": task["spec_digest"], "always": True})
+        self.assertEqual(task["timeout_s"], 7200)
+        msg2 = self.app.send("bot-main", {"text": "task2", "allow_write": True}, "hl-timeout-2")
+        res2 = self.app.submit_task(
+            "bot-main", msg2["work_id"],
+            {"prompt": "hi2", "installation_id": "codex-local", "outputs": ["result.txt"], "timeout_s": 900},
+        )
+        task2 = self.app.store.get("task", res2["task_id"])
+        if task2["status"] == "awaiting_approval":
+            task2 = self.app.approve(task2["id"], {"spec_digest": task2["spec_digest"], "always": True})
+        self.assertEqual(task2["timeout_s"], 900)
+
+
+class DeviceHostCapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "ws").mkdir()
+        data = self.root / "data"
+        data.mkdir()
+        cfg = {
+            "hosts": [{"id": "local", "transport": "local", "os": "Linux",
+                       "allowed_roots": [str(self.root / "ws")]}],
+            "installations": [{"id": "codex-a", "host_id": "local", "adapter": "codex",
+                               "argv": [sys.executable, "-c", "print(1)"],
+                               "probe_argv": [sys.executable, "--version"],
+                               "cwd": str(self.root / "ws"), "max_concurrency": 1}],
+        }
+        # Minimal Connector: reuse Service connector path when possible
+        self.app = Service({
+            **cfg,
+            "default_model": "test",
+            "models": [{"id": "test", "model": "test", "endpoint": "http://127.0.0.1:1/v1", "context_budget": 40000}],
+            "hosts": [{**cfg["hosts"][0], consent.CONSENT_KEY: consent.RISK_VERSION}],
+            "installations": cfg["installations"],
+        }, data)
+        # Build a Connector bound to local host data dir pattern used in tests
+        from pangpang.execution import Execution
+        # Use connector module's class with service-like bits via constructing from CLI patterns
+        # Simpler: call _reject_workspace_conflict on a lightweight object
+        self.conn = object.__new__(Connector)
+        self.conn.host_id = "local"
+        self.conn.store = self.app.store
+        self.conn.execution = self.app.execution
+        self.conn._active_runs = lambda: [
+            r for r in self.app.store.find("local_run")
+            if r.get("status") in {"launching", "active"}
+        ]
+
+    def tearDown(self):
+        self.app.store.close()
+        self.tmp.cleanup()
+
+    def _put_active(self, eid, cwd_name):
+        cwd = self.root / "ws" / cwd_name
+        cwd.mkdir(exist_ok=True)
+        task = {
+            "execution_id": eid, "installation_id": "codex-a", "host_id": "local",
+            "cwd": str(cwd), "access_mode": "verified_read",
+            "host_max_concurrency": 3,
+        }
+        self.app.store.put("local_run", {"id": eid, "status": "active", "task": task})
+        return task
+
+    def test_host_max_concurrency_overrides_install(self):
+        self._put_active("exec-1", "d1")
+        self._put_active("exec-2", "d2")
+        candidate = {
+            "execution_id": "exec-3", "installation_id": "codex-a", "host_id": "local",
+            "cwd": str(self.root / "ws" / "d3"), "access_mode": "verified_read",
+            "host_max_concurrency": 3,
+        }
+        (self.root / "ws" / "d3").mkdir(exist_ok=True)
+        # should not raise — host cap 3, 2 active
+        self.conn._reject_workspace_conflict(candidate)
+        # fourth exceeds
+        self._put_active("exec-3b", "d3b")
+        (self.root / "ws" / "d4").mkdir(exist_ok=True)
+        with self.assertRaises(Fault) as ctx:
+            self.conn._reject_workspace_conflict({
+                **candidate, "execution_id": "exec-4",
+                "cwd": str(self.root / "ws" / "d4"),
+            })
+        self.assertEqual(ctx.exception.code, "local_installation_at_capacity")
+
+
+if __name__ == "__main__":
+    unittest.main()

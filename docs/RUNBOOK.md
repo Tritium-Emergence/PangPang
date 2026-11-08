@@ -19,6 +19,9 @@ managed 行存在之后，`main_bot_max_active_turns`、`main_bot_reserved_user_
 
 Executor 的 `max_concurrency`、workspace RW claim 和本地资源锁是另一套容量域，不能重新耦合到模型调度。
 
+主机级任务限额（`hosts[].max_concurrency` / `hosts[].timeout_s`）在 **我的电脑** 页保存，由云端调度与连接器 start 共同遵守；未设置时仍按执行器 `max_concurrency`（目录默认 1）与缺省超时 3600 秒。旧 `parallel` 字段在未写入 `max_concurrency` 前视为同一并行上限。改限额不改授权摘要。
+
+
 ## 2. Coordinator 首次启动
 
 生效配置见第 1 节：`settings/managed` 写入之后以数据库为准，启动文件只作种子。

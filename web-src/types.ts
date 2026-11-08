@@ -172,7 +172,24 @@ export interface Exchange {
   id: string; status?: string; source_bot_id?: string; target_bot_id?: string;
   source_work_id?: string; target_work_id?: string; work_id?: string; summary?: string; request?: string;
 }
-export interface Host {id: string; name?: string; os?: string; transport?: string; execution_level?: string}
+export interface HostLimits {
+  max_concurrency?: number | null;
+  timeout_s?: number | null;
+  scope?: 'host' | 'installation' | string;
+  concurrency_bounds?: {min: number; max: number; default: number};
+  timeout_bounds?: {min: number; max: number; default: number};
+}
+export interface Host {
+  id: string;
+  name?: string;
+  os?: string;
+  transport?: string;
+  execution_level?: string;
+  max_concurrency?: number | null;
+  timeout_s?: number | null;
+  parallel?: number | null;
+  limits?: HostLimits;
+}
 export interface InstallBuild {
   version?: string;
   commit?: string;
