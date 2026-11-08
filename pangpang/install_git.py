@@ -170,6 +170,29 @@ def plan_upgrade(root=None):
     }
 
 
+def require_tracking_ancestor(target_commit, root=None):
+    """Cloud preflight: reject a target the device's tracking ref can never yield.
+
+    A device may only reset to an ancestor of the tracking tip it just fetched
+    (see ``apply_upgrade``). The cloud already knows its own tracking tip, so
+    checking it here names the real cause before a command is queued: most
+    often the cloud's own HEAD is a branch/PR tip that is not on origin/main.
+    Otherwise the device would fetch only origin/main, fail cat-file or
+    ancestry, and report a device-side fault for a cloud-side mistake.
+
+    Returns the resolved tracking tip.
+    """
+    root = Path(root) if root is not None else install_root()
+    if root is None:
+        raise Fault("install_not_git_checkout", 400)
+    target = require_target_commit(target_commit)
+    tip = plan_upgrade(root=root)["tip_commit"]
+    ancestor = _git(root, ["merge-base", "--is-ancestor", target, tip], timeout=5)
+    if ancestor.returncode != 0:
+        raise Fault("cloud_upgrade_target_not_on_tracking", 400)
+    return tip
+
+
 def apply_upgrade(target_commit, root=None):
     """Reset this checkout to ``target_commit`` when it sits on the tracking tip history."""
     root = Path(root) if root is not None else install_root()

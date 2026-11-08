@@ -3470,8 +3470,13 @@ class Service:
         identical retry while the first is still running creates a second command.
         A wait timeout raises `connector_operation_pending` without cancelling the
         already-durable command, so the device may still finish it later.
+
+        Before a command exists, the cloud resolves its own tracking tip and
+        requires the target to be an ancestor of it — the same rule the device
+        applies after fetching. A cloud HEAD that is off its tracking ref can
+        therefore never be queued as a target the device cannot obtain.
         """
-        from .install_git import require_target_commit
+        from .install_git import require_target_commit, require_tracking_ancestor
         host = self.execution.hosts.get(host_id) or {}
         if host.get("transport") != "connector":
             raise Fault("upgrade_requires_connector", 400)
@@ -3490,6 +3495,11 @@ class Service:
             device = {}
         if device.get("source") in ("build", "unknown"):
             raise Fault("install_not_git_checkout", 400)
+        # The device fetches only its tracking ref and accepts an ancestor of
+        # that tip. Refuse here, before a durable command exists, so a cloud
+        # HEAD that is off its tracking history is reported as the cloud-side
+        # mistake it is rather than as a missing object on the device.
+        require_tracking_ancestor(target)
         return self.broker.request(host_id, "upgrade", {"target_commit": target})
 
     def set_host_execution_level(self, host_id, body):

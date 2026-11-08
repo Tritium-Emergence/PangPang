@@ -8,7 +8,8 @@ from unittest import mock
 
 from pangpang import __version__
 from pangpang.install_git import (
-    apply_upgrade, install_identity, plan_upgrade, require_target_commit, restart_argv, tracking_ref,
+    apply_upgrade, install_identity, plan_upgrade, require_target_commit,
+    require_tracking_ancestor, restart_argv, tracking_ref,
 )
 from pangpang.store import Fault
 from pangpang import install_git as install_git_mod
@@ -238,6 +239,84 @@ class TipNamespace(unittest.TestCase):
         with self.assertRaises(Fault) as raised:
             apply_upgrade(alien, root=root)
         self.assertEqual(raised.exception.code, "target_commit_not_on_tracking_ref")
+
+
+class RequireTrackingAncestor(unittest.TestCase):
+    """Cloud preflight for Repair #88: never queue a target devices cannot fetch."""
+
+    def _two_commit_remote(self):
+        root, first = _repo()
+        _git(root, "branch", "-M", "main")
+        remote = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", "--bare", str(root), str(remote)], check=True, capture_output=True)
+        _git(root, "remote", "add", "origin", str(remote))
+        _git(root, "config", "user.email", "t@example.com")
+        _git(root, "config", "user.name", "t")
+        (root / "README").write_text("b\n", encoding="utf-8")
+        _git(root, "add", "README")
+        _git(root, "commit", "-m", "two")
+        tip = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        _git(root, "push", "origin", "main")
+        return root, first, tip
+
+    def test_accepts_tip(self):
+        root, _first, tip = self._two_commit_remote()
+        self.assertEqual(require_tracking_ancestor(tip, root=root), tip)
+
+    def test_accepts_older_on_tracking_head_as_target(self):
+        # Cloud HEAD != tip, but HEAD (the target) is an ancestor of tip:
+        # devices can fetch it, so the upgrade stays allowed.
+        root, first, tip = self._two_commit_remote()
+        _git(root, "reset", "--hard", first)
+        self.assertEqual(require_tracking_ancestor(first, root=root), tip)
+
+    def test_accepts_on_tracking_target_when_head_is_off_tracking(self):
+        # The accident: cloud HEAD is a PR tip, but the requested target is on
+        # the tracking history. The target is what devices can obtain, so this
+        # stays allowed; only an off-tracking target is refused.
+        root, first, tip = self._two_commit_remote()
+        _git(root, "checkout", "-b", "pr")
+        (root / "README").write_text("pr\n", encoding="utf-8")
+        _git(root, "add", "README")
+        _git(root, "commit", "-m", "pr")
+        self.assertEqual(require_tracking_ancestor(first, root=root), tip)
+
+    def test_rejects_local_commit_off_tracking_tip(self):
+        # Repair #88 accident shape: the target exists in the cloud checkout
+        # (HEAD of a PR branch) but is not an ancestor of origin/main, so a
+        # device fetching only that ref can never obtain it.
+        root, _first, _tip = self._two_commit_remote()
+        _git(root, "checkout", "-b", "pr")
+        (root / "README").write_text("pr-only\n", encoding="utf-8")
+        _git(root, "add", "README")
+        _git(root, "commit", "-m", "pr-only")
+        side = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaises(Fault) as raised:
+            require_tracking_ancestor(side, root=root)
+        self.assertEqual(raised.exception.code, "cloud_upgrade_target_not_on_tracking")
+
+    def test_rejects_unknown_commit(self):
+        root, _first, _tip = self._two_commit_remote()
+        other = Path(tempfile.mkdtemp())
+        _git(other, "init")
+        _git(other, "config", "user.email", "t@example.com")
+        _git(other, "config", "user.name", "t")
+        (other / "x").write_text("x\n", encoding="utf-8")
+        _git(other, "add", "x")
+        _git(other, "commit", "-m", "other")
+        alien = subprocess.check_output(
+            ["git", "-C", str(other), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaises(Fault) as raised:
+            require_tracking_ancestor(alien, root=root)
+        self.assertEqual(raised.exception.code, "cloud_upgrade_target_not_on_tracking")
+
+    def test_rejects_non_git_root(self):
+        with mock.patch("pangpang.install_git.install_root", return_value=None):
+            with self.assertRaises(Fault) as raised:
+                require_tracking_ancestor("a" * 40)
+        self.assertEqual(raised.exception.code, "install_not_git_checkout")
 
 
 class FetchHeadTip(unittest.TestCase):

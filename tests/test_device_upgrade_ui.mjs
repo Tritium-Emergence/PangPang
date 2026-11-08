@@ -44,7 +44,8 @@ test('upgrade copy is present in both locales and never promises a queued result
     for (const key of ['upgradeUnavailable', 'upgradeSourceUnknown', 'upgradeUnconfirmed', 'upgradePending'])
       assert.equal(typeof dict.hosts[key], 'string', `hosts.${key} missing`);
     for (const code of ['install_not_git_checkout', 'upgrade_blocked_active_runs', 'git_fetch_failed',
-      'target_commit_unavailable', 'target_commit_not_on_tracking_ref', 'git_reset_failed'])
+      'target_commit_unavailable', 'target_commit_not_on_tracking_ref', 'git_reset_failed',
+      'cloud_upgrade_target_not_on_tracking'])
       assert.equal(typeof dict.errors[code], 'string', `errors.${code} missing`);
     assert.equal('upgradeQueued' in dict.hosts, false, 'queued-is-terminal copy must be gone');
   }
