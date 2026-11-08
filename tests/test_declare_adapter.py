@@ -941,7 +941,8 @@ class LocalDeclareAdapterTests(unittest.TestCase):
             ADAPTER_CATALOG.pop(name, None)
             adapters_file._merged_names.discard(name)
         adapters_file.merge(target)
-        self.assertEqual(ADAPTER_CATALOG["dsk-claude"], self.row)
+        self.assertEqual(ADAPTER_CATALOG["dsk-claude"], dict(self.row, stdin_protocol="claude-stream-json"))
+        self.assertNotIn("stdin_protocol", disk["dsk-claude"])
         self.assertEqual(ADAPTER_CATALOG["my-echo"], second_row)
         self.assertEqual(ADAPTER_CATALOG["codex"]["argv"], self.codex_argv)
 

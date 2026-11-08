@@ -357,6 +357,7 @@ export interface ChatProgressTask {
   activity?: {
     last_log_at?: number | null;
     recent?: {tool?: string; path?: string}[];
+    present_outputs?: {path?: string; present?: boolean}[];
   } | null;
 }
 
@@ -394,11 +395,27 @@ export function truncateChatProgressPath(path: string, max = CHAT_PROGRESS_PATH_
   return '…' + text.slice(-(max - 1));
 }
 
+// Delivered required outputs already on the snapshot. Absent files are not
+// progress. Paths use the same truncation as a tool step. No new poll.
+function deliveredOutputLabel(activity: {present_outputs?: {path?: string; present?: boolean}[]}, tr: Tr): string | null {
+  const outputs = Array.isArray(activity.present_outputs) ? activity.present_outputs : [];
+  const files: string[] = [];
+  for (const item of outputs) {
+    if (!item || item.present !== true || typeof item.path !== 'string') continue;
+    const path = truncateChatProgressPath(item.path);
+    if (path) files.push(path);
+  }
+  if (!files.length) return null;
+  return tr('workpane.activityPresent', {files: files.join(', ')});
+}
+
 // Narrow chat line: last log time, latest closed-set step, and ·+N when the
 // scope has more than one active task. A running task whose recent array is
-// empty adds a static waiting phrase and no tool name. Missing activity, or
-// activity with no recent array and no clock, returns null so the caller
-// keeps the coarse progress sentence. This is not the WorkPane summary.
+// empty adds a static waiting phrase and no tool name, unless required
+// outputs are already present: those names replace the waiting phrase.
+// Missing activity, or activity with no recent array and no clock, returns
+// null so the caller keeps the coarse progress sentence. This is not the
+// WorkPane summary.
 export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): string | null {
   const picked = pickChatProgressTask(tasks);
   if (!picked?.task.activity) return null;
@@ -424,7 +441,8 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
   // has no complete tool row yet (startup banner only). A missing recent is a
   // different activity shape and stays on the clock or the coarse sentence.
   if (phase !== 'active' && Array.isArray(activity.recent) && activity.recent.length === 0 && picked.task.status === 'running') {
-    parts.push(tr('chat.progressAwaitingTool'));
+    const delivered = deliveredOutputLabel(activity, tr);
+    parts.push(delivered || tr('chat.progressAwaitingTool'));
   }
   if (!parts.length) return null;
   const body = parts.join(' · ');

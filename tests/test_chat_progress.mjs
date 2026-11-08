@@ -116,6 +116,64 @@ test('running with an empty recent list names the startup gap', () => {
   assert.equal(extra.includes('read'), false);
 });
 
+test('empty recent with delivered outputs names those files instead of the waiting phrase', () => {
+  const logAt = 1_700_000_010;
+  const text = chatActivityLine([task('run', {
+    activity: {
+      status: 'running',
+      last_log_at: logAt,
+      recent: [],
+      present_outputs: [
+        {path: 'missing.txt', present: false},
+        {path: 'out.txt', present: true},
+      ],
+    },
+  })], zh);
+  assert.equal(text, `最后日志 ${hms(logAt)} · ${zh('workpane.activityPresent', {files: 'out.txt'})}`);
+  assert.equal(text.includes('等待首条工具'), false);
+  assert.equal(text.includes('启动中'), false);
+  assert.equal(text.includes('missing.txt'), false);
+  assert.equal(text.includes('{'), false);
+  assert.equal(text.includes('['), false);
+  const alone = chatActivityLine([task('run', {
+    activity: {last_log_at: null, recent: [], present_outputs: [{path: 'notes.md', present: true}]},
+  })], zh);
+  assert.equal(alone, zh('workpane.activityPresent', {files: 'notes.md'}));
+  assert.equal(alone.includes('等待首条工具'), false);
+  const enText = chatActivityLine([task('run', {
+    activity: {
+      last_log_at: logAt,
+      recent: [],
+      present_outputs: [{path: 'out.txt', present: true}, {path: 'b.txt', present: true}],
+    },
+  })], en);
+  assert.equal(enText, `last log ${hms(logAt)} · ${en('workpane.activityPresent', {files: 'out.txt, b.txt'})}`);
+  assert.equal(enText.includes('waiting for the first tool'), false);
+  assert.equal(enText.includes('starting /'), false);
+  assert.equal(enText.includes('{'), false);
+  const absent = chatActivityLine([task('run', {
+    activity: {last_log_at: null, recent: [], present_outputs: [{path: 'a.txt', present: false}]},
+  })], zh);
+  assert.equal(absent, '启动中 / 等待首条工具');
+  const long = 'dir/'.repeat(20) + 'file.py';
+  const cut = truncateChatProgressPath(long);
+  const truncated = chatActivityLine([task('run', {
+    activity: {recent: [], present_outputs: [{path: long, present: true}, {path: 'a\nb.py', present: true}]},
+  })], zh);
+  assert.equal(truncated, zh('workpane.activityPresent', {files: cut}));
+  assert.equal(truncated.includes('等待首条工具'), false);
+  assert.equal(chatActivityLine([task('run', {
+    activity: {recent: [], present_outputs: [{path: 'a\nb.py', present: true}]},
+  })], zh), '启动中 / 等待首条工具');
+  const extra = chatActivityLine([
+    task('older', {started: 1_600_000_000, activity: {recent: [{tool: 'read', path: 'old.py'}]}}),
+    task('run', {activity: {recent: [], present_outputs: [{path: 'out.txt', present: true}]}}),
+  ], zh);
+  assert.equal(extra, `${zh('workpane.activityPresent', {files: 'out.txt'})} ·+1`);
+  assert.equal(extra.includes('等待首条工具'), false);
+  assert.equal(extra.includes('old.py'), false);
+});
+
 test('a real step, a non-running status, or a missing recent list omits the waiting phrase', () => {
   const logAt = 1_700_000_010;
   const withTool = chatActivityLine([task('run', {

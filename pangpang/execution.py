@@ -377,20 +377,58 @@ def task_interjection_tier(installation, host):
     return tier
 
 
+def claude_family_binary(binary):
+    """True when this command is the Claude CLI or a wrapper named for it.
+
+    ``claude``, ``claude.exe``, and a PATH basename ending in ``-claude``
+    (optional ``.exe`` / ``.cmd`` / ``.bat``) match. A name that only contains
+    those letters does not. This is the launch default for host-local wrappers.
+    It is not an allowlist of adapter names.
+    """
+    if not isinstance(binary, str) or not binary or "\x00" in binary:
+        return False
+    name = os.path.basename(binary.replace("\\", "/")).lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return name == "claude" or name.endswith("-claude")
+
+
+def launch_stdin_protocol(row):
+    """Protocol this catalog row speaks, or None.
+
+    An explicit ``stdin_protocol`` wins, including on a row that is not a
+    Claude wrapper. When the field is omitted, a Claude CLI or ``*-claude``
+    wrapper defaults to claude-stream-json so the run log receives tool
+    NDJSON. Every other row stays closed-stdin. An unregistered explicit
+    value is None; custom files already reject those before merge.
+    """
+    if not isinstance(row, dict):
+        return None
+    protocol = row.get("stdin_protocol")
+    if protocol is None and claude_family_binary(row.get("binary")):
+        protocol = CLAUDE_STREAM_JSON
+    if protocol not in _STDIN_PROTOCOLS:
+        return None
+    return protocol
+
+
 def stdin_protocol_for(adapter):
     """Launch protocol for one catalog row, or None.
 
     Tier 1 still requires a registered stdin protocol. A custom row may name
     claude-stream-json by itself so the runner speaks that protocol and the
-    run log receives tool NDJSON. That does not advertise online inject:
-    interjection stays 3 unless the row also declares tier 1, and custom rows
-    cannot declare that field.
+    run log receives tool NDJSON. A Claude wrapper that omits the field gets
+    that same default from ``launch_stdin_protocol``. That does not advertise
+    online inject: interjection stays 3 unless the row also declares tier 1,
+    and custom rows cannot declare that field.
     """
     row = ADAPTER_CATALOG.get(adapter or "")
     if not isinstance(row, dict):
         return None
-    protocol = row.get("stdin_protocol")
-    if protocol not in _STDIN_PROTOCOLS:
+    protocol = launch_stdin_protocol(row)
+    if protocol is None:
         return None
     if interjection_tier_of(row) == 1 or protocol == CLAUDE_STREAM_JSON:
         return protocol
