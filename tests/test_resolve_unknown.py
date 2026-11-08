@@ -30,7 +30,9 @@ class ResolveUnknownTests(unittest.TestCase):
         # and the overlapping task becomes admissible again.
         self.app.execution.installations['codex-local']['max_concurrency'] = 5
         self._mk_task('t-unknown', 'unknown', segs=('repo',))
-        cand = self._mk_task('t-cand', 'queued', segs=('repo', 'sub'))
+        unk_eid = self.app.store.get('task', 't-unknown')['execution_id']
+        cand = self._mk_task('t-cand', 'queued',
+                             segs=('repo', '.xpp-out', unk_eid, 'sub'))
         self.assertFalse(self.app._task_admissible(self.app.store.get('task', 't-cand')))
         # operator resolves the unknown task (local transport -> immediate complete)
         self.app.resolve_task('t-unknown', {'resolution': 'confirmed_stopped',

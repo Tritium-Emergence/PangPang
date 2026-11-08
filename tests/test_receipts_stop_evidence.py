@@ -67,7 +67,11 @@ class LostReceiptTests(unittest.TestCase):
         self.assertEqual(self.app.store.get('dependency', self.task['dependency_id'])['status'], 'pending')
 
     def test_grace_then_failed_single_settlement_retains_scene_releases_workspace(self):
-        candidate = dict(self.task, id='candidate', status='queued', execution_id='exec-' + 'f' * 32)
+        wk = self.task['workspace_key']
+        candidate = dict(
+            self.task, id='candidate', status='queued',
+            execution_id='exec-' + 'f' * 32, cwd=str(self.directory / 'sub'),
+            workspace_key=[wk[0], list(wk[1]) + ['.xpp-out', self.task['execution_id'], 'sub']])
         self.assertFalse(self.app._task_admissible(candidate))
         self.observe(); self.assert_held()
         self.age()

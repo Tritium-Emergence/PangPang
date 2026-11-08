@@ -154,10 +154,13 @@ class V05ConnectorRecoveryTests(unittest.TestCase):
                 except Exception:pass
         self.connector.close();self.tmp.cleanup()
     def task(self):
-        from pangpang.store import launch_contract, contract_digest
+        from pangpang.store import canonical_workspace, launch_contract, contract_digest
+        cwd=self.connector.config['installations'][0]['cwd']
+        wk=canonical_workspace(self.connector.execution.hosts['local'],cwd)
         t={'id':'task-test','execution_id':'exec-'+'1'*32,'spec_digest':'spec-test','host_id':'local',
            'installation_id':'codex-local','inputs':[],'outputs':[],'prompt':'test','attempt_uuid':'att-test',
-           'cwd':self.connector.config['installations'][0]['cwd'],'timeout_s':3600,'access_mode':'write',
+           'cwd':cwd,'timeout_s':3600,'access_mode':'write',
+           'workspace_key':[wk[0],list(wk[1])],
            'resource_keys':[],'policy_digest':policy_digest(self.connector.config,'codex-local')}
         # A real v2 start carries the signed contract + digest + anti-downgrade marker.
         t['contract']=launch_contract(t); t['contract_digest']=contract_digest(t)

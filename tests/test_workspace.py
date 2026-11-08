@@ -105,32 +105,86 @@ class WorkspaceIdentityTests(unittest.TestCase):
         self.assertEqual(spec['cwd'], task['cwd'])
         self.assertNotEqual(spec['cwd'], '/somewhere/else')
 
-    def _mk_task(self, tid, host='local', inst='codex-local', segs=('repo',), mode='write', status='running'):
+    def _mk_task(self, tid, host='local', inst='codex-local', segs=('repo',), mode='write',
+                 status='running', execution_id=None):
+        # cwd, workspace_key and execution_id are consistent snapshots of the same
+        # task: the lock identity is (<workspace>, ".xpp-out", <execution_id>).
+        eid = execution_id or tid + '-x'
+        cwd = str(self.root / 'ws' / Path(*segs))
         t = {'id': tid, 'status': status, 'host_id': host, 'installation_id': inst,
-             'workspace_key': [host, list(segs)], 'access_mode': mode, 'resource_keys': [],
-             'execution_id': tid + '-x', 'spec_digest': 'd', 'created': 1.0}
+             'cwd': cwd, 'workspace_key': [host, list(segs)], 'access_mode': mode,
+             'resource_keys': [], 'execution_id': eid, 'spec_digest': 'd', 'created': 1.0}
         return self.app.store.put('task', t)
 
-    def test_overlapping_writers_not_admissible(self):
-        # /repo (running writer) blocks /repo/sub writer admission.
-        self.app.execution.installations['codex-local']['max_concurrency'] = 5 # isolate workspace rule
-        self._mk_task('t-run', segs=('repo',), status='running')
-        cand = self._mk_task('t-cand', segs=('repo', 'sub'), status='queued')
-        self.assertFalse(self.app._task_admissible(cand))
+    def test_same_workspace_writers_concurrent(self):
+        # Task locking is on the TASK OUTPUT directory, not the whole workspace:
+        # two writers in the same repo with different execution ids are concurrent.
+        self.app.execution.installations['codex-local']['max_concurrency'] = 5
+        self._mk_task('t-run', segs=('repo',), execution_id='exec-a', status='running')
+        cand = self._mk_task('t-cand', segs=('repo',), execution_id='exec-b', status='queued')
+        self.assertTrue(self.app._task_admissible(cand))
 
-    def test_disjoint_writers_admissible(self):
+    def test_disjoint_workspaces_admissible(self):
         self.app.execution.installations['codex-local']['max_concurrency'] = 5
         self._mk_task('t-run', segs=('repo',), status='running')
         cand = self._mk_task('t-cand', segs=('repo2',), status='queued')
         self.assertTrue(self.app._task_admissible(cand))
 
-    def test_verified_readers_concurrent_but_writer_conflicts(self):
+    def test_true_overlap_conflicts_only_for_write_write(self):
+        # A cwd=/repo eid=E1; B cwd=/repo/.xpp-out/E1/sub eid=E2. B works inside
+        # A's output directory, so the two directory locks genuinely overlap.
         self.app.execution.installations['codex-local']['max_concurrency'] = 5
-        self._mk_task('t-r1', segs=('repo',), mode='verified_read', status='running')
-        r2 = self._mk_task('t-r2', segs=('repo',), mode='verified_read', status='queued')
-        self.assertTrue(self.app._task_admissible(r2)) # read/read concurrent
-        w = self._mk_task('t-w', segs=('repo',), mode='write', status='queued')
-        self.assertFalse(self.app._task_admissible(w)) # write vs read conflicts
+        inside = ('repo', '.xpp-out', 'exec-a', 'sub')
+
+        def pair(mode_a, mode_b, suffix):
+            # Fixed ids: each pair replaces the previous active/candidate snapshot
+            # so earlier cases cannot leak a contradictory writer into the scan.
+            self._mk_task('t-run', segs=('repo',), mode=mode_a,
+                          execution_id='exec-a', status='running')
+            cand = self._mk_task('t-cand', segs=inside, mode=mode_b,
+                                 execution_id='exec-b-' + suffix, status='queued')
+            return cand
+
+        self.assertFalse(self.app._task_admissible(
+            pair('write', 'write', 'ww')))
+        # write does not block read, in either direction; readers never conflict.
+        self.assertTrue(self.app._task_admissible(
+            pair('write', 'verified_read', 'wr')))
+        self.assertTrue(self.app._task_admissible(
+            pair('verified_read', 'write', 'rw')))
+        self.assertTrue(self.app._task_admissible(
+            pair('verified_read', 'verified_read', 'rr')))
+
+    def test_untrustworthy_identity_not_admissible(self):
+        # Missing/invalid frozen identity: no directory lock can be derived, so the
+        # task must never be admitted (fail closed).
+        self.app.execution.installations['codex-local']['max_concurrency'] = 5
+        base = self._mk_task('t-base', segs=('repo',), status='queued')
+        candidates = []
+        missing = dict(base, id='t-no-wk'); missing.pop('workspace_key')
+        candidates.append(missing)
+        candidates.append(dict(base, id='t-empty-segs', workspace_key=['local', []]))
+        candidates.append(dict(base, id='t-bad-host', workspace_key=['', ['repo']]))
+        candidates.append(dict(base, id='t-bad-segs', workspace_key=['local', ['repo', 7]]))
+        candidates.append(dict(base, id='t-eid-missing', execution_id=None))
+        candidates.append(dict(base, id='t-eid-slash', execution_id='a/b'))
+        candidates.append(dict(base, id='t-eid-backslash', execution_id='a\\b'))
+        candidates.append(dict(base, id='t-eid-dotdot', execution_id='..'))
+        for cand in candidates:
+            self.assertFalse(self.app._task_admissible(cand), cand['id'])
+
+    def test_unidentified_active_task_occupies_cap_but_not_directory(self):
+        # An active task whose lock key is None cannot name a directory, so it must
+        # not block an overlapping-looking candidate — but it still occupies capacity.
+        self.app.execution.installations['codex-local']['max_concurrency'] = 5
+        broken = self._mk_task('t-broken', segs=('repo',), status='running')
+        broken.pop('workspace_key')
+        self.app.store.put('task', broken)
+        cand = self._mk_task('t-cand', segs=('repo', 'sub'), status='queued')
+        self.assertTrue(self.app._task_admissible(cand))
+        # Same active task with cap 1 still counts against max_concurrency.
+        self.app.execution.installations['codex-local']['max_concurrency'] = 1
+        self.assertFalse(self.app._task_admissible(cand))
 
     def test_max_concurrency_caps_installation(self):
         self.app.execution.installations['codex-local']['max_concurrency'] = 1
@@ -159,11 +213,13 @@ class WorkspaceIdentityTests(unittest.TestCase):
         self.assertIn('unless this task explicitly asks to record them', prompt)
 
     def test_unknown_task_quarantines_workspace(self):
-        # Acceptance P: an unknown writer keeps its workspace quarantined — an
-        # overlapping new task cannot be admitted until it is resolved.
+        # Acceptance P: an unknown writer keeps its TASK OUTPUT directory
+        # quarantined — a candidate working inside it cannot be admitted until the
+        # unknown task is resolved.
         self.app.execution.installations['codex-local']['max_concurrency'] = 5
-        self._mk_task('t-unk', segs=('repo',), status='unknown')
-        cand = self._mk_task('t-cand', segs=('repo', 'sub'), status='queued')
+        self._mk_task('t-unk', segs=('repo',), execution_id='exec-unk', status='unknown')
+        cand = self._mk_task('t-cand', segs=('repo', '.xpp-out', 'exec-unk', 'sub'),
+                             status='queued')
         self.assertFalse(self.app._task_admissible(cand))
         # once the unknown task reaches a terminal state (operator resolve), the
         # workspace is released and the candidate is admissible.
@@ -192,8 +248,9 @@ class WorkspaceIdentityTests(unittest.TestCase):
         self.app.execution.installations['codex-local']['max_concurrency'] = 5
         for i in range(60):
             t = self._mk_task('done-%d' % i, segs=('x', str(i)), status='succeeded')
-        self._mk_task('t-run', segs=('repo',), status='running')
-        cand = self._mk_task('t-cand', segs=('repo', 'sub'), status='queued')
+        self._mk_task('t-run', segs=('repo',), execution_id='exec-run', status='running')
+        cand = self._mk_task('t-cand', segs=('repo', '.xpp-out', 'exec-run', 'sub'),
+                             status='queued')
         self.assertFalse(self.app._task_admissible(self.app.store.get('task', 't-cand')))
         # A task waiting past its queue_deadline without starting fails (queue_timeout)
         # and its dependency settles failed.
