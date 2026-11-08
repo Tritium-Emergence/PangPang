@@ -40,7 +40,7 @@ function task(id, extra = {}) {
   return {id, status: 'running', started: 1_700_000_000, created: 1_699_000_000, ...extra};
 }
 
-test('denseline is last log time plus the latest closed-set step', () => {
+test('a capped denseline keeps the latest closed-set step, names the cap, and drops the clock', () => {
   const logAt = 1_700_000_010;
   const text = chatActivityLine([task('run', {
     activity: {
@@ -52,12 +52,70 @@ test('denseline is last log time plus the latest closed-set step', () => {
     },
     required_outputs: [],
   })], zh);
-  assert.equal(text, `最后日志 ${hms(logAt)} · write src/b.py`);
+  assert.equal(text, `write src/b.py · ${zh('workpane.activityCapped')}`);
+  // The frozen last_log_at is not presented as ordinary liveness.
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  assert.equal(text.includes('日志可能已达上限'), true);
   assert.equal(text.includes('未声明必需文件'), false);
-  assert.equal(text.includes('日志可能已达上限'), false);
   assert.equal(text.includes('已出现'), false);
   assert.equal(text.includes('暂无可观测活动'), false);
   assert.equal(text.includes('src/a.py'), false);
+});
+
+test('B1: a local capped run with a closed-set step adds the cap copy, not the clock', () => {
+  const logAt = 1_700_000_010;
+  const text = chatActivityLine([task('run', {
+    activity: {
+      status: 'running',
+      last_log_at: logAt,
+      observation_capped: 'maybe',
+      recent: [{tool: 'write', path: 'src/b.py'}],
+    },
+  })], zh);
+  assert.equal(text, `write src/b.py · ${zh('workpane.activityCapped')}`);
+  assert.equal(text.includes('write src/b.py'), true);
+  assert.equal(text.includes('日志可能已达上限'), true);
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  // Same contract in the other language.
+  const enText = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, observation_capped: 'maybe', recent: [{tool: 'write', path: 'src/b.py'}]},
+  })], en);
+  assert.equal(enText, `write src/b.py · ${en('workpane.activityCapped')}`);
+  assert.equal(enText.includes('last log'), false);
+  assert.equal(enText.includes(hms(logAt)), false);
+});
+
+test('B1: a connector-active capped run with empty recent is observation-limited, not a frozen clock', () => {
+  const logAt = 1_700_000_010;
+  const text = chatActivityLine([task('run', {
+    reachability: {phase: 'active'},
+    activity: {
+      status: 'running',
+      last_log_at: logAt,
+      observation_capped: 'maybe',
+      recent: [],
+    },
+  })], zh);
+  assert.equal(text, `运行中 / 工具暂不可见 · ${zh('workpane.activityCapped')}`);
+  assert.equal(text.includes('运行中 / 工具暂不可见'), true);
+  assert.equal(text.includes('日志可能已达上限'), true);
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  // The same active report without the cap still names the hidden tail.
+  const uncapped = chatActivityLine([task('run', {
+    reachability: {phase: 'active'},
+    activity: {last_log_at: logAt, recent: []},
+  })], zh);
+  assert.equal(uncapped, `最后日志 ${hms(logAt)} · 运行中 / 工具暂不可见`);
+  // Unreachable and dispatched keep the coarse sentence.
+  for (const phase of ['unreachable', 'dispatched']) {
+    assert.equal(chatActivityLine([task('run', {
+      reachability: {phase},
+      activity: {last_log_at: logAt, observation_capped: 'maybe', recent: []},
+    })], zh), null);
+  }
 });
 
 test('a later last_log_at changes the line when status is unchanged', () => {

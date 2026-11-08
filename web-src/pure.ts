@@ -416,8 +416,9 @@ function deliveredOutputLabel(activity: {present_outputs?: {path?: string; prese
 // activity tail can be full of thinking, and a capped run log freezes
 // last_log_at. Empty recent therefore says "tools not visible" once a log, a
 // cap, or a delivered output shows the run is past startup. A capped
-// observation drops the frozen clock instead of presenting it as liveness, and
-// delivered files are named alongside the honest running copy, never instead
+// observation drops the frozen clock instead of presenting it as liveness,
+// even when a closed-set step survives, and names the cap next to that step.
+// Delivered files are named alongside the honest running copy, never instead
 // of it. Missing activity, or activity with no recent array and no clock,
 // returns null so the caller keeps the coarse progress sentence. This is not
 // the WorkPane summary.
@@ -434,26 +435,28 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
   const lastLog = typeof activity.last_log_at === 'number' && activity.last_log_at > 0
     ? activity.last_log_at
     : null;
-  // Local projection always sends recent as an array. Empty while running can
-  // be a startup gap, a thinking-flooded tail, or a capped log. A missing
-  // recent is a different activity shape and stays on the clock or the coarse
-  // sentence. Connector-active tasks keep their own projection.
-  const emptyRunningGap = phase !== 'active'
-    && Array.isArray(activity.recent) && recent.length === 0
+  // Both the local projection and the connector-active report send recent as
+  // an array. Empty while running can be a startup gap, a thinking-flooded
+  // tail, or a capped log. A missing recent is a different activity shape and
+  // stays on the clock or the coarse sentence.
+  const emptyRunningGap = Array.isArray(activity.recent) && recent.length === 0
     && picked.task.status === 'running';
-  // A frozen mtime is not liveness. While capped and unable to show a step,
-  // omit the clock rather than implying the run advanced at that time.
-  const showClock = lastLog !== null && !(capped && emptyRunningGap);
+  // A frozen mtime is not liveness on any denseline path. While capped, omit
+  // the clock rather than implying the run advanced at that time, whether the
+  // line shows a step, the hidden-tail copy, or nothing at all.
+  const showClock = lastLog !== null && !capped;
   const parts: string[] = [];
   if (showClock && lastLog !== null) {
     parts.push(tr('chat.progressLastLog', {time: clockHMS(lastLog)}));
   }
+  let hasTool = false;
   for (let i = recent.length - 1; i >= 0; i--) {
     const step = recent[i];
     const tool = step && typeof step.tool === 'string' ? step.tool : '';
     if (!CHAT_PROGRESS_TOOLS.has(tool)) continue;
     const path = typeof step.path === 'string' ? truncateChatProgressPath(step.path) : '';
     parts.push(path ? tr('chat.progressStep', {tool, path}) : tr('chat.progressTool', {tool}));
+    hasTool = true;
     break;
   }
   if (emptyRunningGap) {
@@ -464,6 +467,10 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
     parts.push(observed ? tr('chat.progressToolsNotVisible') : tr('chat.progressAwaitingTool'));
     if (capped) parts.push(tr('workpane.activityCapped'));
     if (delivered) parts.push(delivered);
+  } else if (capped && hasTool) {
+    // The cap is independent of which step survived, so a visible step must
+    // not make the frozen observation look complete.
+    parts.push(tr('workpane.activityCapped'));
   }
   if (!parts.length) return null;
   const body = parts.join(' · ');
