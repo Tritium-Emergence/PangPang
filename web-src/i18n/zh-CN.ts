@@ -238,7 +238,7 @@ export default {
     awaitingResult: '正在等待执行结果…', awaitingApprovalLabel: '待你批准', needsConfirm: '⏸ 需你确认后才执行',
     pendingApprovalHint: '有 {{n}} 项待你批准，点下方卡片',
     progressLastLog: '最后日志 {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
-    progressAwaitingTool: '启动中 / 等待首条工具',
+    progressAwaitingTool: '启动中 / 等待首条工具', progressToolsNotVisible: '运行中 / 工具暂不可见',
     executorPrefix: '执行器 {{id}}', approve: '批准执行', approveOnce: '仅此一次', approveAlways: '始终允许', cancel: '取消', needsAttention: '需要处理',
     runDevice: '设备 {{name}}', runCommand: '命令 {{command}}', runCwd: '工作目录 {{cwd}}',
     runRoots: '允许的目录 {{roots}}', runTruncated: '命令或目录已截断',

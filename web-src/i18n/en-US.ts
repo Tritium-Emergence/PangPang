@@ -357,6 +357,7 @@ export default {
     pendingApprovalHint: '{{n}} waiting for your approval. Use the card below.',
     progressLastLog: 'last log {{time}}', progressStep: '{{tool}} {{path}}', progressTool: '{{tool}}', progressMore: ' ·+{{n}}',
     progressAwaitingTool: 'starting / waiting for the first tool',
+    progressToolsNotVisible: 'running / tools temporarily not visible',
 
     executorPrefix: 'Executor {{id}}', approve: 'Approve', approveOnce: 'This time only', approveAlways: 'Always', cancel: 'Cancel', needsAttention: 'Needs attention',
     runDevice: 'Device {{name}}', runCommand: 'Command {{command}}', runCwd: 'Working directory {{cwd}}',

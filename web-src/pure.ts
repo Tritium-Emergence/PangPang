@@ -356,6 +356,7 @@ export interface ChatProgressTask {
   reachability?: {phase?: string} | null;
   activity?: {
     last_log_at?: number | null;
+    observation_capped?: string;
     recent?: {tool?: string; path?: string}[];
     present_outputs?: {path?: string; present?: boolean}[];
   } | null;
@@ -411,11 +412,15 @@ function deliveredOutputLabel(activity: {present_outputs?: {path?: string; prese
 
 // Narrow chat line: last log time, latest closed-set step, and ·+N when the
 // scope has more than one active task. A running task whose recent array is
-// empty adds a static waiting phrase and no tool name, unless required
-// outputs are already present: those names replace the waiting phrase.
-// Missing activity, or activity with no recent array and no clock, returns
-// null so the caller keeps the coarse progress sentence. This is not the
-// WorkPane summary.
+// empty is not proof that it is still waiting for its first tool: the 16KB
+// activity tail can be full of thinking, and a capped run log freezes
+// last_log_at. Empty recent therefore says "tools not visible" once a log, a
+// cap, or a delivered output shows the run is past startup. A capped
+// observation drops the frozen clock instead of presenting it as liveness, and
+// delivered files are named alongside the honest running copy, never instead
+// of it. Missing activity, or activity with no recent array and no clock,
+// returns null so the caller keeps the coarse progress sentence. This is not
+// the WorkPane summary.
 export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): string | null {
   const picked = pickChatProgressTask(tasks);
   if (!picked?.task.activity) return null;
@@ -424,11 +429,25 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
   // connector report must not add "waiting for the first tool".
   if (phase === 'unreachable' || phase === 'dispatched') return null;
   const activity = picked.task.activity;
-  const parts: string[] = [];
-  if (typeof activity.last_log_at === 'number' && activity.last_log_at > 0) {
-    parts.push(tr('chat.progressLastLog', {time: clockHMS(activity.last_log_at)}));
-  }
   const recent = Array.isArray(activity.recent) ? activity.recent : [];
+  const capped = activity.observation_capped === 'maybe';
+  const lastLog = typeof activity.last_log_at === 'number' && activity.last_log_at > 0
+    ? activity.last_log_at
+    : null;
+  // Local projection always sends recent as an array. Empty while running can
+  // be a startup gap, a thinking-flooded tail, or a capped log. A missing
+  // recent is a different activity shape and stays on the clock or the coarse
+  // sentence. Connector-active tasks keep their own projection.
+  const emptyRunningGap = phase !== 'active'
+    && Array.isArray(activity.recent) && recent.length === 0
+    && picked.task.status === 'running';
+  // A frozen mtime is not liveness. While capped and unable to show a step,
+  // omit the clock rather than implying the run advanced at that time.
+  const showClock = lastLog !== null && !(capped && emptyRunningGap);
+  const parts: string[] = [];
+  if (showClock && lastLog !== null) {
+    parts.push(tr('chat.progressLastLog', {time: clockHMS(lastLog)}));
+  }
   for (let i = recent.length - 1; i >= 0; i--) {
     const step = recent[i];
     const tool = step && typeof step.tool === 'string' ? step.tool : '';
@@ -437,12 +456,14 @@ export function chatActivityLine(tasks: readonly ChatProgressTask[], tr: Tr): st
     parts.push(path ? tr('chat.progressStep', {tool, path}) : tr('chat.progressTool', {tool}));
     break;
   }
-  // Local projection always sends recent as an array. Empty means the run log
-  // has no complete tool row yet (startup banner only). A missing recent is a
-  // different activity shape and stays on the clock or the coarse sentence.
-  if (phase !== 'active' && Array.isArray(activity.recent) && activity.recent.length === 0 && picked.task.status === 'running') {
+  if (emptyRunningGap) {
     const delivered = deliveredOutputLabel(activity, tr);
-    parts.push(delivered || tr('chat.progressAwaitingTool'));
+    // A clock, a cap, or a delivered file means the run got past startup even
+    // though no tool row survived in the observed tail.
+    const observed = showClock || capped || delivered !== null;
+    parts.push(observed ? tr('chat.progressToolsNotVisible') : tr('chat.progressAwaitingTool'));
+    if (capped) parts.push(tr('workpane.activityCapped'));
+    if (delivered) parts.push(delivered);
   }
   if (!parts.length) return null;
   const body = parts.join(' · ');
