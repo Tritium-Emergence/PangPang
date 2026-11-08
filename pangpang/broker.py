@@ -389,6 +389,19 @@ class Broker:
                 result = report["result"]
                 if not isinstance(result, dict):
                     raise Fault("invalid_command_report", 400)
+                # A finite-TTL command reaped by the cloud expiry sweep (pending
+                # or delivered) is terminal with result command_expired. A late
+                # report against it is an ACK, not a conflict: the body is
+                # ignored and nothing is overwritten or reported again. This is
+                # a terminal marker stopping retransmit (N1) — not proof the
+                # sweep ran within the device's window, nor that the command
+                # was never executed. Only finite TTLs qualify: a durable
+                # command (expires None) can never legitimately be expired, so
+                # its late conflict is preserved below.
+                if (cmd["status"] == "done" and cmd.get("expires")
+                        and (cmd.get("result") or {}).get("error") == "command_expired"):
+                    ack.append(cmd["id"])
+                    continue
                 # discover and declare_adapter persist the checked projection.
                 # Comparing that projection keeps a lost ack from looking like a
                 # different result when the device repeats the raw report.
@@ -509,7 +522,7 @@ class Broker:
             commands = []
             for status in ("delivered", "pending"):
                 for cmd in self.store.find("command", host_id=host_id, status=status, limit=4):
-                    if cmd["status"] == "pending" and cmd["expires"] and cmd["expires"] < time.time():
+                    if cmd["expires"] and cmd["expires"] < time.time():
                         cmd.update(status="done", result={"error": "command_expired"})
                         self.store.put("command", cmd)
                         self.service.onboarding.report(cmd, cmd["result"])
