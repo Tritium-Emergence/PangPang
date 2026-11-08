@@ -1,5 +1,6 @@
 // Chat denseline follows task activity already on the snapshot. Status and
-// revision stay put; only the projected log clock and latest step change.
+// revision stay put; only the latest step and cap copy change (a capped run
+// never presents the frozen log clock as liveness).
 import {test, expect} from '@playwright/test';
 import {login} from './_studio.mjs';
 
@@ -80,14 +81,16 @@ test('denseline updates from activity while status and revision stay put', async
   await login(page);
   const line = page.getByTestId('chat-progress-line');
   const live = page.locator('.thinking[role="status"]');
-  await expect(line).toContainText(`最后日志 ${hms(LOG_A)}`);
   await expect(line).toContainText('read src/a.py');
+  await expect(line).toContainText('日志可能已达上限');
   await expect(line).toContainText('·+1');
+  // A capped fixture freezes last_log_at; the denseline must not call that liveness.
+  await expect(line).not.toContainText('最后日志');
+  await expect(line).not.toContainText(hms(LOG_A));
   await expect(line).not.toContainText('等待首条工具');
   await expect(line).not.toContainText('启动中');
   await expect(line).not.toContainText('older.md');
   await expect(line).not.toContainText('未声明必需文件');
-  await expect(line).not.toContainText('日志可能已达上限');
   await expect(line).not.toContainText('已出现');
   await expect(line).toHaveAttribute('aria-hidden', 'true');
   expect(await line.evaluate((el) => el.closest('[aria-live], [role="status"]'))).toBeNull();
@@ -97,9 +100,10 @@ test('denseline updates from activity while status and revision stay put', async
   const liveText = await live.innerText();
   const before = {snapshot: counts.snapshot, messages: counts.messages};
   advanced = true;
-  await expect(line).toContainText(`最后日志 ${hms(LOG_B)}`, {timeout: 12000});
-  await expect(line).toContainText('write src/b.py');
+  await expect(line).toContainText('write src/b.py', {timeout: 12000});
   await expect(line).not.toContainText('src/a.py');
+  await expect(line).toContainText('日志可能已达上限');
+  await expect(line).not.toContainText('最后日志');
   expect(await live.innerText()).toBe(liveText);
   await expect(live).not.toContainText(hms(LOG_B));
   const snapDelta = counts.snapshot - before.snapshot;
@@ -168,7 +172,7 @@ test('an idle chat does not poll the snapshot', async ({page}) => {
   expect(counts.messages).toBe(msgs);
 });
 
-test('running with an empty recent list shows the startup phrase, then clears when finished', async ({page}) => {
+test('running with an empty recent list past startup shows the hidden-tool copy, then clears when finished', async ({page}) => {
   let finished = false;
   await page.route('**/api/v1/snapshot', async (route) => {
     const response = await route.fetch();
@@ -195,16 +199,16 @@ test('running with an empty recent list shows the startup phrase, then clears wh
   const line = page.getByTestId('chat-progress-line');
   const live = page.locator('.thinking[role="status"]');
   await expect(line).toContainText(`最后日志 ${hms(LOG_A)}`);
-  await expect(line).toContainText('启动中 / 等待首条工具');
+  await expect(line).toContainText('运行中 / 工具暂不可见');
   await expect(line).not.toContainText('src/');
   await expect(live).toContainText('进行中…');
-  await expect(live).not.toContainText('等待首条工具');
+  await expect(live).not.toContainText('工具暂不可见');
   finished = true;
   await expect(line).toHaveCount(0, {timeout: 12000});
   await expect(live).toHaveCount(0);
 });
 
-test('empty recent with a delivered output names the file instead of the startup phrase', async ({page}) => {
+test('empty recent with a delivered output names the file alongside the hidden-tool copy', async ({page}) => {
   await page.route('**/api/v1/snapshot', async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({response});
@@ -229,6 +233,7 @@ test('empty recent with a delivered output names the file instead of the startup
   await login(page);
   const line = page.getByTestId('chat-progress-line');
   await expect(line).toContainText(`最后日志 ${hms(LOG_A)}`);
+  await expect(line).toContainText('运行中 / 工具暂不可见');
   await expect(line).toContainText('已出现 out.txt');
   await expect(line).not.toContainText('等待首条工具');
   await expect(line).not.toContainText('启动中');

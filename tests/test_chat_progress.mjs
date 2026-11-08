@@ -40,7 +40,7 @@ function task(id, extra = {}) {
   return {id, status: 'running', started: 1_700_000_000, created: 1_699_000_000, ...extra};
 }
 
-test('denseline is last log time plus the latest closed-set step', () => {
+test('a capped denseline keeps the latest closed-set step, names the cap, and drops the clock', () => {
   const logAt = 1_700_000_010;
   const text = chatActivityLine([task('run', {
     activity: {
@@ -52,12 +52,70 @@ test('denseline is last log time plus the latest closed-set step', () => {
     },
     required_outputs: [],
   })], zh);
-  assert.equal(text, `最后日志 ${hms(logAt)} · write src/b.py`);
+  assert.equal(text, `write src/b.py · ${zh('workpane.activityCapped')}`);
+  // The frozen last_log_at is not presented as ordinary liveness.
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  assert.equal(text.includes('日志可能已达上限'), true);
   assert.equal(text.includes('未声明必需文件'), false);
-  assert.equal(text.includes('日志可能已达上限'), false);
   assert.equal(text.includes('已出现'), false);
   assert.equal(text.includes('暂无可观测活动'), false);
   assert.equal(text.includes('src/a.py'), false);
+});
+
+test('B1: a local capped run with a closed-set step adds the cap copy, not the clock', () => {
+  const logAt = 1_700_000_010;
+  const text = chatActivityLine([task('run', {
+    activity: {
+      status: 'running',
+      last_log_at: logAt,
+      observation_capped: 'maybe',
+      recent: [{tool: 'write', path: 'src/b.py'}],
+    },
+  })], zh);
+  assert.equal(text, `write src/b.py · ${zh('workpane.activityCapped')}`);
+  assert.equal(text.includes('write src/b.py'), true);
+  assert.equal(text.includes('日志可能已达上限'), true);
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  // Same contract in the other language.
+  const enText = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, observation_capped: 'maybe', recent: [{tool: 'write', path: 'src/b.py'}]},
+  })], en);
+  assert.equal(enText, `write src/b.py · ${en('workpane.activityCapped')}`);
+  assert.equal(enText.includes('last log'), false);
+  assert.equal(enText.includes(hms(logAt)), false);
+});
+
+test('B1: a connector-active capped run with empty recent is observation-limited, not a frozen clock', () => {
+  const logAt = 1_700_000_010;
+  const text = chatActivityLine([task('run', {
+    reachability: {phase: 'active'},
+    activity: {
+      status: 'running',
+      last_log_at: logAt,
+      observation_capped: 'maybe',
+      recent: [],
+    },
+  })], zh);
+  assert.equal(text, `运行中 / 工具暂不可见 · ${zh('workpane.activityCapped')}`);
+  assert.equal(text.includes('运行中 / 工具暂不可见'), true);
+  assert.equal(text.includes('日志可能已达上限'), true);
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  // The same active report without the cap still names the hidden tail.
+  const uncapped = chatActivityLine([task('run', {
+    reachability: {phase: 'active'},
+    activity: {last_log_at: logAt, recent: []},
+  })], zh);
+  assert.equal(uncapped, `最后日志 ${hms(logAt)} · 运行中 / 工具暂不可见`);
+  // Unreachable and dispatched keep the coarse sentence.
+  for (const phase of ['unreachable', 'dispatched']) {
+    assert.equal(chatActivityLine([task('run', {
+      reachability: {phase},
+      activity: {last_log_at: logAt, observation_capped: 'maybe', recent: []},
+    })], zh), null);
+  }
 });
 
 test('a later last_log_at changes the line when status is unchanged', () => {
@@ -91,19 +149,23 @@ test('missing activity keeps the coarse sentence by returning no line', () => {
   })], zh), null);
 });
 
-test('running with an empty recent list names the startup gap', () => {
+test('running with an empty recent list past startup names a hidden tool tail', () => {
   const logAt = 1_700_000_010;
   const zhText = chatActivityLine([task('run', {
     activity: {status: 'running', last_log_at: logAt, recent: []},
   })], zh);
-  assert.equal(zhText, `最后日志 ${hms(logAt)} · 启动中 / 等待首条工具`);
+  assert.equal(zhText, `最后日志 ${hms(logAt)} · 运行中 / 工具暂不可见`);
+  assert.equal(zhText.includes('等待首条工具'), false);
   assert.equal(zhText.includes('暂无可观测活动'), false);
   assert.equal(zhText.includes('{{'), false);
   const enText = chatActivityLine([task('run', {
     activity: {last_log_at: logAt, recent: []},
   })], en);
-  assert.equal(enText, `last log ${hms(logAt)} · starting / waiting for the first tool`);
+  assert.equal(enText, `last log ${hms(logAt)} · running / tools temporarily not visible`);
+  assert.equal(enText.includes('waiting for the first tool'), false);
   assert.equal(enText.includes('{{'), false);
+  // No log, no cap, no output: nothing says the run got past startup, so this
+  // stays the true early-waiting copy.
   assert.equal(chatActivityLine([task('run', {
     activity: {last_log_at: null, recent: []},
   })], zh), '启动中 / 等待首条工具');
@@ -111,12 +173,12 @@ test('running with an empty recent list names the startup gap', () => {
     task('older', {started: 1_600_000_000, activity: {last_log_at: logAt, recent: [{tool: 'read', path: 'old.py'}]}}),
     task('run', {activity: {last_log_at: logAt, recent: []}}),
   ], zh);
-  assert.equal(extra, `最后日志 ${hms(logAt)} · 启动中 / 等待首条工具 ·+1`);
+  assert.equal(extra, `最后日志 ${hms(logAt)} · 运行中 / 工具暂不可见 ·+1`);
   assert.equal(extra.includes('old.py'), false);
   assert.equal(extra.includes('read'), false);
 });
 
-test('empty recent with delivered outputs names those files instead of the waiting phrase', () => {
+test('empty recent with delivered outputs shows them alongside the honest running copy', () => {
   const logAt = 1_700_000_010;
   const text = chatActivityLine([task('run', {
     activity: {
@@ -129,16 +191,18 @@ test('empty recent with delivered outputs names those files instead of the waiti
       ],
     },
   })], zh);
-  assert.equal(text, `最后日志 ${hms(logAt)} · ${zh('workpane.activityPresent', {files: 'out.txt'})}`);
+  assert.equal(text, `最后日志 ${hms(logAt)} · 运行中 / 工具暂不可见 · ${zh('workpane.activityPresent', {files: 'out.txt'})}`);
   assert.equal(text.includes('等待首条工具'), false);
   assert.equal(text.includes('启动中'), false);
   assert.equal(text.includes('missing.txt'), false);
   assert.equal(text.includes('{'), false);
   assert.equal(text.includes('['), false);
+  // Delivered files are never the only progress signal.
+  assert.notEqual(text, zh('workpane.activityPresent', {files: 'out.txt'}));
   const alone = chatActivityLine([task('run', {
     activity: {last_log_at: null, recent: [], present_outputs: [{path: 'notes.md', present: true}]},
   })], zh);
-  assert.equal(alone, zh('workpane.activityPresent', {files: 'notes.md'}));
+  assert.equal(alone, `运行中 / 工具暂不可见 · ${zh('workpane.activityPresent', {files: 'notes.md'})}`);
   assert.equal(alone.includes('等待首条工具'), false);
   const enText = chatActivityLine([task('run', {
     activity: {
@@ -147,7 +211,7 @@ test('empty recent with delivered outputs names those files instead of the waiti
       present_outputs: [{path: 'out.txt', present: true}, {path: 'b.txt', present: true}],
     },
   })], en);
-  assert.equal(enText, `last log ${hms(logAt)} · ${en('workpane.activityPresent', {files: 'out.txt, b.txt'})}`);
+  assert.equal(enText, `last log ${hms(logAt)} · running / tools temporarily not visible · ${en('workpane.activityPresent', {files: 'out.txt, b.txt'})}`);
   assert.equal(enText.includes('waiting for the first tool'), false);
   assert.equal(enText.includes('starting /'), false);
   assert.equal(enText.includes('{'), false);
@@ -160,7 +224,7 @@ test('empty recent with delivered outputs names those files instead of the waiti
   const truncated = chatActivityLine([task('run', {
     activity: {recent: [], present_outputs: [{path: long, present: true}, {path: 'a\nb.py', present: true}]},
   })], zh);
-  assert.equal(truncated, zh('workpane.activityPresent', {files: cut}));
+  assert.equal(truncated, `运行中 / 工具暂不可见 · ${zh('workpane.activityPresent', {files: cut})}`);
   assert.equal(truncated.includes('等待首条工具'), false);
   assert.equal(chatActivityLine([task('run', {
     activity: {recent: [], present_outputs: [{path: 'a\nb.py', present: true}]},
@@ -169,9 +233,65 @@ test('empty recent with delivered outputs names those files instead of the waiti
     task('older', {started: 1_600_000_000, activity: {recent: [{tool: 'read', path: 'old.py'}]}}),
     task('run', {activity: {recent: [], present_outputs: [{path: 'out.txt', present: true}]}}),
   ], zh);
-  assert.equal(extra, `${zh('workpane.activityPresent', {files: 'out.txt'})} ·+1`);
+  assert.equal(extra, `运行中 / 工具暂不可见 · ${zh('workpane.activityPresent', {files: 'out.txt'})} ·+1`);
   assert.equal(extra.includes('等待首条工具'), false);
   assert.equal(extra.includes('old.py'), false);
+});
+
+test('a capped observation with an empty recent list is honest, not frozen', () => {
+  const logAt = 1_700_000_010;
+  const text = chatActivityLine([task('run', {
+    activity: {
+      status: 'running',
+      last_log_at: logAt,
+      observation_capped: 'maybe',
+      recent: [],
+      present_outputs: [{path: 'out.txt', present: true}],
+    },
+  })], zh);
+  assert.equal(text, `运行中 / 工具暂不可见 · ${zh('workpane.activityCapped')} · ${zh('workpane.activityPresent', {files: 'out.txt'})}`);
+  // The frozen last_log_at is not presented as liveness while capped.
+  assert.equal(text.includes('最后日志'), false);
+  assert.equal(text.includes(hms(logAt)), false);
+  assert.equal(text.includes('运行中'), true);
+  assert.equal(text.includes('工具暂不可见'), true);
+  assert.equal(text.includes(zh('workpane.activityCapped')), true);
+  assert.equal(text.includes('已出现 out.txt'), true);
+  // Never looks like only the old stuck line: outputs alone or clock + outputs.
+  assert.notEqual(text, zh('workpane.activityPresent', {files: 'out.txt'}));
+  const frozen = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, recent: [], present_outputs: [{path: 'out.txt', present: true}]},
+  })], zh);
+  assert.equal(frozen, `最后日志 ${hms(logAt)} · 运行中 / 工具暂不可见 · ${zh('workpane.activityPresent', {files: 'out.txt'})}`);
+  assert.notEqual(text, frozen);
+
+  const enText = chatActivityLine([task('run', {
+    activity: {
+      last_log_at: logAt,
+      observation_capped: 'maybe',
+      recent: [],
+      present_outputs: [{path: 'out.txt', present: true}],
+    },
+  })], en);
+  assert.equal(enText, `running / tools temporarily not visible · ${en('workpane.activityCapped')} · ${en('workpane.activityPresent', {files: 'out.txt'})}`);
+  assert.equal(enText.includes('last log'), false);
+  assert.equal(enText.includes('waiting for the first tool'), false);
+
+  // Capped without outputs still says the log is capped and drops the clock.
+  const bare = chatActivityLine([task('run', {
+    activity: {last_log_at: logAt, observation_capped: 'maybe', recent: []},
+  })], zh);
+  assert.equal(bare, `运行中 / 工具暂不可见 · ${zh('workpane.activityCapped')}`);
+  assert.equal(bare.includes('最后日志'), false);
+  assert.equal(bare.includes('等待首条工具'), false);
+});
+
+test('the denseline activity shape carries the existing cap flag', () => {
+  const pure = fs.readFileSync('web-src/pure.ts', 'utf8');
+  const start = pure.indexOf('export interface ChatProgressTask');
+  const end = pure.indexOf('function finiteClock', start);
+  assert.ok(start > 0 && end > start);
+  assert.match(pure.slice(start, end), /observation_capped\?: string;/);
 });
 
 test('a real step, a non-running status, or a missing recent list omits the waiting phrase', () => {
