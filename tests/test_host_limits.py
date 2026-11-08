@@ -150,6 +150,64 @@ class HostLimitsServiceTests(unittest.TestCase):
         self.assertEqual(task2["timeout_s"], 900)
 
 
+
+    def test_pre_scheduling_grant_still_matches(self):
+        """Grants hashed before scheduling keys were stripped still authorize."""
+        from pangpang.connector import (
+            authorization_digest, pre_scheduling_authorization_digest,
+        )
+        # Simulate an old grant that included parallel on the host.
+        hosts = self.app.config["hosts"]
+        host = dict(next(h for h in hosts if h["id"] == "local"))
+        host["parallel"] = 1
+        self.app.config["hosts"] = [host if h["id"] == "local" else h for h in hosts]
+        old = pre_scheduling_authorization_digest(self.app.config, "codex-local")
+        new = authorization_digest(self.app.config, "codex-local")
+        self.assertNotEqual(old, new)
+        inst = self.app.execution.installations["codex-local"]
+        self.assertTrue(self.app._authorization_matches(old, inst))
+        self.assertTrue(self.app._authorization_matches(new, inst))
+
+    def test_broker_start_replays_frozen_host_cap(self):
+        """Raising the host cap after enqueue must not change the durable payload."""
+        host = {
+            "id": "conn-a", "transport": "connector", "os": "Linux",
+            "credential_hash": "a" * 64, "max_concurrency": 2,
+            "allowed_roots": [str(self.root)],
+        }
+        self.app.execution.hosts["conn-a"] = host
+        # Keep managed config in sync for set_host_limits later.
+        cfg_hosts = list(self.app.config.get("hosts") or [])
+        cfg_hosts.append(dict(host))
+        self.app.config["hosts"] = cfg_hosts
+        self.app.store.put("device", {"id": "conn-a", "supported_contract_version": 4})
+        task = {
+            "id": "task-freeze", "execution_id": "exec-freeze", "status": "starting",
+            "host_id": "conn-a", "installation_id": "codex-local",
+            "inputs": [], "outputs": ["result.txt"], "prompt": "x",
+            "spec_digest": "spec", "policy_digest": "pol",
+            "attempt_uuid": "a" * 32, "timeout_s": 3600,
+            "cwd": str(self.root), "access_mode": "write",
+            "contract_version": 2, "host_max_concurrency": 2,
+            "workspace_key": ["conn-a", ["w"]],
+            "resource_keys": [],
+        }
+        self.app.store.put("task", task)
+        first = self.app.broker.start(task)
+        self.assertIn("command_id", first)
+        payload1 = self.app.store.get("command", first["command_id"])["payload"]
+        self.assertEqual(payload1["host_max_concurrency"], 2)
+        # Raise live host cap in both execution map and managed config.
+        self.app.execution.hosts["conn-a"]["max_concurrency"] = 5
+        for h in self.app.config["hosts"]:
+            if h.get("id") == "conn-a":
+                h["max_concurrency"] = 5
+        task = self.app.store.get("task", "task-freeze")
+        second = self.app.broker.start(task)
+        self.assertEqual(second.get("command_id"), first["command_id"])
+        payload2 = self.app.store.get("command", first["command_id"])["payload"]
+        self.assertEqual(payload2["host_max_concurrency"], 2)
+
 class DeviceHostCapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

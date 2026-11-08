@@ -1,5 +1,5 @@
 import {Modal} from './Modal';
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import {useTranslation} from 'react-i18next';
 import type {Store} from '../store';
 import {api} from '../api';
@@ -38,36 +38,51 @@ function HostLimitsForm({host, store}: {host: Host; store: Store}) {
   const limits = (host.limits || {}) as HostLimits;
   const cBounds = limits.concurrency_bounds || {min: 1, max: 16, default: 1};
   const tBounds = limits.timeout_bounds || {min: 30, max: 86400, default: 3600};
-  const [concurrency, setConcurrency] = useState(
-    limits.max_concurrency == null ? '' : String(limits.max_concurrency),
-  );
-  const [timeout, setTimeoutVal] = useState(
-    limits.timeout_s == null ? '' : String(limits.timeout_s),
-  );
+  const serverConcurrency = limits.max_concurrency == null ? '' : String(limits.max_concurrency);
+  const serverTimeout = limits.timeout_s == null ? '' : String(limits.timeout_s);
+  const [concurrency, setConcurrency] = useState(serverConcurrency);
+  const [timeout, setTimeoutVal] = useState(serverTimeout);
+  const [dirtyConcurrency, setDirtyConcurrency] = useState(false);
+  const [dirtyTimeout, setDirtyTimeout] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!dirtyConcurrency) setConcurrency(serverConcurrency);
+  }, [serverConcurrency, dirtyConcurrency]);
+  useEffect(() => {
+    if (!dirtyTimeout) setTimeoutVal(serverTimeout);
+  }, [serverTimeout, dirtyTimeout]);
 
   async function save(ev: {preventDefault(): void}) {
     ev.preventDefault();
     const body: {max_concurrency?: number | null; timeout_s?: number | null} = {};
-    const cRaw = concurrency.trim();
-    const tRaw = timeout.trim();
-    if (cRaw === '') body.max_concurrency = null;
-    else {
-      const n = Number(cRaw);
-      if (!Number.isInteger(n) || n < cBounds.min || n > cBounds.max) {
-        store.setNotice(t('hosts.invalidConcurrency'));
-        return;
+    if (dirtyConcurrency) {
+      const cRaw = concurrency.trim();
+      if (cRaw === '') body.max_concurrency = null;
+      else {
+        const n = Number(cRaw);
+        if (!Number.isInteger(n) || n < cBounds.min || n > cBounds.max) {
+          store.setNotice(t('hosts.invalidConcurrency'));
+          return;
+        }
+        body.max_concurrency = n;
       }
-      body.max_concurrency = n;
     }
-    if (tRaw === '') body.timeout_s = null;
-    else {
-      const n = Number(tRaw);
-      if (!Number.isInteger(n) || n < tBounds.min || n > tBounds.max) {
-        store.setNotice(t('hosts.invalidTimeout'));
-        return;
+    if (dirtyTimeout) {
+      const tRaw = timeout.trim();
+      if (tRaw === '') body.timeout_s = null;
+      else {
+        const n = Number(tRaw);
+        if (!Number.isInteger(n) || n < tBounds.min || n > tBounds.max) {
+          store.setNotice(t('hosts.invalidTimeout'));
+          return;
+        }
+        body.timeout_s = n;
       }
-      body.timeout_s = n;
+    }
+    if (!('max_concurrency' in body) && !('timeout_s' in body)) {
+      store.setNotice(t('hosts.noChanges'));
+      return;
     }
     setSaving(true);
     try {
@@ -75,6 +90,8 @@ function HostLimitsForm({host, store}: {host: Host; store: Store}) {
       const next = out?.limits || {};
       setConcurrency(next.max_concurrency == null ? '' : String(next.max_concurrency));
       setTimeoutVal(next.timeout_s == null ? '' : String(next.timeout_s));
+      setDirtyConcurrency(false);
+      setDirtyTimeout(false);
       store.setNotice(t('hosts.hostLimitsSaved'));
       await store.refresh();
     } catch (err: any) {
@@ -105,7 +122,7 @@ function HostLimitsForm({host, store}: {host: Host; store: Store}) {
           step={1}
           value={concurrency}
           placeholder={t('hosts.hostConcurrencyPlaceholder', {default: String(cBounds.default)})}
-          onChange={(e) => setConcurrency(e.target.value)}
+          onChange={(e) => { setConcurrency(e.target.value); setDirtyConcurrency(true); }}
         />
       </label>
       <label className="flex flex-col gap-1 text-xs text-muted">
@@ -119,7 +136,7 @@ function HostLimitsForm({host, store}: {host: Host; store: Store}) {
           step={1}
           value={timeout}
           placeholder={t('hosts.hostTimeoutPlaceholder', {default: String(tBounds.default)})}
-          onChange={(e) => setTimeoutVal(e.target.value)}
+          onChange={(e) => { setTimeoutVal(e.target.value); setDirtyTimeout(true); }}
         />
       </label>
       <button

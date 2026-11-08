@@ -5287,12 +5287,22 @@ class Service:
         if inst.get("id") not in {i.get("id") for i in config.get("installations", [])}:
             return False
         host = self.execution.hosts.get(inst.get("host_id"), {})
+        from .connector import (
+            authorization_digest, legacy_authorization_digest,
+            pre_scheduling_authorization_digest,
+        )
         if host.get("transport") == "connector":
-            from .connector import authorization_digest, legacy_authorization_digest
             if live != authorization_digest(config, inst["id"]):
                 return False
-            return stored == legacy_authorization_digest(config, inst["id"])
-        return stored == self._legacy_authorization_digest(inst["id"])
+            return stored in (
+                legacy_authorization_digest(config, inst["id"]),
+                pre_scheduling_authorization_digest(config, inst["id"]),
+            )
+        if stored == self._legacy_authorization_digest(inst["id"]):
+            return True
+        # Grants hashed before scheduling keys were stripped still match while the
+        # rest of the host is unchanged.
+        return stored == pre_scheduling_authorization_digest(config, inst["id"])
 
     def _grant_matches(self, inst):
         if inst["id"] in self.execution.unknown_adapters or not self.adapter_known(inst.get("host_id"), inst.get("adapter")):
@@ -7541,9 +7551,14 @@ class Service:
                 # ledger).
                 if not self._task_admissible(current):
                     continue
+                from .host_limits import explicit_host_concurrency
+                host_row = self.execution.hosts.get(current.get("host_id"), {})
+                # Freeze the host concurrency stamp for this attempt so broker
+                # start / replay keep one durable payload (Repair #81 B2).
                 current.update(status="starting", started=time.time(),
                                run_attempt_id=current.get("run_attempt_id", 0) + 1,
-                               attempt_uuid=uuid.uuid4().hex)
+                               attempt_uuid=uuid.uuid4().hex,
+                               host_max_concurrency=explicit_host_concurrency(host_row))
                 self.store.put("task", current)
                 task = current
             progressed |= self._try_start(task)

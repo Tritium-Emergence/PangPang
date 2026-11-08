@@ -169,12 +169,17 @@ class Broker:
         # task sends nothing here and the device's bind sees None==None (compat).
         if task.get("required_outputs"):
             payload["required_outputs"] = task["required_outputs"]
-        # Live host concurrency cap for device-side admission (not frozen into
-        # spec_digest). Omitted when the operator has not set a host limit.
+        # Attempt-frozen host concurrency cap for device-side admission (not in
+        # spec_digest). Prefer the value stamped at queued->starting so replay of
+        # the durable start command stays identity-stable when the operator later
+        # edits the host knob. Fall back to the live host only for legacy tasks.
         from .host_limits import explicit_host_concurrency
-        cap = explicit_host_concurrency(self.service.execution.hosts.get(task.get("host_id"), {}))
+        if "host_max_concurrency" in task:
+            cap = task.get("host_max_concurrency")
+        else:
+            cap = explicit_host_concurrency(self.service.execution.hosts.get(task.get("host_id"), {}))
         if cap is not None:
-            payload["host_max_concurrency"] = cap
+            payload["host_max_concurrency"] = int(cap)
         # Launch authority is checked against the AUTHORITATIVE task in the same
         # transaction as the enqueue: a caller holding a stale
         # 'starting' snapshot must not enqueue after the task was cancelled, went
