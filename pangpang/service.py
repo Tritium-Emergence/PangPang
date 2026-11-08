@@ -6518,25 +6518,25 @@ class Service:
             return True
         return bool(set(a.get("resource_keys", [])) & set(b.get("resource_keys", [])))
 
-    def _task_workspace(self, task):
-        wk = task.get("workspace_key")
-        if wk:
-            return (wk[0], tuple(wk[1]))
-        # legacy task without a stored key: recompute conservatively from the host.
-        host = self.execution.hosts.get(task.get("host_id"), {"id": task.get("host_id"), "transport": "local"})
-        return self._canonical_workspace(host, task.get("cwd", ""))
-
     def _task_admissible(self, task):
         """Atomic executor admission. Called INSIDE the
         claim transaction. Rejects if: the task is already past its own
         queue_deadline (the sweep may not have run yet — never launch an expired
-        task), the host/installation concurrency cap is full, or an active task
-        (starting/running/cancel_requested/unknown — unknown quarantines)
-        holds an overlapping workspace with a conflicting access mode (write/write,
-        write/read conflict; verified_read/verified_read concurrent), or a shared
-        external resource lock is held/unknown."""
+        task), the task has no trustworthy directory-lock identity, the
+        host/installation concurrency cap is full, or an active task
+        (starting/running/cancel_requested/unknown — unknown quarantines) holds an
+        overlapping TASK OUTPUT directory while both are writers (write/write).
+        Concurrent writers in the same workspace are allowed; readers never conflict.
+        A shared external resource lock held/unknown still rejects."""
         dl = task.get("queue_deadline")
         if dl and dl <= time.time():
+            return False
+        # Directory lock identity comes ONLY from frozen fields (workspace_key +
+        # execution_id). An untrusted identity (missing/invalid/whole-machine
+        # sentinel) is rejected here, outside the scan.
+        from .store import task_lock_workspace
+        my_lock = task_lock_workspace(task)
+        if my_lock is None:
             return False
         # Query by active status + paginate: never clamp at 1000 (a large terminal
         # backlog could hide active tasks and over-admit, or hide an unknown-quarantine
@@ -6559,12 +6559,16 @@ class Service:
         else:
             if sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= cap:
                 return False
-        my_ws = self._task_workspace(task)
         my_write = task.get("access_mode", "write") != "verified_read"
         for other in active:
-            if self._workspace_overlaps(my_ws, self._task_workspace(other)):
+            other_lock = task_lock_workspace(other)
+            # An active task without a trustworthy identity still occupies the cap,
+            # but cannot name a directory to conflict on.
+            if other_lock is None:
+                continue
+            if self._workspace_overlaps(my_lock, other_lock):
                 other_write = other.get("access_mode", "write") != "verified_read"
-                if my_write or other_write: # only reader/reader may share
+                if my_write and other_write: # writers only; read never blocks
                     return False
         # Optional external resource locks (e.g. a real device qwen-slot) still gate.
         my_keys = set(task.get("resource_keys", []))

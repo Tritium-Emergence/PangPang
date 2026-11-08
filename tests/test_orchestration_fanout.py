@@ -259,7 +259,11 @@ class OrchestrationFanoutTests(unittest.TestCase):
         self.assertFalse((b_dir / "result.txt").exists())
         self.assertEqual(self.app.store.find("artifact", task_id=victim), [])
 
-    def test_shared_workspace_serializes_across_installations(self):
+    def test_shared_workspace_writers_run_concurrently(self):
+        # The directory lock is the task's own `.xpp-out/<execution_id>`, not the
+        # whole workspace: two writers in the same repo (different executions, e.g.
+        # across installations) run concurrently; only working INSIDE another task's
+        # output directory conflicts.
         self._boot(self._pair_cfg(self.root, self.root))
         self._argv("inst-a",
                    "import time, pathlib; time.sleep(0.4); pathlib.Path('x.txt').write_text('a'); print('a')")
@@ -268,8 +272,8 @@ class OrchestrationFanoutTests(unittest.TestCase):
         second = self._submit("ws-b", "b", installation_id="inst-b", outputs=["y.txt"])
         self.app.task_step()
         self.app.task_step()
-        self.assertEqual(self._statuses([first, second]), ["running", "queued"],
-                         "a second writer on the same workspace must wait, not run concurrently")
+        self.assertEqual(self._statuses([first, second]), ["running", "running"],
+                         "co-located writers with distinct execution dirs must run concurrently")
         rows = self._drain([first, second])
         self.assertEqual([r["status"] for r in rows], ["succeeded", "succeeded"])
 

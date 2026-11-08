@@ -296,19 +296,19 @@ class Connector:
         return task.get("attempt_uuid") or (task.get("contract") or {}).get("attempt_uuid")
 
     def _reject_workspace_conflict(self, task):
-        """Device-side twin of Service._task_admissible. Uses the same
-        shared canonical-workspace helpers so cloud admission and device execution
-        agree. Only active local runs (launching/active) count. Rejects when the
-        installation is at max_concurrency, or an active run holds an overlapping
-        workspace with a conflicting access mode (write/write, write/read)."""
-        from .store import canonical_workspace, workspace_overlaps
-        host = self.execution.hosts[self.host_id]
+        """Device-side twin of Service._task_admissible. Uses the same shared
+        task-lock identity so cloud admission and device execution agree. Only
+        active local runs (launching/active) count. Rejects when the candidate has
+        no trustworthy directory-lock identity, the installation is at
+        max_concurrency, or an active run holds an overlapping TASK OUTPUT directory
+        while both are writers (write/write). Plain co-located writers stay
+        concurrent; readers never conflict."""
+        from .store import task_lock_workspace, workspace_overlaps
         inst = self.execution.installations[task["installation_id"]]
-
-        def ws(t):
-            return canonical_workspace(host, t.get("cwd") or self.execution.installations[t["installation_id"]].get("cwd", ""))
-
-        my_ws = ws(task)
+        # Derived from frozen task fields only — never the live installation.cwd.
+        my_lock = task_lock_workspace(task)
+        if my_lock is None:
+            raise Fault("local_task_lock_identity_missing")
         my_write = task.get("access_mode", "write") != "verified_read"
         # Status-scoped + paginated: a large terminal local_run backlog must never
         # hide a launching/active run (which would let us over-admit past capacity or
@@ -327,8 +327,13 @@ class Connector:
         elif sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= int(inst.get("max_concurrency", 1)):
             raise Fault("local_installation_at_capacity")
         for other in active:
-            if workspace_overlaps(my_ws, ws(other)):
-                if my_write or other.get("access_mode", "write") != "verified_read":
+            other_lock = task_lock_workspace(other)
+            # An unidentified active run still occupies capacity but cannot name a
+            # directory to conflict on.
+            if other_lock is None:
+                continue
+            if workspace_overlaps(my_lock, other_lock):
+                if my_write and other.get("access_mode", "write") != "verified_read":
                     raise Fault("local_workspace_busy")
 
     def start(self, task):

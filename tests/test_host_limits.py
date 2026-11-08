@@ -114,11 +114,13 @@ class HostLimitsServiceTests(unittest.TestCase):
                 "id": f"t-active-{i}", "status": status, "host_id": "local",
                 "installation_id": "codex-local", "cwd": str(self.root / f"a{i}"),
                 "access_mode": "verified_read", "workspace_key": ["local", [f"a{i}"]],
+                "execution_id": f"exec-active-{i}",
             })
         candidate = {
             "id": "t-new", "status": "queued", "host_id": "local",
             "installation_id": "codex-local", "cwd": str(self.root / "b"),
             "access_mode": "verified_read", "workspace_key": ["local", ["b"]],
+            "execution_id": "exec-new",
         }
         self.assertFalse(self.app._task_admissible(candidate))
         self.app.set_host_limits("local", {"max_concurrency": 3})
@@ -286,16 +288,64 @@ class DeviceHostCapTests(unittest.TestCase):
         self.app.store.close()
         self.tmp.cleanup()
 
-    def _put_active(self, eid, cwd_name):
+    def _put_active(self, eid, cwd_name, mode="verified_read", segs=None):
         cwd = self.root / "ws" / cwd_name
-        cwd.mkdir(exist_ok=True)
+        cwd.mkdir(parents=True, exist_ok=True)
         task = {
             "execution_id": eid, "installation_id": "codex-a", "host_id": "local",
-            "cwd": str(cwd), "access_mode": "verified_read",
+            "cwd": str(cwd), "access_mode": mode,
+            "workspace_key": ["local", list(segs or [cwd_name])],
             "host_max_concurrency": 3,
         }
         self.app.store.put("local_run", {"id": eid, "status": "active", "task": task})
         return task
+
+    def _candidate(self, eid, cwd_name, mode="write", segs=None):
+        return {
+            "execution_id": eid, "installation_id": "codex-a", "host_id": "local",
+            "cwd": str(self.root / "ws" / cwd_name), "access_mode": mode,
+            "workspace_key": ["local", list(segs or [cwd_name])],
+            "host_max_concurrency": 3,
+        }
+
+    def test_device_missing_lock_identity_rejected(self):
+        # No trustworthy frozen identity -> never launch (fail closed).
+        no_wk = self._candidate("exec-x", "dx")
+        no_wk.pop("workspace_key")
+        empty_segs = self._candidate("exec-x", "dx")
+        empty_segs["workspace_key"] = ["local", []]
+        bad_eid = self._candidate("a/b", "dx")
+        traversal = self._candidate("..", "dx")
+        for candidate in (no_wk, empty_segs, bad_eid, traversal):
+            with self.assertRaises(Fault) as ctx:
+                self.conn._reject_workspace_conflict(candidate)
+            self.assertEqual(ctx.exception.code, "local_task_lock_identity_missing")
+
+    def test_device_same_workspace_writers_concurrent(self):
+        # Different execution ids -> different output dirs -> both writers admitted.
+        self._put_active("exec-a", "repo", mode="write", segs=["repo"])
+        self.conn._reject_workspace_conflict(
+            self._candidate("exec-b", "repo", mode="write", segs=["repo"]))
+
+    def test_device_true_overlap_write_write_and_reads(self):
+        # B cwd is inside A's output dir: the directory locks genuinely overlap.
+        inside = ["repo", ".xpp-out", "exec-a", "sub"]
+        self._put_active("exec-a", "repo", mode="write", segs=["repo"])
+        with self.assertRaises(Fault) as ctx:
+            self.conn._reject_workspace_conflict(
+                self._candidate("exec-b", "repo/.xpp-out/exec-a/sub",
+                                mode="write", segs=inside))
+        self.assertEqual(ctx.exception.code, "local_workspace_busy")
+        # write does not block read, in either direction; readers never conflict.
+        self.conn._reject_workspace_conflict(
+            self._candidate("exec-b", "repo/.xpp-out/exec-a/sub",
+                            mode="verified_read", segs=inside))
+        self.app.store.put("local_run", {"id": "exec-a", "status": "active", "task": {
+            **self.app.store.get("local_run", "exec-a")["task"],
+            "access_mode": "verified_read"}})
+        self.conn._reject_workspace_conflict(
+            self._candidate("exec-b", "repo/.xpp-out/exec-a/sub",
+                            mode="write", segs=inside))
 
     def test_host_max_concurrency_overrides_install(self):
         self._put_active("exec-1", "d1")
@@ -303,6 +353,7 @@ class DeviceHostCapTests(unittest.TestCase):
         candidate = {
             "execution_id": "exec-3", "installation_id": "codex-a", "host_id": "local",
             "cwd": str(self.root / "ws" / "d3"), "access_mode": "verified_read",
+            "workspace_key": ["local", ["d3"]],
             "host_max_concurrency": 3,
         }
         (self.root / "ws" / "d3").mkdir(exist_ok=True)
@@ -315,6 +366,7 @@ class DeviceHostCapTests(unittest.TestCase):
             self.conn._reject_workspace_conflict({
                 **candidate, "execution_id": "exec-4",
                 "cwd": str(self.root / "ws" / "d4"),
+                "workspace_key": ["local", ["d4"]],
             })
         self.assertEqual(ctx.exception.code, "local_installation_at_capacity")
 

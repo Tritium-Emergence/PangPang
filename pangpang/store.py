@@ -153,6 +153,38 @@ def workspace_overlaps(a, b):
     return sa[:n] == sb[:n]
 
 
+def task_lock_workspace(task):
+    """The directory-lock identity a task holds: its frozen workspace plus its OWN
+    output directory (`.xpp-out/<execution_id>`).
+
+    Derived exclusively from FROZEN task fields — zero filesystem I/O and never the
+    live installation cwd. Two tasks share a directory lock only when one's cwd is
+    inside the other's output directory (one writes into what the other produces),
+    not merely because they run in the same repository. Plain co-located writers in
+    one workspace are the normal case and must stay concurrent; read-only tasks never
+    take the directory away from a writer ("write does not block read").
+
+    Returns None when the identity cannot be trusted: missing/invalid workspace_key
+    (not `[host, segs]`, or empty segs = a whole-machine quarantine sentinel) or a
+    missing/invalid execution_id (non-str, empty, `.`/`..`, or a path separator). An
+    unidentifiable task is never admitted / never launched.
+    """
+    wk = task.get("workspace_key")
+    if not isinstance(wk, (list, tuple)) or len(wk) != 2:
+        return None
+    host, segs = wk
+    if not isinstance(host, str) or not host:
+        return None
+    if not isinstance(segs, (list, tuple)) or not segs:
+        return None
+    if not all(isinstance(s, str) for s in segs):
+        return None
+    eid = task.get("execution_id")
+    if not isinstance(eid, str) or not eid or eid in (".", "..") or "/" in eid or "\\" in eid:
+        return None
+    return (host, tuple(segs) + (".xpp-out", eid))
+
+
 # --- Connector launch contract --------------------------------------
 # The cloud and the device hold DIFFERENT projections of a task's installation/host
 # (the cloud has a connector projection with proxy/credential metadata; the device
