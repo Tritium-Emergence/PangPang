@@ -160,6 +160,26 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class GitCreationFlags(unittest.TestCase):
+    def test_nt_passes_create_no_window(self):
+        flag = 0x08000000
+        root = Path("/repo")
+        with mock.patch.object(install_git_mod.os, "name", "nt"), \
+             mock.patch.object(install_git_mod.subprocess, "CREATE_NO_WINDOW", flag, create=True), \
+             mock.patch.object(install_git_mod.subprocess, "run") as run:
+            install_git_mod._git(root, ["rev-parse", "HEAD"])
+        self.assertEqual(run.call_args.kwargs["creationflags"], flag)
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
+        self.assertEqual(run.call_args.args[0], ["git", "-C", str(root), "rev-parse", "HEAD"])
+
+    def test_non_nt_omits_create_no_window(self):
+        root = Path("/repo")
+        with mock.patch.object(install_git_mod.os, "name", "posix"), \
+             mock.patch.object(install_git_mod.subprocess, "run") as run:
+            install_git_mod._git(root, ["rev-parse", "HEAD"])
+        self.assertNotIn("creationflags", run.call_args.kwargs)
+
+
 class RestartArgv(unittest.TestCase):
     def test_rebuilds_module_form(self):
         from pangpang.install_git import restart_argv

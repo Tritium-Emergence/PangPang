@@ -44,6 +44,7 @@ class SecurityHardeningTests(unittest.TestCase):
             finally:
                 v.close()
     def test_windows_acl_never_uses_path_lookup_and_grants_numeric_sid(self):
+        flag = 0x08000000
         with tempfile.TemporaryDirectory() as td:
             path = Path(td)
             tools = {
@@ -52,6 +53,7 @@ class SecurityHardeningTests(unittest.TestCase):
             }
             with patch.object(vault, "_windows_system_binary",
                               side_effect=lambda name: tools[name]) as resolver, \
+                 patch.object(vault.subprocess, "CREATE_NO_WINDOW", flag, create=True), \
                  patch.object(vault.subprocess, "check_output",
                               return_value='"DOMAIN\\User","S-1-5-21-123-456-789-1001"\r\n') as check, \
                  patch.object(vault.subprocess, "run") as run:
@@ -61,7 +63,9 @@ class SecurityHardeningTests(unittest.TestCase):
                 resolver.call_args_list,
                 [call("whoami.exe"), call("icacls.exe")])
             check.assert_called_once_with(
-                [tools["whoami.exe"], "/user", "/fo", "csv", "/nh"], text=True)
+                [tools["whoami.exe"], "/user", "/fo", "csv", "/nh"],
+                text=True, creationflags=flag)
+            self.assertEqual(run.call_args.kwargs["creationflags"], flag)
             argv = run.call_args.args[0]
             self.assertEqual(argv[0], tools["icacls.exe"])
             self.assertEqual(argv[1], str(path))

@@ -50,9 +50,13 @@ def install_root():
 
 
 def _git(root, args, timeout=30):
+    kwargs = {}
+    if os.name == "nt":
+        # Background git queries must not pop a console window on Windows.
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return subprocess.run(
         ["git", "-C", str(root), *args],
-        check=False, capture_output=True, text=True, timeout=timeout,
+        check=False, capture_output=True, text=True, timeout=timeout, **kwargs,
     )
 
 
