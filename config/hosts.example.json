@@ -5,6 +5,7 @@
     "allowed_roots": [
       "/REPLACE_WITH_AUTHORIZED_WORKSPACE"
     ],
-    "parallel": 1
+    "max_concurrency": 1,
+    "timeout_s": 3600
   }
 ]

@@ -1,12 +1,12 @@
 import {Modal} from './Modal';
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import {useTranslation} from 'react-i18next';
 import type {Store} from '../store';
 import {api} from '../api';
 import {SettingsDialog} from './Setup';
 import {clock, dateTime, friendlyError} from '../display';
 import {executionFactsFor, installationSetupTone} from '../pure';
-import type {Host, InstallBuild} from '../types';
+import type {Host, HostLimits, InstallBuild} from '../types';
 
 function shortHash(commit?: string | null) {
   if (!commit || commit === 'unknown') return '';
@@ -30,6 +30,123 @@ function versionLabel(
 function commitsDiffer(cloud?: string | null, device?: string | null) {
   if (!cloud || cloud === 'unknown' || !device || device === 'unknown') return false;
   return cloud !== device;
+}
+
+
+function HostLimitsForm({host, store}: {host: Host; store: Store}) {
+  const {t} = useTranslation();
+  const limits = (host.limits || {}) as HostLimits;
+  const cBounds = limits.concurrency_bounds || {min: 1, max: 16, default: 1};
+  const tBounds = limits.timeout_bounds || {min: 30, max: 86400, default: 3600};
+  const serverConcurrency = limits.max_concurrency == null ? '' : String(limits.max_concurrency);
+  const serverTimeout = limits.timeout_s == null ? '' : String(limits.timeout_s);
+  const [concurrency, setConcurrency] = useState(serverConcurrency);
+  const [timeout, setTimeoutVal] = useState(serverTimeout);
+  const [dirtyConcurrency, setDirtyConcurrency] = useState(false);
+  const [dirtyTimeout, setDirtyTimeout] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!dirtyConcurrency) setConcurrency(serverConcurrency);
+  }, [serverConcurrency, dirtyConcurrency]);
+  useEffect(() => {
+    if (!dirtyTimeout) setTimeoutVal(serverTimeout);
+  }, [serverTimeout, dirtyTimeout]);
+
+  async function save(ev: {preventDefault(): void}) {
+    ev.preventDefault();
+    const body: {max_concurrency?: number | null; timeout_s?: number | null} = {};
+    if (dirtyConcurrency) {
+      const cRaw = concurrency.trim();
+      if (cRaw === '') body.max_concurrency = null;
+      else {
+        const n = Number(cRaw);
+        if (!Number.isInteger(n) || n < cBounds.min || n > cBounds.max) {
+          store.setNotice(t('hosts.invalidConcurrency'));
+          return;
+        }
+        body.max_concurrency = n;
+      }
+    }
+    if (dirtyTimeout) {
+      const tRaw = timeout.trim();
+      if (tRaw === '') body.timeout_s = null;
+      else {
+        const n = Number(tRaw);
+        if (!Number.isInteger(n) || n < tBounds.min || n > tBounds.max) {
+          store.setNotice(t('hosts.invalidTimeout'));
+          return;
+        }
+        body.timeout_s = n;
+      }
+    }
+    if (!('max_concurrency' in body) && !('timeout_s' in body)) {
+      store.setNotice(t('hosts.noChanges'));
+      return;
+    }
+    setSaving(true);
+    try {
+      const out = await api<{limits?: HostLimits}>(`hosts/${host.id}/limits`, body);
+      const next = out?.limits || {};
+      setConcurrency(next.max_concurrency == null ? '' : String(next.max_concurrency));
+      setTimeoutVal(next.timeout_s == null ? '' : String(next.timeout_s));
+      setDirtyConcurrency(false);
+      setDirtyTimeout(false);
+      store.setNotice(t('hosts.hostLimitsSaved'));
+      await store.refresh();
+    } catch (err: any) {
+      store.setNotice(friendlyError(err) || t('hosts.saveFailedPrefix'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form
+      id={`host-limits-${host.id}`}
+      className="host-limits mt-3 flex flex-wrap items-end gap-3 rounded-lg border border-line bg-surface/40 p-3"
+      onSubmit={(e) => { void save(e); }}
+    >
+      <div className="min-w-[10rem] flex-1">
+        <p className="text-xs font-medium">{t('hosts.hostLimitsTitle')}</p>
+        <p className="text-[11px] text-muted">{t('hosts.hostLimitsHint')}</p>
+      </div>
+      <label className="flex flex-col gap-1 text-xs text-muted">
+        {t('hosts.concurrency')}
+        <input
+          id={`host-concurrency-${host.id}`}
+          className="w-28 rounded-lg border border-line bg-raised px-2 py-1 text-sm text-ink"
+          inputMode="numeric"
+          min={cBounds.min}
+          max={cBounds.max}
+          step={1}
+          value={concurrency}
+          placeholder={t('hosts.hostConcurrencyPlaceholder', {default: String(cBounds.default)})}
+          onChange={(e) => { setConcurrency(e.target.value); setDirtyConcurrency(true); }}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted">
+        {t('hosts.timeoutSeconds')}
+        <input
+          id={`host-timeout-${host.id}`}
+          className="w-32 rounded-lg border border-line bg-raised px-2 py-1 text-sm text-ink"
+          inputMode="numeric"
+          min={tBounds.min}
+          max={tBounds.max}
+          step={1}
+          value={timeout}
+          placeholder={t('hosts.hostTimeoutPlaceholder', {default: String(tBounds.default)})}
+          onChange={(e) => { setTimeoutVal(e.target.value); setDirtyTimeout(true); }}
+        />
+      </label>
+      <button
+        id={`host-limits-save-${host.id}`}
+        type="submit"
+        className="rounded-lg border border-line px-3 py-1.5 text-xs"
+        disabled={saving}
+      >{saving ? t('hosts.saving') : t('hosts.saveHostLimits')}</button>
+    </form>
+  );
 }
 
 // Hosts view (#hosts-view): devices + their executors, the global-model settings
@@ -203,6 +320,7 @@ export function HostsView({store}: {store: Store}) {
 ): null}
                 </div>
               </div>
+              <HostLimitsForm host={h} store={store} />
               <div className="exec-grid mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
                 {insts.length ? insts.map((e) => {
                   const probe = (snap.probes || []).find((p) => p.id === e.id);

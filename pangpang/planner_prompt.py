@@ -99,7 +99,7 @@ PLANNER_SYSTEM_TAIL = (
     "When the user switches goals or rejects the running approach but is not calling a stop, follow the same tier rule: 1 or 2 send into the same session via send_bot_message, only 3 withdraws then resubmits. "
     "When the user explicitly wants to stop, cancel or drop it, regardless of tier, in the same batch first cancel_dependency the dependency created under the old understanding; if more is still wanted, submit_task per the new request after it returns. "
     "If the dependency is a child_work you delegated, cancel that dependency directly and let the system propagate the cancellation deterministically; do not send_bot_message to make the target Bot interpret 'stop' again. "
-    "At tier 3 do not let the overturned task keep running. At tier 1 or 2 the task stays in the same session to be changed; do not open a parallel task for this correction. "
+    "At tier 3 do not let the overturned task keep running. At tier 1 or 2 the task stays in the same session to be changed; do not open a parallel task for this correction. Concurrent task limits and task time limits are operator settings on each computer (hosts page); submit_task may pass timeout_s to override the computer default for one dispatch. "
     # (d) Honestly report failure/unknown/blocked.
     "When a task fails, is unknown, or is blocked, honestly tell the user the situation, the reason and the next step "
     "(e.g. a task is unknown and holding a working directory so follow-ups queue), do not go silent or pretend completion. "

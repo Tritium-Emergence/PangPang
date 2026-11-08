@@ -47,6 +47,8 @@ export default {
     installation_config_changed: 'The configuration was updated by another request. Please retry.',
     cwd_outside_allowed_roots: 'The working directory is outside the authorized range or inaccessible.',
     invalid_timeout_s: 'Timeout must be 30–86400 seconds.',
+    empty_host_limits: 'Provide max_concurrency and/or timeout_s.',
+    unsupported_host_field: 'Unsupported host limits field.',
     invalid_use_when: 'The purpose note cannot exceed 500 characters.',
     installation_not_found: 'This executor was not found.',
     invalid_cwd: 'Invalid working directory. Check the path and authorized range.',
@@ -332,6 +334,12 @@ export default {
     upgradeUnavailable: 'This install is not an upgradable git checkout',
     upgradeNeedCommit: 'Cloud has not reported a valid commit yet',
     executionLevelHint: 'Affects this device only. L0 (personal use): allows the device-proven cooperative supervision tiers (on macOS or cgroup-less Linux the device must also record process-group consent). L1/L2: strong supervision (Windows Job Object) only.',
+    hostLimitsTitle: 'Task limits',
+    hostLimitsHint: 'How many tasks this computer may run at once, and the default time limit for each new task. Blank keeps the previous rule (executor default concurrency 1; timeout 3600s). Changing limits does not require re-approving grants.',
+    hostConcurrencyPlaceholder: 'Default {{default}} (executor)',
+    hostTimeoutPlaceholder: 'Default {{default}}s',
+    saveHostLimits: 'Save task limits',
+    hostLimitsSaved: 'Task limits saved',
 
   },
 

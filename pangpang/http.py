@@ -51,6 +51,21 @@ def public_config(value):
     return value
 
 
+def project_host(host):
+    """Public host row plus scheduling limits for the devices page."""
+    from .host_limits import limits_view
+    row = public_config(host)
+    if isinstance(row, dict):
+        row = dict(row)
+        row["limits"] = limits_view(host if isinstance(host, dict) else {})
+    return row
+
+
+def project_hosts(hosts):
+    return [project_host(h) for h in hosts]
+
+
+
 def serve(service, token, host="127.0.0.1", port=8790, origin=None):
     if len(token) < 24:
         raise Fault("token_must_be_at_least_24_characters")
@@ -292,7 +307,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                                   "attention_summary": attention_summary,
                                   "cloud_build": install_identity(),
                                   "devices": service.broker.devices(),
-                                  "hosts": public_config(list(service.execution.hosts.values())),
+                                  "hosts": project_hosts(list(service.execution.hosts.values())),
                                   "installations": public_config(list(service.execution.installations.values())),
                                   "models": [{"id": p["id"], "model": p.get("model", ""), "configured": bool(p.get("endpoint")),
                                               "context_window_tokens": p.get("context_window_tokens")}
@@ -318,7 +333,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 if path == "/api/v1/settings":
                     self.respond(public_config(service.config)); return
                 if parts == ["hosts"]:
-                    self.respond(public_config(list(service.execution.hosts.values()))); return
+                    self.respond(project_hosts(list(service.execution.hosts.values()))); return
                 if parts == ["projects"]:
                     self.respond(service.store.find("project")); return
                 if parts == ["routines"]:
@@ -542,6 +557,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         return service.device_upgrade(parts[1], body)
                     if len(parts) == 3 and parts[0] == "hosts" and parts[2] == "execution-level":
                         return service.set_host_execution_level(parts[1], body)
+                    if len(parts) == 3 and parts[0] == "hosts" and parts[2] == "limits":
+                        return service.set_host_limits(parts[1], body)
                     if parts == ["bots"]:
                         return service.create_bot(body)
                     if parts == ["projects"]:

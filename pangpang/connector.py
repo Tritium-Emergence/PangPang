@@ -52,19 +52,37 @@ def cloud_connection_fault(exc):
         advice="无法连接协调器。确认地址是 https:// 或本机 loopback，证书受信，且服务已在运行。")
 
 
-def policy_digest(config, installation_id):
+def _host_for_digest(host, *, include_name, strip_scheduling):
+    from .host_limits import host_without_scheduling
+    host = dict(host)
+    if strip_scheduling:
+        host = host_without_scheduling(host)
+    if not include_name:
+        host = {k: v for k, v in host.items() if k != "name"}
+    return host
+
+
+def policy_digest(config, installation_id, *, strip_scheduling=True):
+    """Installation + host + resources digest used as the connector policy stamp.
+
+    strip_scheduling=True (default) excludes max_concurrency/timeout_s/parallel so
+    operator limit edits do not churn policy. Older frozen task stamps may still
+    match the pre-strip formula via policy_digest(..., strip_scheduling=False).
+    """
     installation = next(e for e in config["installations"] if e["id"] == installation_id)
-    host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
+    host = _host_for_digest(
+        next(h for h in config["hosts"] if h["id"] == installation["host_id"]),
+        include_name=True, strip_scheduling=strip_scheduling)
     resources = [r for r in config.get("resources", []) if r["key"] in installation.get("resource_keys", [])]
     return digest({"installation": installation, "host": host, "resources": resources})
 
 
-def _authorization_material(config, installation_id, include_name):
+def _authorization_material(config, installation_id, include_name, *, strip_scheduling=True):
     installation = next(e for e in config["installations"] if e["id"] == installation_id)
     installation = {k: v for k, v in installation.items() if k not in ("priority", "use_when")}
-    host = next(h for h in config["hosts"] if h["id"] == installation["host_id"])
-    if not include_name:
-        host = {k: v for k, v in host.items() if k != "name"}
+    host = _host_for_digest(
+        next(h for h in config["hosts"] if h["id"] == installation["host_id"]),
+        include_name=include_name, strip_scheduling=strip_scheduling)
     resources = [r for r in config.get("resources", []) if r["key"] in installation.get("resource_keys", [])]
     return digest({"installation": installation, "host": host, "resources": resources})
 
@@ -78,19 +96,27 @@ def authorization_digest(config, installation_id):
     outside the installation, so it is not hashed either.
 
     hosts[].name is the operator-facing label. A rename must not change this
-    digest. Every other host field stays in the hash, including id, os,
+    digest. Scheduling knobs (max_concurrency, timeout_s, parallel) are stripped
+    too — changing a computer's task concurrency or time limit must not force
+    re-approval. Every other host field stays in the hash, including id, os,
     transport, allowed_roots, credential_hash, execution_level, and consent.
     """
-    return _authorization_material(config, installation_id, include_name=False)
+    return _authorization_material(config, installation_id, include_name=False, strip_scheduling=True)
 
 
 def legacy_authorization_digest(config, installation_id):
     """Name-inclusive authorization digest stored before display names were excluded.
 
-    A persisted grant or queued task matches this only while the host is
-    unchanged, including its current display name.
+    Keeps scheduling keys so grants hashed before Repair #81 still match while the
+    rest of the host is unchanged. A persisted grant or queued task matches this
+    only while the host is unchanged, including its current display name.
     """
-    return _authorization_material(config, installation_id, include_name=True)
+    return _authorization_material(config, installation_id, include_name=True, strip_scheduling=False)
+
+
+def pre_scheduling_authorization_digest(config, installation_id):
+    """Name-excluded digest from before scheduling keys were stripped."""
+    return _authorization_material(config, installation_id, include_name=False, strip_scheduling=False)
 
 
 def execution_manifest(config, installation_id):
@@ -290,7 +316,15 @@ class Connector:
         # may already be running (unknown != idle).
         active = [r["task"] for r in self._active_runs()
                   if r.get("task", {}).get("execution_id") != task["execution_id"]]
-        if sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= int(inst.get("max_concurrency", 1)):
+        host_cap = task.get("host_max_concurrency")
+        if host_cap is not None:
+            try:
+                cap = int(host_cap)
+            except (TypeError, ValueError):
+                cap = int(inst.get("max_concurrency", 1))
+            if sum(1 for _ in active) >= cap:
+                raise Fault("local_installation_at_capacity")
+        elif sum(1 for t in active if t.get("installation_id") == task["installation_id"]) >= int(inst.get("max_concurrency", 1)):
             raise Fault("local_installation_at_capacity")
         for other in active:
             if workspace_overlaps(my_ws, ws(other)):
@@ -343,15 +377,18 @@ class Connector:
             if installation.get("enabled") is not True:
                 raise Fault("local_installation_disabled")
             live_policy = policy_digest(self.config, installation["id"])
-            if task.get("policy_digest") != live_policy:
+            live_policy_legacy = policy_digest(self.config, installation["id"], strip_scheduling=False)
+            if task.get("policy_digest") not in (live_policy, live_policy_legacy):
                 raise Fault("local_policy_changed_probe_and_resubmit")
             # The cloud freezes the digest the operator approved. Re-check it
             # against this device's config and refuse before any process starts.
             frozen_auth = task.get("authorization_digest")
             if frozen_auth is not None and frozen_auth not in (
                     live_policy,
+                    live_policy_legacy,
                     authorization_digest(self.config, installation["id"]),
-                    legacy_authorization_digest(self.config, installation["id"])):
+                    legacy_authorization_digest(self.config, installation["id"]),
+                    pre_scheduling_authorization_digest(self.config, installation["id"])):
                 raise Fault("local_policy_changed_probe_and_resubmit")
             # the cloud's workspace_key must equal what THIS device computes for
             # the launch cwd. Proves the cloud's workspace claim matches the real target

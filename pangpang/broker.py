@@ -169,6 +169,43 @@ class Broker:
         # task sends nothing here and the device's bind sees None==None (compat).
         if task.get("required_outputs"):
             payload["required_outputs"] = task["required_outputs"]
+        # Attempt-frozen host concurrency cap for device-side admission (not in
+        # spec_digest). Prefer the value stamped at queued->starting so replay of
+        # the durable start command stays identity-stable when the operator later
+        # edits the host knob.
+        from .host_limits import explicit_host_concurrency
+        start_key = self.command_id(task["host_id"], "start", task["execution_id"])
+        unstamped = "host_max_concurrency" not in task
+        if unstamped:
+            # Upgrade-compat: an already-enqueued start must be replayed verbatim.
+            try:
+                existing = self.store.get("command", start_key)
+            except Fault as error:
+                if error.status != 404:
+                    raise
+                existing = None
+            if existing is not None:
+                with self.store.atomic():
+                    try:
+                        current = self.store.get("task", task["id"])
+                    except Fault as error:
+                        if error.status != 404:
+                            raise
+                        current = {}
+                    if (current.get("status") != "starting" or current.get("execution_id") != task["execution_id"]
+                            or current.get("attempt_uuid") != task.get("attempt_uuid")):
+                        return {"status": "start_withdrawn"}
+                    # Backfill the stamp from the durable payload when present.
+                    if "host_max_concurrency" in (existing.get("payload") or {}):
+                        current["host_max_concurrency"] = existing["payload"]["host_max_concurrency"]
+                        self.store.put("task", current)
+                    cmd = self.enqueue(task["host_id"], "start", existing["payload"], task["execution_id"])
+                return {"command_id": cmd["id"], "transport": "connector"}
+            cap = explicit_host_concurrency(self.service.execution.hosts.get(task.get("host_id"), {}))
+        else:
+            cap = task.get("host_max_concurrency")
+        if cap is not None:
+            payload["host_max_concurrency"] = int(cap)
         # Launch authority is checked against the AUTHORITATIVE task in the same
         # transaction as the enqueue: a caller holding a stale
         # 'starting' snapshot must not enqueue after the task was cancelled, went
@@ -185,6 +222,10 @@ class Broker:
             if (current.get("status") != "starting" or current.get("execution_id") != task["execution_id"]
                     or current.get("attempt_uuid") != task.get("attempt_uuid")):
                 return {"status": "start_withdrawn"}
+            # First enqueue of an unstamped legacy task: persist a one-time stamp.
+            if unstamped and "host_max_concurrency" not in current:
+                current["host_max_concurrency"] = cap
+                self.store.put("task", current)
             cmd = self.enqueue(task["host_id"], "start", payload, task["execution_id"])
         return {"command_id": cmd["id"], "transport": "connector"}
 
