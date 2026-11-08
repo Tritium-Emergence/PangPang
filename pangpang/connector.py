@@ -385,8 +385,10 @@ class Connector:
             frozen_auth = task.get("authorization_digest")
             if frozen_auth is not None and frozen_auth not in (
                     live_policy,
+                    live_policy_legacy,
                     authorization_digest(self.config, installation["id"]),
-                    legacy_authorization_digest(self.config, installation["id"])):
+                    legacy_authorization_digest(self.config, installation["id"]),
+                    pre_scheduling_authorization_digest(self.config, installation["id"])):
                 raise Fault("local_policy_changed_probe_and_resubmit")
             # the cloud's workspace_key must equal what THIS device computes for
             # the launch cwd. Proves the cloud's workspace claim matches the real target

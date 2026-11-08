@@ -208,6 +208,44 @@ class HostLimitsServiceTests(unittest.TestCase):
         payload2 = self.app.store.get("command", first["command_id"])["payload"]
         self.assertEqual(payload2["host_max_concurrency"], 2)
 
+
+    def test_unstamped_legacy_replay_reuses_durable_payload(self):
+        """Pre-fix starting tasks without a stamp must not rebuild a new payload."""
+        host = {
+            "id": "conn-b", "transport": "connector", "os": "Linux",
+            "credential_hash": "b" * 64, "max_concurrency": 2,
+            "allowed_roots": [str(self.root)],
+        }
+        self.app.execution.hosts["conn-b"] = host
+        self.app.config["hosts"] = list(self.app.config.get("hosts") or []) + [dict(host)]
+        self.app.store.put("device", {"id": "conn-b", "supported_contract_version": 4})
+        task = {
+            "id": "task-legacy", "execution_id": "exec-legacy", "status": "starting",
+            "host_id": "conn-b", "installation_id": "codex-local",
+            "inputs": [], "outputs": ["result.txt"], "prompt": "x",
+            "spec_digest": "spec", "policy_digest": "pol",
+            "attempt_uuid": "b" * 32, "timeout_s": 3600,
+            "cwd": str(self.root), "access_mode": "write",
+            "contract_version": 2, "workspace_key": ["conn-b", ["w"]],
+            "resource_keys": [],
+            # intentionally omit host_max_concurrency (pre-fix shape)
+        }
+        self.app.store.put("task", task)
+        # First start stamps from live (=2) and enqueues
+        first = self.app.broker.start(task)
+        payload1 = self.app.store.get("command", first["command_id"])["payload"]
+        self.assertEqual(payload1["host_max_concurrency"], 2)
+        # Raise live cap; strip stamp again to simulate a process that still has
+        # an unstamped in-memory task while the durable command exists.
+        self.app.execution.hosts["conn-b"]["max_concurrency"] = 5
+        bare = self.app.store.get("task", "task-legacy")
+        bare.pop("host_max_concurrency", None)
+        self.app.store.put("task", bare)
+        second = self.app.broker.start(bare)
+        self.assertEqual(second.get("command_id"), first["command_id"])
+        payload2 = self.app.store.get("command", first["command_id"])["payload"]
+        self.assertEqual(payload2["host_max_concurrency"], 2)
+
 class DeviceHostCapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -279,6 +317,37 @@ class DeviceHostCapTests(unittest.TestCase):
                 "cwd": str(self.root / "ws" / "d4"),
             })
         self.assertEqual(ctx.exception.code, "local_installation_at_capacity")
+
+
+    def test_pre_scheduling_auth_accepted_on_device_gate(self):
+        """Named host + parallel: frozen pre-scheduling auth must pass device gate."""
+        from pangpang.connector import (
+            authorization_digest, legacy_authorization_digest,
+            policy_digest, pre_scheduling_authorization_digest,
+        )
+        # Rebuild host with name + parallel on the connector fixture's config
+        hosts = self.app.config["hosts"]
+        host = dict(next(h for h in hosts if h["id"] == "local"))
+        host["name"] = "Named device"
+        host["parallel"] = 1
+        self.app.config["hosts"] = [host if h["id"] == "local" else h for h in hosts]
+        # Point connector at this config
+        self.conn.config = self.app.config
+        self.conn.execution = self.app.execution
+        old_auth = pre_scheduling_authorization_digest(self.app.config, "codex-a")
+        live = authorization_digest(self.app.config, "codex-a")
+        self.assertNotEqual(old_auth, live)
+        # The accept set used by Connector.start must include old_auth
+        installation_id = "codex-a"
+        live_policy = policy_digest(self.app.config, installation_id)
+        live_policy_legacy = policy_digest(self.app.config, installation_id, strip_scheduling=False)
+        accepted = {
+            live_policy, live_policy_legacy,
+            authorization_digest(self.app.config, installation_id),
+            legacy_authorization_digest(self.app.config, installation_id),
+            pre_scheduling_authorization_digest(self.app.config, installation_id),
+        }
+        self.assertIn(old_auth, accepted)
 
 
 if __name__ == "__main__":
