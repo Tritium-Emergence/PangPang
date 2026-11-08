@@ -318,18 +318,27 @@ def write_merged_row(path, name, row):
 
 
 def merge(path):
+    """Load custom rows into the live catalog.
+
+    The operator file is not rewritten. Discover and ``spec`` read the catalog,
+    so a Claude wrapper that omitted ``stdin_protocol`` is given the stream-json
+    default here. An explicit value on the row is kept. A second merge of the
+    same file matches that catalog row and does not report a conflict.
+    """
     rows = load(path)
-    from .execution import ADAPTER_CATALOG
+    from .execution import ADAPTER_CATALOG, launch_stdin_protocol
     for name, row in rows.items():
+        protocol = launch_stdin_protocol(row)
+        effective = row if protocol is None or "stdin_protocol" in row else dict(row, stdin_protocol=protocol)
         current = ADAPTER_CATALOG.get(name)
         if current is not None:
-            if current == row:
+            if current == effective:
                 continue
             try:
                 line = _line_of(Path(path).read_text(encoding="utf-8"), name)
             except OSError:
                 line = 1
             _bad(path, line, name, "conflicts with an adapter row already merged from another file")
-        ADAPTER_CATALOG[name] = row
+        ADAPTER_CATALOG[name] = effective
         _merged_names.add(name)
     return sorted(rows)

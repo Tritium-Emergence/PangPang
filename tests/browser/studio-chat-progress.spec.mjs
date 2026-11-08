@@ -203,3 +203,36 @@ test('running with an empty recent list shows the startup phrase, then clears wh
   await expect(line).toHaveCount(0, {timeout: 12000});
   await expect(live).toHaveCount(0);
 });
+
+test('empty recent with a delivered output names the file instead of the startup phrase', async ({page}) => {
+  await page.route('**/api/v1/snapshot', async (route) => {
+    const response = await route.fetch();
+    if (!response.ok()) return route.fulfill({response});
+    const s = await response.json();
+    s.turns = [];
+    s.exchanges = [];
+    s.work = [{id: 'herbs', owner_bot_id: 'bot-main', goal: '香草三步指南', kind: 'conversation', status: 'active', attention: 'working', created: 100}];
+    s.tasks = [runningTask('step-a', 1_700_000_000, {
+      status: 'running',
+      last_log_at: LOG_A,
+      recent: [],
+      present_outputs: [{path: 'missing.txt', present: false}, {path: 'out.txt', present: true}],
+    })];
+    await route.fulfill({json: s});
+  });
+  await page.route('**/api/v1/bots/bot-main/messages', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    if (!response.ok()) return route.fulfill({response});
+    await route.fulfill({json: [{id: 'u-herbs', created: 1, bot_id: 'bot-main', from: 'user', kind: 'user', content: '帮我做香草三步指南', work_id: 'herbs'}]});
+  });
+  await login(page);
+  const line = page.getByTestId('chat-progress-line');
+  await expect(line).toContainText(`最后日志 ${hms(LOG_A)}`);
+  await expect(line).toContainText('已出现 out.txt');
+  await expect(line).not.toContainText('等待首条工具');
+  await expect(line).not.toContainText('启动中');
+  await expect(line).not.toContainText('missing.txt');
+  await expect(line).not.toContainText('{');
+  await expect(line).not.toContainText('[');
+});
