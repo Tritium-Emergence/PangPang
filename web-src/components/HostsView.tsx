@@ -5,7 +5,7 @@ import type {Store} from '../store';
 import {api} from '../api';
 import {SettingsDialog} from './Setup';
 import {clock, dateTime, friendlyError} from '../display';
-import {executionFactsFor, installationSetupTone} from '../pure';
+import {canUpgradeDevice as deviceUpgradeEligible, commitsDiffer, executionFactsFor, installationSetupTone} from '../pure';
 import type {Host, HostLimits, InstallBuild} from '../types';
 
 function shortHash(commit?: string | null) {
@@ -26,12 +26,6 @@ function versionLabel(
     hash: hash || t('hosts.versionHashUnknown'),
   });
 }
-
-function commitsDiffer(cloud?: string | null, device?: string | null) {
-  if (!cloud || cloud === 'unknown' || !device || device === 'unknown') return false;
-  return cloud !== device;
-}
-
 
 function HostLimitsForm({host, store}: {host: Host; store: Store}) {
   const {t} = useTranslation();
@@ -199,15 +193,26 @@ export function HostsView({store}: {store: Store}) {
     if (!confirm(t('hosts.upgradeConfirmDevice', {name: host.name || host.id, sha: target}))) return;
     setBusy('device:' + host.id);
     try {
-      const queued = await api<{status?: string; result?: {error?: string}}>(`devices/${host.id}/upgrade`, {target_commit: target});
-      if (queued?.status === 'done' && queued?.result?.error) {
-        store.setNotice(String(queued.result.error));
+      // The route now waits for the device's own command result, so a resolved
+      // response is the result, not an enqueue receipt. Only the two shapes the
+      // connector actually returns may claim success; anything else stays
+      // "unconfirmed" rather than pretending it was queued.
+      const result = await api<{status?: string; restarting?: boolean}>(`devices/${host.id}/upgrade`, {target_commit: target});
+      if (result?.restarting || result?.status === 'updated') {
+        store.setNotice(t('hosts.upgradeRestarting'));
+      } else if (result?.status === 'already_current') {
+        store.setNotice(t('hosts.upgradeCurrent'));
       } else {
-        store.setNotice(t('hosts.upgradeQueued'));
+        store.setNotice(t('hosts.upgradeUnconfirmed'));
       }
       await store.refresh();
     } catch (e: any) {
-      store.setNotice(friendlyError(e));
+      // A pending wait says the result was not confirmed — not that the upgrade
+      // failed; the durable command may still complete on the device.
+      const code = String(e?.message || '').split(':')[0].trim();
+      store.setNotice(code === 'connector_operation_pending'
+        ? t('hosts.upgradePending')
+        : friendlyError(e));
     } finally {
       setBusy(null);
     }
@@ -272,13 +277,13 @@ export function HostsView({store}: {store: Store}) {
           const mismatch = h.transport === 'connector'
             && cloudMismatchable
             && commitsDiffer(cloud.commit, device?.commit);
-          const canUpgradeDevice = h.transport === 'connector'
-            && !device?.revoked
-            && device?.online
-            && cloudMismatchable
-            && (commitsDiffer(cloud.commit, device?.commit)
-              || !device?.commit
-              || device?.commit === 'unknown');
+          const canUpgradeDevice = deviceUpgradeEligible(h, device, cloud.commit);
+          // Both are "not a confirmed upgradable git checkout"; unknown must not
+          // claim the install is definitely not git.
+          const upgradeNotice = h.transport === 'connector' && mismatch && !canUpgradeDevice
+            ? (device?.source === 'build' ? t('hosts.upgradeUnavailable')
+              : device?.source === 'unknown' ? t('hosts.upgradeSourceUnknown') : null)
+            : null;
           return (
             <section key={h.id} className="device-section rounded-xl border border-line bg-raised p-4">
               <div className="device-head flex items-start justify-between gap-3">
@@ -292,6 +297,9 @@ export function HostsView({store}: {store: Store}) {
                     {versionLabel(t, deviceBuild)}
                     {mismatch ? ` · ${t('hosts.versionMismatch')}` : ''}
                   </p>
+                  {upgradeNotice ? (
+                    <p className="mt-1 text-xs text-muted" data-testid="device-upgrade-unavailable">{upgradeNotice}</p>
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <span className={`device-status text-xs ${device?.online || h.transport === 'local' ? 'text-good': 'text-muted'}`}>{statusText}{device?.last_seen ? <span title={dateTime(device.last_seen)}> · {t('hosts.asOf', {time: clock(device.last_seen)})}</span>: null}</span>
