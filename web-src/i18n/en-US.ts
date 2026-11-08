@@ -83,6 +83,7 @@ export default {
     git_fetch_failed: 'The device failed to fetch git updates.',
     target_commit_unavailable: 'The target commit does not exist on this device, so it cannot be upgraded.',
     target_commit_not_on_tracking_ref: 'The target commit is not on the device’s upgrade tracking ref; the upgrade was rejected.',
+    cloud_upgrade_target_not_on_tracking: 'The cloud is running a commit that is not on its upgrade tracking ref (origin/main), so devices cannot obtain it. The upgrade was not queued.',
     git_reset_failed: 'The device failed to reset to the target commit.',
 
   },

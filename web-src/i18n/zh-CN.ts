@@ -80,6 +80,7 @@ export default {
     git_fetch_failed: '设备拉取 git 更新失败。',
     target_commit_unavailable: '目标提交在这台设备上不存在，无法升级。',
     target_commit_not_on_tracking_ref: '目标提交不在设备的升级跟踪分支上，已拒绝升级。',
+    cloud_upgrade_target_not_on_tracking: '云端当前运行的提交不在其升级跟踪分支（origin/main）上，设备无法获取它，因此没有下发升级。',
     git_reset_failed: '设备重置到目标提交失败。',
   },
   workpane: {

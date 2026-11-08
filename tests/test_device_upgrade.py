@@ -27,7 +27,7 @@ from test_bot_runtime import config
 from pangpang import store as store_module
 from pangpang.http import serve
 from pangpang.service import Service
-from pangpang.store import set_strict_txn_io
+from pangpang.store import Fault, set_strict_txn_io
 
 
 HOST = "pc"
@@ -50,6 +50,15 @@ class DeviceUpgradeHttpTests(unittest.TestCase):
         # Volatile presence, same fact a sync publishes. The tests that need a
         # sync still exercise the real route.
         self.app.broker._last_seen[HOST] = time.time()
+        # Repair #88: the cloud preflight fetches its own tracking ref. Tests
+        # must not touch the network or this real checkout; the helper's own
+        # git semantics are covered in test_install_git. Here the stub says the
+        # target is on the cloud tracking history.
+        self.tracking = patch(
+            "pangpang.install_git.require_tracking_ancestor",
+            return_value="b" * 40)
+        self.tracking_mock = self.tracking.start()
+        self.addCleanup(self.tracking.stop)
         self.token = "x" * 32
         self.server = serve(self.app, self.token, port=0)
         self.origin = "http://127.0.0.1:" + str(self.server.server_port)
@@ -153,6 +162,19 @@ class DeviceUpgradeHttpTests(unittest.TestCase):
                 self.assertEqual(status, 400, payload)
                 self.assertEqual(payload.get("code"), "install_not_git_checkout")
                 self.assertEqual(self.commands(), [])
+
+    def test_target_off_cloud_tracking_ref_is_rejected_before_any_command(self):
+        # Repair #88: a cloud HEAD off origin/main must be refused here with an
+        # honest cloud-side code, never queued so the device reports a
+        # missing/off-tracking object for a mistake the cloud made.
+        self.tracking_mock.side_effect = Fault(
+            "cloud_upgrade_target_not_on_tracking", 400)
+        status, payload = self.post("devices/" + HOST + "/upgrade",
+                                    {"target_commit": TARGET})
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload.get("code"), "cloud_upgrade_target_not_on_tracking")
+        self.assertEqual(self.commands(), [])
+        self.tracking_mock.assert_called_once_with(TARGET)
 
     def test_missing_source_still_reaches_the_connector(self):
         # An older device that never reported `source` is unknown, not "not git".
