@@ -48,8 +48,11 @@ def _secure_windows_directory(path):
     """
     whoami = _windows_system_binary("whoami.exe")
     icacls = _windows_system_binary("icacls.exe")
+    # Windows-only path: keep these quiet when the client runs without a console.
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     raw = subprocess.check_output(
-        [whoami, "/user", "/fo", "csv", "/nh"], text=True).strip()
+        [whoami, "/user", "/fo", "csv", "/nh"], text=True,
+        creationflags=creationflags).strip()
     try:
         row = next(csv.reader([raw]))
         sid = row[-1].strip() if len(row) >= 2 else ""
@@ -59,7 +62,8 @@ def _secure_windows_directory(path):
         raise RuntimeError("windows_account_sid_unavailable")
     subprocess.run(
         [icacls, str(path), "/inheritance:r", "/grant:r", "*" + sid + ":(OI)(CI)F"],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=creationflags)
 
 
 def _linklike_directory(path):
