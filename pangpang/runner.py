@@ -1304,16 +1304,94 @@ def _codex_note_thread(state, thread):
         state["thread_id"] = tid
 
 
-def _codex_note_turn(state, turn, *, active):
-    if not state.get("thread_id") or not isinstance(turn, dict):
-        return
-    owner = turn.get("threadId")
-    if isinstance(owner, str) and owner != state["thread_id"]:
+# Only these three terminal statuses are protocol facts this runner recognizes.
+# Rank is the conservative merge order for conflicting notifications on one turn.
+_CODEX_TERMINAL_RANK = {"completed": 0, "interrupted": 1, "failed": 2}
+_CODEX_TERMINAL_ERROR = {"failed": "codex_turn_failed", "interrupted": "codex_turn_interrupted"}
+
+# Distinguishes an omitted `threadId` key (legacy-compatible) from a key that is
+# present but null. `None` cannot serve because it is also a supplied value.
+_CODEX_NO_OWNER = object()
+
+
+def _codex_turn_owner_ok(state, outer, turn):
+    """Every supplied owner must name the one bound thread.
+
+    An omitted owner is compatible with older stubs that do not send
+    `threadId`. A supplied owner must be the bound thread's nonempty string;
+    null, non-string, empty, or different values are malformed and invalidate
+    the whole event.
+    """
+    thread_id = state.get("thread_id")
+    if not (isinstance(thread_id, str) and thread_id):
+        return False
+    for owner in (outer, turn.get("threadId", _CODEX_NO_OWNER)):
+        if owner is _CODEX_NO_OWNER:
+            continue
+        if not (isinstance(owner, str) and owner == thread_id):
+            return False
+    return True
+
+
+def _codex_note_turn(state, turn, *, active, owner=_CODEX_NO_OWNER):
+    """Adopt a turn identity from a start response or `turn/started`.
+
+    A duplicate start does not reopen a finished turn or clear its outcome.
+    A turn already seen in this execution is stale, and a different turn is not
+    adopted while the current one is active. Only an accepted new turn clears
+    the previous turn's native outcome.
+    """
+    if not isinstance(turn, dict) or not _codex_turn_owner_ok(state, owner, turn):
         return
     tid = turn.get("id")
-    if isinstance(tid, str) and tid:
-        state["turn_id"] = tid
-        state["turn_active"] = active
+    if not (isinstance(tid, str) and tid):
+        return
+    if state.get("turn_id") == tid:
+        return
+    seen = state.setdefault("turn_seen", set())
+    if tid in seen:
+        return
+    if state.get("turn_id") and state.get("turn_active"):
+        return
+    seen.add(tid)
+    state["turn_id"] = tid
+    state["turn_active"] = bool(active)
+    state["turn_completed"] = False
+    state["native_outcome"] = None
+
+
+def _codex_note_completed(state, params, turn):
+    """Fold one `turn/completed` for the current turn only.
+
+    A completion never adopts a new identity: its non-empty turn id must match
+    the current turn, and every provided owner must match the bound thread.
+    The first identity-valid completion advances the idle-close counter once;
+    duplicates and hostile events do not. Recognized terminal statuses merge
+    conservatively (failed > interrupted > completed); a missing or unknown
+    status is not native success and never clears a known fact.
+    """
+    if not isinstance(turn, dict) or not _codex_turn_owner_ok(
+            state, params.get("threadId", _CODEX_NO_OWNER), turn):
+        return
+    tid = turn.get("id")
+    if not (isinstance(tid, str) and tid) or tid != state.get("turn_id"):
+        return
+    status = turn.get("status")
+    if isinstance(status, str) and status in _CODEX_TERMINAL_RANK:
+        previous = (state.get("native_outcome") or {}).get("status")
+        if (previous in _CODEX_TERMINAL_RANK
+                and _CODEX_TERMINAL_RANK[previous] > _CODEX_TERMINAL_RANK[status]):
+            status = previous
+        state["native_outcome"] = {
+            "thread_id": state["thread_id"],
+            "turn_id": tid,
+            "status": status,
+            "error": _CODEX_TERMINAL_ERROR.get(status),
+        }
+    if not state.get("turn_completed"):
+        state["turn_completed"] = True
+        state["result_seq"] = state.get("result_seq", 0) + 1
+        state["turn_active"] = False
 
 
 def apply_codex_event(state, event):
@@ -1337,10 +1415,10 @@ def apply_codex_event(state, event):
     if method == "thread/started":
         _codex_note_thread(state, params.get("thread"))
     elif method == "turn/started":
-        _codex_note_turn(state, params.get("turn"), active=True)
+        _codex_note_turn(state, params.get("turn"), active=True,
+                         owner=params.get("threadId", _CODEX_NO_OWNER))
     elif method == "turn/completed":
-        state["result_seq"] = state.get("result_seq", 0) + 1
-        state["turn_active"] = False
+        _codex_note_completed(state, params, params.get("turn"))
     elif method in {"item/completed", "item/started"}:
         item = params.get("item")
         if not isinstance(item, dict):
@@ -2904,7 +2982,8 @@ def supervise(directory):
                 except (ValueError, OSError, RuntimeError):
                     continue
         # (1) Declared outputs. `outputs` is the declared file list. This loop
-        # NEVER overwrites receipt.status (that stays exit-code). A relative
+        # NEVER overwrites receipt.status (the process/native reduction below owns
+        # it). A relative
         # entry is satisfied by output_dir/<raw> first — the directory the
         # delivery prompt tells the executor to write — and then by cwd/<raw>.
         # A stale cwd file must not bind the declaration ahead of the fresh
@@ -2980,10 +3059,12 @@ def supervise(directory):
                         contract=contract, into=artifacts, output_dir=output_dir, cwd=cwd)
         # (4) Required outputs — the HARD deliverable contract (distinct from the
         # soft `outputs` hint above, which NEVER gates). Evidence only; never flips
-        # receipt.status (raw execution fact stays exit-code-driven). The control
-        # plane (Service.complete_task) adjudicates business success from this.
+        # receipt.status (raw execution fact is reduced from process exit, timeout,
+        # control-plane cancel, and the current Codex native turn outcome). The
+        # control plane (Service.complete_task) adjudicates business success.
         required_results = verify_required_outputs(spec.get("required_outputs", []), output_dir, roots)
         archive_artifacts(directory, artifacts, roots, execution_id)
+        native_outcome = None
         if session_protocol == ACP:
             # Not an interjection. The pending list is the hook's record
             # (acp_leave_pending): requests that were not answered.
@@ -3015,6 +3096,12 @@ def supervise(directory):
             with stream_lock:
                 confirmed_ids = set(stream_state["confirmed"])
                 result_text = stream_state.get("result_text")
+                if session_protocol == CODEX_APP_SERVER:
+                    # Snapshot under the same lock the reader folds events with.
+                    # This is a supplementary execution fact, not a new entity.
+                    outcome = stream_state.get("native_outcome")
+                    if isinstance(outcome, dict):
+                        native_outcome = dict(outcome)
             if injected and isinstance(result_text, str):
                 for secret in injected:
                     result_text = result_text.replace(secret, "[redacted]")
@@ -3037,10 +3124,32 @@ def supervise(directory):
             receipt["session_id"] = session_id_from_execution(execution_id)
             receipt["resumed"] = [{"uuid": row["uuid"], "resumed": row["uuid"] in sent_uuids}
                                   for row in steer_rows]
-        receipt.update(status="cancelled" if cancelled else "failed" if timed_out or proc.returncode else "succeeded",
-                       exit_code=proc.returncode, artifacts=artifacts, output_warnings=output_warnings[:20],
+        # Reduce the raw execution fact. Priority is unchanged for the
+        # higher-level causes: control-plane cancel, then timeout or a non-zero
+        # process exit. Only then does the current native turn outcome count:
+        # failed/interrupted with exit 0 is still failed. An unknown or absent
+        # native outcome leaves the legacy process-only path. `exit_code` always
+        # keeps the real process value. The finally block's cleanup proof may
+        # still override this with unknown; a native failure is not a stop proof.
+        native_status = native_outcome.get("status") if native_outcome else None
+        native_failed = native_status in ("failed", "interrupted")
+        if cancelled:
+            status = "cancelled"
+        elif timed_out or proc.returncode:
+            status = "failed"
+        elif native_failed:
+            status = "failed"
+        else:
+            status = "succeeded"
+        receipt.update(status=status, exit_code=proc.returncode, artifacts=artifacts,
+                       output_warnings=output_warnings[:20],
                        required_output_results=required_results,
                        truncated=truncated[0], timed_out=timed_out)
+        if native_outcome is not None:
+            receipt["native_outcome"] = native_outcome
+        if native_failed and status == "failed" and not (timed_out or proc.returncode):
+            # Fixed short code only. Provider free text stays in the operator log.
+            receipt["error"] = _CODEX_TERMINAL_ERROR[native_status]
     except Exception as error:
         # Avoid propagating command output or credentials into diagnostic data.
         receipt.update(status="failed" if confirmed else "unknown", error=type(error).__name__ + ":" + str(error)[:200])
