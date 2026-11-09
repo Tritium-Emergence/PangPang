@@ -333,9 +333,26 @@ INJECT_NOT_TASK_ADVICE = (
 )
 
 
-def inject_message_uuid(call_id):
-    """Stable uuid for one tool call, so a replayed inject is the same mailbox row."""
-    digest = hashlib.sha256(b"xpp-inject:" + str(call_id).encode()).hexdigest()
+def inject_message_uuid(call_id, turn_id=None):
+    """Stable uuid for one inject mailbox row.
+
+    Product path passes turn_id so the durable id matches the turn-isolated
+    journal scope ("tool:" + turn_id). Same (turn_id, call_id) → same UUID;
+    different turns reusing call_id → different UUIDs (no inject_conflict /
+    silent alias across turns).
+
+    When turn_id is None, keep the legacy bare-call_id formula
+    (b"xpp-inject:" + call_id) for helpers/tests that still omit turn.
+    With turn_id, use a versioned prefix (xpp-inject-v2) so new UUIDs never
+    accidentally equal an old bare-call_id UUID. In-flight old mailbox rows
+    are session-local; no DB migration.
+    """
+    if turn_id is None:
+        digest = hashlib.sha256(b"xpp-inject:" + str(call_id).encode()).hexdigest()
+    else:
+        digest = hashlib.sha256(
+            b"xpp-inject-v2:" + str(turn_id).encode() + b":" + str(call_id).encode()
+        ).hexdigest()
     return str(uuid.UUID(hex=digest[:32]))
 
 # Model-facing advice when cancel_dependency targets another Work's dependency.
