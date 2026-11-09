@@ -1309,25 +1309,31 @@ def _codex_note_thread(state, thread):
 _CODEX_TERMINAL_RANK = {"completed": 0, "interrupted": 1, "failed": 2}
 _CODEX_TERMINAL_ERROR = {"failed": "codex_turn_failed", "interrupted": "codex_turn_interrupted"}
 
+# Distinguishes an omitted `threadId` key (legacy-compatible) from a key that is
+# present but null. `None` cannot serve because it is also a supplied value.
+_CODEX_NO_OWNER = object()
+
 
 def _codex_turn_owner_ok(state, outer, turn):
-    """Every provided owner must name the one bound thread.
+    """Every supplied owner must name the one bound thread.
 
-    An absent owner is compatible with older stubs that omit `threadId`; a
-    present but malformed or different one invalidates the event.
+    An omitted owner is compatible with older stubs that do not send
+    `threadId`. A supplied owner must be the bound thread's nonempty string;
+    null, non-string, empty, or different values are malformed and invalidate
+    the whole event.
     """
     thread_id = state.get("thread_id")
     if not (isinstance(thread_id, str) and thread_id):
         return False
-    for owner in (outer, turn.get("threadId")):
-        if owner is None:
+    for owner in (outer, turn.get("threadId", _CODEX_NO_OWNER)):
+        if owner is _CODEX_NO_OWNER:
             continue
         if not (isinstance(owner, str) and owner == thread_id):
             return False
     return True
 
 
-def _codex_note_turn(state, turn, *, active, owner=None):
+def _codex_note_turn(state, turn, *, active, owner=_CODEX_NO_OWNER):
     """Adopt a turn identity from a start response or `turn/started`.
 
     A duplicate start does not reopen a finished turn or clear its outcome.
@@ -1365,7 +1371,7 @@ def _codex_note_completed(state, params, turn):
     status is not native success and never clears a known fact.
     """
     if not isinstance(turn, dict) or not _codex_turn_owner_ok(
-            state, params.get("threadId"), turn):
+            state, params.get("threadId", _CODEX_NO_OWNER), turn):
         return
     tid = turn.get("id")
     if not (isinstance(tid, str) and tid) or tid != state.get("turn_id"):
@@ -1410,7 +1416,7 @@ def apply_codex_event(state, event):
         _codex_note_thread(state, params.get("thread"))
     elif method == "turn/started":
         _codex_note_turn(state, params.get("turn"), active=True,
-                         owner=params.get("threadId"))
+                         owner=params.get("threadId", _CODEX_NO_OWNER))
     elif method == "turn/completed":
         _codex_note_completed(state, params, params.get("turn"))
     elif method in {"item/completed", "item/started"}:

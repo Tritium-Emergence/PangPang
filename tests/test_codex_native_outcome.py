@@ -117,6 +117,81 @@ class NativeOutcomeFoldTests(unittest.TestCase):
         self.assertIsNone(fresh.get("native_outcome"))
         self.assertEqual(fresh.get("result_seq", 0), 0)
 
+    def test_explicit_null_owner_is_malformed_not_absent(self):
+        # SPEC line 43: an omitted threadId is compatible; a supplied null is
+        # malformed and must leave the accepted turn state untouched.
+        malformed_starts = {
+            "started_outer_null": {
+                "method": "turn/started",
+                "params": {"threadId": None,
+                           "turn": {"id": "turn_bad", "status": "inProgress"}}},
+            "started_inner_null": {
+                "method": "turn/started",
+                "params": {"turn": {"id": "turn_bad", "threadId": None,
+                                    "status": "inProgress"}}},
+            "response_inner_null": {
+                "id": 9001,
+                "result": {"turn": {"id": "turn_bad", "threadId": None,
+                                    "status": "inProgress"}}},
+        }
+        for name, event in malformed_starts.items():
+            with self.subTest(name=name):
+                state = _state()
+                _start(state, "turn_A")
+                _complete(state, "turn_A", "failed")
+                outcome = dict(state["native_outcome"])
+                # The malformed start neither adopts turn_bad nor clears the
+                # recorded failure or advances the completion counter.
+                runner.apply_codex_event(state, event)
+                self.assertEqual(state["turn_id"], "turn_A")
+                self.assertEqual(state["native_outcome"], outcome)
+                self.assertEqual(state["result_seq"], 1)
+                self.assertFalse(state["turn_active"])
+                self.assertNotIn("turn_bad", state.get("turn_seen", set()))
+                # The unfamiliar completion is ignored, so the failure stands.
+                runner.apply_codex_event(state, {
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn_bad", "status": "completed"}}})
+                self.assertEqual(state["turn_id"], "turn_A")
+                self.assertEqual(state["native_outcome"], outcome)
+                self.assertEqual(state["result_seq"], 1)
+
+        # On a fresh state a supplied-null owner cannot adopt an identity.
+        for name, event in malformed_starts.items():
+            with self.subTest(name=name, fresh=True):
+                state = _state()
+                runner.apply_codex_event(state, event)
+                self.assertIsNone(state.get("turn_id"))
+                self.assertIsNone(state.get("native_outcome"))
+                self.assertEqual(state.get("result_seq", 0), 0)
+                self.assertFalse(state.get("turn_active", False))
+
+        # A completion with a supplied-null owner is equally inert.
+        for name, params in (
+                ("completed_outer_null", {
+                    "threadId": None,
+                    "turn": {"id": "turn_A", "status": "failed"}}),
+                ("completed_inner_null", {
+                    "turn": {"id": "turn_A", "threadId": None,
+                             "status": "failed"}})):
+            with self.subTest(name=name):
+                state = _state()
+                _start(state, "turn_A")
+                runner.apply_codex_event(state, {
+                    "method": "turn/completed", "params": params})
+                self.assertIsNone(state.get("native_outcome"))
+                self.assertEqual(state.get("result_seq", 0), 0)
+                self.assertTrue(state["turn_active"])
+
+        # Omitting the key remains compatible: the start response and events
+        # without any threadId still belong to the bound thread.
+        state = _state()
+        runner.apply_codex_event(state, {
+            "id": 11, "result": {"turn": {"id": "turn_1", "status": "inProgress"}}})
+        self.assertEqual(state["turn_id"], "turn_1")
+        _complete(state, "turn_1", "failed")
+        self.assertEqual(state["native_outcome"]["status"], "failed")
+
     def test_duplicate_completion_advances_once_and_failure_wins(self):
         state = _state()
         _start(state, "turn_1")
@@ -286,9 +361,12 @@ while True:
         turn_index += 1
         conf = turns[turn_index - 1] if turn_index - 1 < len(turns) else {}
         tid = conf.get("id", "turn_%d" % turn_index)
-        emit({"id": msg["id"], "result": {"turn": {"id": tid, "status": "inProgress"}}})
+        response_turn = {"id": tid, "status": "inProgress"}
+        if "response_inner_thread" in conf:
+            response_turn["threadId"] = conf["response_inner_thread"]
+        emit({"id": msg["id"], "result": {"turn": response_turn}})
         started = {"id": tid, "status": "inProgress"}
-        if conf.get("inner_thread"):
+        if "inner_thread" in conf:
             started["threadId"] = conf["inner_thread"]
         params = {"turn": started}
         params["threadId"] = conf.get("outer_thread", thread_id)
@@ -318,6 +396,8 @@ while True:
                 if index and conf.get("duplicate_status"):
                     terminal["status"] = conf["duplicate_status"]
                 emit({"method": "turn/completed", "params": cparams})
+        for raw in conf.get("after_events") or []:
+            emit(raw)
         mark("turn-%d" % turn_index, json.dumps({"turn": tid}))
         if conf.get("sleep") is not None:
             time.sleep(float(conf["sleep"]))
@@ -526,6 +606,48 @@ class NativeOutcomeSuperviseTests(_SuperviseBase):
         self.assertEqual(len(starts), 2)
         self.assertFalse(any(m.get("method") == "turn/interrupt"
                              for m in self.stdin_messages(marker)))
+
+    def test_malformed_null_owner_start_cannot_erase_failed_outcome(self):
+        # A valid turn fails; a start for `turn_bad` that supplies a null owner
+        # (outer, inner, or in the turn response) must not adopt the identity or
+        # clear the failure. Its completion must stay unfamiliar, so the run
+        # settles failed and the old final never reaches the dependency.
+        cases = {
+            "started_outer_null": {
+                "method": "turn/started",
+                "params": {"threadId": None,
+                           "turn": {"id": "turn_bad", "status": "inProgress"}}},
+            "started_inner_null": {
+                "method": "turn/started",
+                "params": {"turn": {"id": "turn_bad", "threadId": None,
+                                    "status": "inProgress"}}},
+            "response_inner_null": {
+                "id": 9001,
+                "result": {"turn": {"id": "turn_bad", "threadId": None,
+                                    "status": "inProgress"}}},
+        }
+        for name, event in cases.items():
+            with self.subTest(name=name):
+                marker = self.scenario([{
+                    "finals": ["EARLIER_FINAL"], "status": "failed",
+                    "write_artifact": "report.md",
+                    "after_events": [event, {
+                        "method": "turn/completed",
+                        "params": {"turn": {"id": "turn_bad",
+                                            "status": "completed"}}}]}])
+                task, sent, directory = self.prepare_task()
+                self.run_supervise(directory)
+                self.join()
+                receipt = self.settle(task, directory)
+                self._assert_failed_receipt(receipt, "codex_turn_failed")
+                self.assertEqual(receipt["native_outcome"]["turn_id"], "turn_1")
+                self.assertEqual(receipt["native_outcome"]["status"], "failed")
+                self.assertEqual(receipt["result_text"], "EARLIER_FINAL")
+                self._assert_failed_settlement(task, sent, receipt, "EARLIER_FINAL")
+                # The malformed start did not trigger a new outgoing turn.
+                starts = [m for m in self.stdin_messages(marker)
+                          if m.get("method") == "turn/start"]
+                self.assertEqual(len(starts), 1)
 
     def test_interrupted_exit_zero_is_failed_without_cancel(self):
         marker = self.scenario([{"status": "interrupted"}])
