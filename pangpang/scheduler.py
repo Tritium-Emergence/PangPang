@@ -1,8 +1,8 @@
 """TurnScheduler: the single authority that claims and runs model turns.
 
-Runs at model_max_concurrency=1 so behaviour stays serial (equivalent to
-the old runtime.step poll-min-pick); flips the concurrency number and
-adds priority-0 reservation / per-Bot caps / fairness aging. The scheduler owns:
+Runs up to model_max_concurrency turns at once (1 is the old serial
+runtime.step poll-min-pick) and adds priority-0 reservation / per-Bot caps /
+fairness aging. One Work still has at most one running turn. The scheduler owns:
   - the runnable filter (single authority for "may this turn run now")
   - the claim transaction (CAS status queued->running + boot_id + started_at)
   - priority/fairness ordering

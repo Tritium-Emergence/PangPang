@@ -126,6 +126,53 @@ class ConcurrencyPersistTests(unittest.TestCase):
             finally:
                 app.store.close()
 
+    def test_service_bot_cap_persists_and_omission_keeps_the_stored_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            app = Service(empty_config(), data)
+            try:
+                self._save(app, service_bot_max_active_turns=3)
+                status = app.onboarding.status()
+                self.assertEqual(status["service_bot_max_active_turns"], 3)
+                self.assertEqual(status["service_bot_max_active_turns_effective"], 4)
+                self.assertTrue(status["service_bot_concurrency_restart_required"])
+                stored = app.store.get("settings", "managed")["config"]
+                self.assertEqual(stored["scheduler"]["service_bot_max_active_turns"], 3)
+                # A later save that omits the field must not reset it.
+                self._save(app)
+                stored = app.store.get("settings", "managed")["config"]
+                self.assertEqual(stored["scheduler"]["service_bot_max_active_turns"], 3)
+            finally:
+                app.store.close()
+            app = Service(empty_config(), data)
+            try:
+                self.assertEqual(app.scheduler_config["service_bot_max_active_turns"], 3)
+                status = app.onboarding.status()
+                self.assertEqual(status["service_bot_max_active_turns"], 3)
+                self.assertEqual(status["service_bot_max_active_turns_effective"], 3)
+                self.assertFalse(status["service_bot_concurrency_restart_required"])
+            finally:
+                app.store.close()
+
+    def test_illegal_service_bot_cap_does_not_probe_or_persist(self):
+        from pangpang.pi_runtime import PiModel
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Service(empty_config(), Path(tmp) / "data")
+            try:
+                def boom(*args, **kwargs):
+                    raise AssertionError("probe must not run")
+                body = {"provider": "custom", "api": "openai-completions", "endpoint": "https://proxy.example/v1",
+                        "model": "qwen-32k", "secret": "setup-key", "context_window_tokens": 32000,
+                        "output_tokens": 8192}
+                with patch.object(PiModel, "complete", boom):
+                    for bad in (0, 17, True, "2", 1.5):
+                        with self.assertRaises(Fault) as caught:
+                            app.onboarding.model(dict(body, service_bot_max_active_turns=bad))
+                        self.assertEqual(caught.exception.code, "invalid_service_bot_max_active_turns")
+                self.assertNotIn("scheduler", app.config)
+            finally:
+                app.store.close()
+
     def test_illegal_concurrency_and_oversize_cap_do_not_probe_or_persist(self):
         from pangpang.pi_runtime import PiModel
         with tempfile.TemporaryDirectory() as tmp:

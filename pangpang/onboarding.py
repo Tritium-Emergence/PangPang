@@ -48,6 +48,20 @@ def apply_model_concurrency(candidate, value):
     candidate["scheduler"] = sched
     return candidate
 
+def apply_service_bot_cap(candidate, value):
+    """Persist the operator's service Bot active-turn cap.
+
+    An integer from 1 to 16; omitting the field elsewhere leaves the stored value
+    in place. This writes only that scheduler key. The caller validates the whole
+    scheduler candidate with Service._scheduler_config before committing.
+    """
+    if type(value) is not int or not 1 <= value <= 16:
+        raise Fault("invalid_service_bot_max_active_turns", 400)
+    sched = dict(candidate.get("scheduler") or {})
+    sched["service_bot_max_active_turns"] = value
+    candidate["scheduler"] = sched
+    return candidate
+
 # A 16x16 red PNG: proves a "supports images" model endpoint accepts image input.
 PROBE_PNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGO4o6FBEmIY1TCqYfhqAAAyBCwQhvh37QAAAABJRU5ErkJggg=="
 
@@ -137,9 +151,13 @@ class Onboarding:
 
     def status(self, bot_id=None):
         p = next(iter(self.s.profiles.values()))
-        stored_c = int((self.s.config.get("scheduler") or {}).get(
+        scheduler = self.s.config.get("scheduler") or {}
+        stored_c = int(scheduler.get(
             "model_max_concurrency", self.s.scheduler_config["model_max_concurrency"]))
         live_c = int(self.s.scheduler_config["model_max_concurrency"])
+        stored_s = int(scheduler.get(
+            "service_bot_max_active_turns", self.s.scheduler_config["service_bot_max_active_turns"]))
+        live_s = int(self.s.scheduler_config["service_bot_max_active_turns"])
         return {"model": {"endpoint": p.get("endpoint", ""), "model": p.get("model", ""), "vision": p.get("vision") is True,
                 "output_tokens": p.get("output_tokens"),
                 "context_window_tokens": p.get("context_window_tokens"),
@@ -148,6 +166,12 @@ class Onboarding:
                 "configured": bool(p.get("endpoint")), "has_secret": bool(p.get("credential_ref") and self.vault.has(p["credential_ref"]))},
                 "model_max_concurrency": stored_c,
                 "model_concurrency_restart_required": stored_c != live_c,
+                # Stored and effective service Bot caps are separate values: a save
+                # updates the former, the running scheduler keeps the latter until
+                # restart. Omitted fields never rewrite either.
+                "service_bot_max_active_turns": stored_s,
+                "service_bot_max_active_turns_effective": live_s,
+                "service_bot_concurrency_restart_required": stored_s != live_s,
                 "capabilities": self.s.effective_capabilities(bot_id),
                 "coordinator_env": coordinator_env.projection(self.vault),
                 "requests": self.store.find("setup_request", newest=True, limit=30),
@@ -161,6 +185,12 @@ class Onboarding:
         candidate, base = self.s.managed_snapshot()
         if body.get("model_max_concurrency") is not None:
             apply_model_concurrency(candidate, body.get("model_max_concurrency"))
+        if body.get("service_bot_max_active_turns") is not None:
+            apply_service_bot_cap(candidate, body.get("service_bot_max_active_turns"))
+        # Validate the complete scheduler candidate purely, before any probe or
+        # commit. An invalid candidate must not rewrite the live scheduler or
+        # reach managed settings.
+        self.s._scheduler_config(candidate)
         old = candidate["models"][0]
         old_ref = old.get("credential_ref")
         if body.get("secret") and body.get("no_auth"):

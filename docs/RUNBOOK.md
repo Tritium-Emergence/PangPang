@@ -15,7 +15,13 @@
 
 单 GPU / 单服务、长上下文 single-stream 更快的本地 Qwen，应使用 1 路对话，避免多个大上下文同时 prefill、争用 KV。在 Web 里打开 **设置全局对话模型**（或 **设置模型**），把 **同时进行的模型对话数** 设为 1–16 的整数后验证并保存。保存写入 managed settings 的 `scheduler.model_max_concurrency`。值为 1 时同时把 `reserved_user_slots` 记为 0，这样下次启动能通过校验；大于 1 时，若已存储的 `reserved_user_slots` 仍在合法范围内则保留，否则记为 1。不改其他 scheduler 键。当前进程仍用旧上限，重启协调器后新上限才生效。没有环境变量可以设置这个上限。
 
-managed 行存在之后，`main_bot_max_active_turns`、`main_bot_reserved_user_slots` 和 `service_bot_max_active_turns` 没有受支持的修改路径。
+### 服务 Bot 并发
+
+同一个服务 Bot 可以同时运行多个**不同 Work**；同一个 Work 仍然最多一个 running turn。缺省 `scheduler.service_bot_max_active_turns` 为 4。在 **设置全局对话模型**（或 **设置模型**）里把 **服务 Bot 同时进行的轮数** 填为 1–16 的整数后保存，或对 `POST /api/v1/setup/model` 传可选的 `service_bot_max_active_turns`。保存写入 managed settings；不传该字段不会覆盖旧值，非法值会被完整的 scheduler 校验拒绝。当前进程仍用旧上限，重启协调器后新上限才生效。状态投影回读 `service_bot_max_active_turns`（stored）、`service_bot_max_active_turns_effective` 与 `service_bot_concurrency_restart_required`。
+
+这不是取消全局模型上限或 main Bot 的 P0 预留：纯后台可同时运行的 turn 数仍受 `model_max_concurrency - reserved_user_slots` 限制，main Bot 也仍保留用户打断槽。
+
+managed 行存在之后，`main_bot_max_active_turns` 和 `main_bot_reserved_user_slots` 没有受支持的修改路径；`service_bot_max_active_turns` 通过上述模型设置保存流程修改。
 
 Executor 的 `max_concurrency`、workspace RW claim 和本地资源锁是另一套容量域，不能重新耦合到模型调度。
 
