@@ -2139,16 +2139,20 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                     actions = steer_actions(rows, confirmed, written, seen_interrupts)
             defer_resend = False
             admitted = False
+            admitted_seq = None
             for index, (kind, row) in enumerate(actions):
                 if stop.is_set():
                     break
                 if kind == "interrupt":
                     # An explicit interrupt keeps its existing resend rule. It
                     # is control driven and neither consumes nor refreshes the
-                    # automatic quota below.
+                    # automatic quota below. Sample the result seq before the
+                    # write: a result that lands during it is newer.
                     defer_resend = True
                     hold_injects = True
                     admitted = True
+                    with lock:
+                        admitted_seq = state.get("result_seq", 0)
                     if turn_active and isinstance(turn_id, str):
                         _codex_rpc(proc, "turn/interrupt", {
                             "threadId": thread_id, "turnId": turn_id,
@@ -2156,23 +2160,15 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                         request_id += 1
                     continue
                 uid = row["uuid"]
-                with lock:
-                    if uid in (state.get("confirmed") or ()):
-                        # Confirmed while selected: keep it written, send
-                        # nothing, and do not advance the idle-close counter.
-                        continue
-                    now_turn = state.get("turn_id")
-                    now_active = bool(state.get("turn_active"))
-                    # A new attempt for this UUID supersedes an older steer
-                    # association, whether or not it will be a steer.
-                    pending = state.get("codex_steer_pending")
-                    if isinstance(pending, dict):
-                        for old_id, owner in list(pending.items()):
-                            if owner == uid:
-                                pending.pop(old_id, None)
                 if defer_resend:
+                    # Deferred until the turn ends. A confirmation that landed
+                    # since selection wins: keep or restore written; the retry
+                    # quota is untouched either way.
                     with lock:
-                        written.discard(uid)
+                        if uid in (state.get("confirmed") or ()):
+                            written.add(uid)
+                        else:
+                            written.discard(uid)
                         pending = state.get("codex_steer_pending")
                         if isinstance(pending, dict):
                             for old_id, owner in list(pending.items()):
@@ -2180,13 +2176,29 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                                     pending.pop(old_id, None)
                     continue
                 user_input, _ = codex_turn_input(row["text"], uid)
-                if now_active and isinstance(now_turn, str):
-                    # Register before the frame: an immediate error must find
-                    # this id. The lock is released for the pipe write.
-                    with lock:
-                        pending = state.get("codex_steer_pending")
-                        if isinstance(pending, dict):
+                # One critical section: confirmed recheck, route and result
+                # seq snapshot, old association retirement, new registration.
+                # The pipe write happens after the lock is released.
+                with lock:
+                    if uid in (state.get("confirmed") or ()):
+                        # Confirmed while selected: keep it written, send
+                        # nothing, and do not advance the idle-close counter.
+                        continue
+                    now_turn = state.get("turn_id")
+                    now_active = bool(state.get("turn_active"))
+                    now_seq = state.get("result_seq", 0)
+                    # A new attempt for this UUID supersedes an older steer
+                    # association, whether or not it will be a steer.
+                    pending = state.get("codex_steer_pending")
+                    if isinstance(pending, dict):
+                        for old_id, owner in list(pending.items()):
+                            if owner == uid:
+                                pending.pop(old_id, None)
+                        if now_active and isinstance(now_turn, str):
+                            # Register before the frame: an immediate error
+                            # must find this id.
                             pending[request_id] = uid
+                if now_active and isinstance(now_turn, str):
                     _codex_rpc(proc, "turn/steer", {
                         "threadId": thread_id,
                         "expectedTurnId": now_turn,
@@ -2195,6 +2207,7 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                     }, request_id)
                     request_id += 1
                     admitted = True
+                    admitted_seq = now_seq
                     continue
                 _codex_rpc(proc, "turn/start", {
                     "threadId": thread_id,
@@ -2204,11 +2217,17 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                 request_id += 1
                 awaiting_turn = True
                 admitted = True
+                admitted_seq = now_seq
                 for later_kind, later_row in actions[index + 1:]:
                     if later_kind == "user" and isinstance(later_row, dict):
                         later_uid = later_row.get("uuid")
                         with lock:
-                            written.discard(later_uid)
+                            # Confirmation wins here too: restore written
+                            # rather than dropping an already confirmed UUID.
+                            if later_uid in (state.get("confirmed") or ()):
+                                written.add(later_uid)
+                            else:
+                                written.discard(later_uid)
                             pending = state.get("codex_steer_pending")
                             if isinstance(pending, dict):
                                 for old_id, owner in list(pending.items()):
@@ -2216,7 +2235,11 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                                         pending.pop(old_id, None)
                 break
             if admitted:
-                written_at_seq = seq
+                # The frame was admitted under this snapshot; a result older
+                # than it cannot close the pipe, but a completion that landed
+                # between the loop snapshot and this admission can.
+                if admitted_seq is not None:
+                    written_at_seq = admitted_seq
                 idle_since = None
             else:
                 due, idle_since = stream_idle_due(

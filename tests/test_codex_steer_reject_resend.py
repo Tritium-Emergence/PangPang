@@ -158,6 +158,19 @@ class SteerRejectFoldTests(unittest.TestCase):
         self.assertNotIn(UUID_A, state["codex_written"])
         self.assertEqual(state["codex_steer_retry_used"], {UUID_A})
 
+        # Pending id=1 must not be released by a bool or float that compares
+        # equal to 1: the match is an exact integer.
+        one = _session_state()
+        _register(one, 1, UUID_A)
+        for name, event in (("bool_true", {"id": True, "error": {}}),
+                            ("bool_false_zero", {"id": False, "error": {}}),
+                            ("float_one", {"id": 1.0, "error": {}})):
+            with self.subTest(name=name):
+                before = _snapshot(one)
+                runner.apply_codex_event(one, event)
+                self.assertEqual(_snapshot(one), before)
+        self.assertEqual(one["codex_steer_pending"], {1: UUID_A})
+
         # Another session's state and id never leak in.
         other = _session_state()
         _register(other, 9, UUID_B)
@@ -178,9 +191,17 @@ class SteerRejectFoldTests(unittest.TestCase):
         self.assertEqual(late["codex_steer_retry_used"], {UUID_A})
 
         # result + error is a rejection; its result is not folded into a turn.
+        # Complete the old turn first, so it is the early return - not the
+        # "current turn still active" guard - that keeps the simultaneous
+        # result from rewriting the finished turn.
         dual = _session_state()
+        runner.apply_codex_event(dual, {"method": "turn/completed", "params": {
+            "turn": {"id": TURN, "status": "completed"}}})
+        self.assertFalse(dual["turn_active"])
         before_turn = dual["turn_id"]
-        before_outcome = dual.get("native_outcome")
+        before_active = dual["turn_active"]
+        before_outcome = dict(dual["native_outcome"])
+        before_seq = dual["result_seq"]
         _register(dual, 8, UUID_A)
         runner.apply_codex_event(dual, {
             "id": 8,
@@ -189,6 +210,8 @@ class SteerRejectFoldTests(unittest.TestCase):
         self.assertNotIn(UUID_A, dual["codex_written"])
         self.assertEqual(dual["codex_steer_retry_used"], {UUID_A})
         self.assertEqual(dual["turn_id"], before_turn)
+        self.assertEqual(dual["turn_active"], before_active)
+        self.assertEqual(dual["result_seq"], before_seq)
         self.assertEqual(dual.get("native_outcome"), before_outcome)
         self.assertEqual(dual["codex_steer_pending"], {})
 
@@ -424,6 +447,26 @@ def _run_session(directory, protocol_factory, mailbox=(), *, cycles=8):
     return harness
 
 
+def _complete_turn_on_read(harness, protocol, nth):
+    """Wrap `read_steer_mailbox`: on read `nth`, fold the current turn's
+    completion under the real session lock, outside the session's lock."""
+    real_read = runner.read_steer_mailbox
+    reads = []
+
+    def read_then_complete(directory):
+        rows = real_read(directory)
+        reads.append(True)
+        if len(reads) == nth:
+            with harness.lock:
+                runner.apply_codex_event(harness.state, {
+                    "method": "turn/completed", "params": {
+                        "turn": {"id": protocol.current_turn,
+                                 "status": "completed"}}})
+        return rows
+
+    return read_then_complete, reads
+
+
 class SteerRejectSessionTests(unittest.TestCase):
     def test_confirmation_wins_across_reject_and_send_admission(self):
         # (a) confirm before the late reject: pending is retired, written kept.
@@ -507,6 +550,235 @@ class SteerRejectSessionTests(unittest.TestCase):
             self.assertIn(UUID_A, harness.state["codex_written"])
             self.assertEqual(harness.state["codex_steer_retry_used"], set())
 
+    def test_confirmation_at_admission_boundary_blocks_resend(self):
+        # The first steer is rejected. On the resend, the frame is constructed
+        # outside the lock but the pending id is not registered yet; a
+        # confirmation folded exactly there must be seen by the admission
+        # recheck, so no second frame is sent and written stays restored.
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "加一句")
+            harness = _SessionHarness(directory, None, cycles=8)
+            harness.responder = _SessionProtocol(harness, ["reject"])
+            real_input = runner.codex_turn_input
+            admissions = []
+
+            def input_then_confirm(text, message_id):
+                result = real_input(text, message_id)
+                if message_id == UUID_A:
+                    admissions.append(message_id)
+                    if len(admissions) == 2:
+                        with harness.lock:
+                            runner.apply_codex_event(
+                                harness.state, _confirm(UUID_A))
+                return result
+
+            with patch.object(runner, "codex_turn_input",
+                              new=input_then_confirm):
+                harness.start()
+                harness.join()
+
+            self.assertEqual(len(admissions), 2)
+            self.assertEqual(len(harness.frames_of("turn/steer")), 1)
+            self.assertIn(UUID_A, harness.state["confirmed"])
+            self.assertIn(UUID_A, harness.state["codex_written"])
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            self.assertEqual(harness.state["codex_steer_retry_used"], {UUID_A})
+
+    def test_resend_start_on_new_turn_is_not_closed_by_previous_completion(self):
+        # First steer is rejected. The next read observes turn_1/completed
+        # outside the lock (seq=1, turn inactive), so the resend is a
+        # same-thread turn/start for turn_2. Its admission must record seq=1:
+        # the older completion must not idle-close the still-active new turn.
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "加一句")
+            cycles = 10
+            harness = _SessionHarness(directory, None, cycles=cycles)
+            protocol = _SessionProtocol(harness, ["reject"])
+            harness.responder = protocol
+            read, reads = _complete_turn_on_read(harness, protocol, 2)
+
+            with patch.object(runner, "read_steer_mailbox", new=read):
+                with patch.object(runner, "STREAM_IDLE_CLOSE_S", 0.0):
+                    harness.start()
+                    harness.join()
+
+            self.assertGreaterEqual(len(reads), 3)
+            steers = harness.frames_of("turn/steer")
+            self.assertEqual(len(steers), 1)
+            starts = harness.frames_of("turn/start")
+            self.assertEqual(len(starts), 2)
+            self.assertEqual(starts[1]["params"]["clientUserMessageId"], UUID_A)
+            self.assertEqual(starts[1]["params"]["threadId"], THREAD)
+            self.assertNotIn("expectedTurnId", starts[1]["params"])
+            self.assertEqual(harness.state["result_seq"], 1)
+            self.assertEqual(harness.state["turn_id"], "turn_2")
+            self.assertTrue(harness.state["turn_active"])
+            # The session ran its full bounded budget instead of closing idle.
+            self.assertEqual(harness.stop.waits, cycles)
+            self.assertTrue(harness.stop.is_set())
+
+    def test_defer_and_later_action_discard_keep_confirmed_written(self):
+        # (a) An explicit interrupt defers an unconfirmed row. A confirmation
+        # folded during the interrupt write wins: written is kept.
+        class _DeferConfirmProtocol(_SessionProtocol):
+            def _interrupt(self, frame):
+                return [{"id": frame["id"], "result": {}},
+                        _confirm(UUID_A)]
+
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_interrupt(directory, "interrupt-1")
+            runner.append_inject(directory, UUID_A, "加一句")
+            harness = _SessionHarness(directory, None, cycles=8)
+            harness.responder = _DeferConfirmProtocol(harness)
+            harness.start()
+            harness.join()
+
+            self.assertEqual(len(harness.frames_of("turn/interrupt")), 1)
+            self.assertEqual(harness.frames_of("turn/steer"), [])
+            self.assertIn(UUID_A, harness.state["confirmed"])
+            self.assertIn(UUID_A, harness.state["codex_written"])
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            self.assertEqual(harness.state["codex_steer_retry_used"], set())
+
+        # (b) Two rows are selected and the first opens a turn/start. The
+        # later row is confirmed during that write; the post-start discard
+        # must restore it, not drop it.
+        class _LaterConfirmProtocol(_SessionProtocol):
+            def _turn_start(self, frame):
+                events = super()._turn_start(frame)
+                cid = (frame.get("params") or {}).get("clientUserMessageId")
+                if cid == UUID_A:
+                    events = events + [_confirm(UUID_B)]
+                return events
+
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "第一句")
+            runner.append_inject(directory, UUID_B, "第二句")
+            harness = _SessionHarness(directory, None, cycles=8)
+            protocol = _LaterConfirmProtocol(harness)
+            harness.responder = protocol
+            real_read = runner.read_steer_mailbox
+            reads = []
+            kept_at_next_read = []
+
+            def read_and_snapshot(path):
+                rows = real_read(path)
+                reads.append(True)
+                if len(reads) == 1:
+                    with harness.lock:
+                        runner.apply_codex_event(harness.state, {
+                            "method": "turn/completed", "params": {
+                                "turn": {"id": protocol.current_turn,
+                                         "status": "completed"}}})
+                elif len(reads) == 2:
+                    # Before this selection can re-add it, observe written as
+                    # the discard left it.
+                    with harness.lock:
+                        kept_at_next_read.append(
+                            UUID_B in harness.state["codex_written"])
+                return rows
+
+            with patch.object(runner, "read_steer_mailbox",
+                              new=read_and_snapshot):
+                harness.start()
+                harness.join()
+
+            self.assertEqual(kept_at_next_read, [True])
+            self.assertEqual(harness.frames_of("turn/steer"), [])
+            self.assertEqual(len(harness.frames_of("turn/start")), 2)
+            self.assertIn(UUID_B, harness.state["confirmed"])
+            self.assertIn(UUID_B, harness.state["codex_written"])
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            self.assertEqual(harness.state["codex_steer_retry_used"], set())
+
+    def test_write_failure_after_pending_registration_does_not_resend(self):
+        # The session registers the pending id before the frame. If the pipe
+        # write/flush then fails, that is not a provider reject: no resend, no
+        # confirmation, and the exiting session clears the pending map.
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "加一句")
+            harness = _SessionHarness(directory, None, cycles=8)
+            harness.responder = _SessionProtocol(harness)
+            real_write = harness.stdin.write
+            registered = []
+
+            def failing_write(data):
+                frame = json.loads(data.decode("utf-8"))
+                if frame.get("method") == "turn/steer":
+                    with harness.lock:
+                        registered.append(
+                            dict(harness.state["codex_steer_pending"]))
+                    raise BrokenPipeError("closed")
+                return real_write(data)
+
+            harness.stdin.write = failing_write
+            harness.start()
+            harness.join()
+
+            self.assertEqual(len(registered), 1)
+            self.assertEqual(list(registered[0].values()), [UUID_A])
+            self.assertEqual(harness.frames_of("turn/steer"), [])
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            self.assertEqual(harness.state["codex_steer_retry_used"], set())
+            self.assertEqual(harness.state["confirmed"], set())
+            self.assertIn(UUID_A, harness.state["codex_written"])
+            self.assertEqual(len(harness.frames_of("turn/start")), 1)
+
+    def test_prompt_and_inject_start_errors_do_not_consume_resend_quota(self):
+        # (a) The initial prompt's turn/start errors. It is not a steer
+        # response, so no association and no resend quota.
+        class _PromptErrorProtocol(_SessionProtocol):
+            def _turn_start(self, frame):
+                self.prompt_sent = True
+                return [{"id": frame["id"],
+                         "error": {"code": -32000, "message": "no"}}]
+
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            harness = _SessionHarness(directory, None, cycles=3)
+            harness.responder = _PromptErrorProtocol(harness)
+            harness.start()
+            harness.join()
+
+            self.assertEqual(len(harness.frames_of("turn/start")), 1)
+            self.assertEqual(harness.frames_of("turn/steer"), [])
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            self.assertEqual(harness.state["codex_steer_retry_used"], set())
+
+        # (b) The inject's own turn/start (turn already completed) errors. It
+        # is outside this repair's association: no quota, no automatic retry.
+        class _RejectingInjectStartProtocol(_SessionProtocol):
+            def _turn_start(self, frame):
+                params = frame.get("params") or {}
+                if (not self.prompt_sent
+                        and params.get("clientUserMessageId") == self.prompt_uuid):
+                    return super()._turn_start(frame)
+                return [{"id": frame["id"],
+                         "error": {"code": -32000, "message": "start rejected"}}]
+
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "加一句")
+            harness = _SessionHarness(directory, None, cycles=6)
+            protocol = _RejectingInjectStartProtocol(harness)
+            harness.responder = protocol
+            read, _ = _complete_turn_on_read(harness, protocol, 1)
+
+            with patch.object(runner, "read_steer_mailbox", new=read):
+                harness.start()
+                harness.join()
+
+            self.assertEqual(len(harness.frames_of("turn/start")), 2)
+            self.assertEqual(harness.frames_of("turn/steer"), [])
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            self.assertEqual(harness.state["codex_steer_retry_used"], set())
+            self.assertIn(UUID_A, harness.state["codex_written"])
+
     def test_pending_precedes_immediate_response_and_retry_is_bounded(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -539,72 +811,76 @@ class SteerRejectSessionTests(unittest.TestCase):
         self.assertEqual(len(harness.frames_of("turn/start")), 1)
 
     def test_interrupt_and_new_attempt_retire_old_ids_without_refilling_retry(self):
-        # A same-UUID new attempt (steer or start) retires the old association.
-        state = _session_state()
-        _register(state, 4, UUID_A)
-        state["codex_steer_pending"].pop(4)
-        _register(state, 5, UUID_A)
-        runner.apply_codex_event(state, _reject(4))
-        self.assertIn(UUID_A, state["codex_written"])
-        self.assertEqual(state["codex_steer_retry_used"], set())
-        self.assertEqual(state["codex_steer_pending"], {5: UUID_A})
-        runner.apply_codex_event(state, _reject(5))
-        self.assertNotIn(UUID_A, state["codex_written"])
-        self.assertEqual(state["codex_steer_retry_used"], {UUID_A})
-
-        # Explicit interrupt: its defer branch discards written and retires the
-        # steer association. A late error for that steer neither discards again
-        # nor consumes the automatic quota.
-        class _InterruptProtocol(_SessionProtocol):
-            def __init__(self, harness):
-                super().__init__(harness, ["silent"], echo_starts=True,
-                                 complete_starts=True)
-                self.first_steer_id = None
-                self.old_error_emitted = False
+        # A real session consumes the one automatic resend first: steer #1 is
+        # rejected, steer #2 stays pending. An explicit interrupt then retires
+        # that pending association and defers the row. The deferred row is
+        # resent as a same-thread turn/start; the old steer's late error
+        # arrives at the new attempt and is stale. The quota is not refreshed.
+        class _RetireProtocol(_SessionProtocol):
+            def __init__(self, harness, directory):
+                super().__init__(harness)
+                self.directory = directory
+                self.second_steer_id = None
+                self.pending_at_resend = None
+                self.late_error_sent = False
 
             def _steer(self, frame):
                 self.steer_count += 1
                 self.steer_ids.append(frame["id"])
-                self.first_steer_id = frame["id"]
+                if self.steer_count == 1:
+                    return [_reject(frame["id"], "first reject")]
+                self.second_steer_id = frame["id"]
+                # The explicit interrupt is appended while this steer is
+                # pending, so the next mailbox read defers it.
+                runner.append_interrupt(self.directory, "interrupt-1")
                 return []
 
             def _interrupt(self, frame):
-                # Completion releases hold_injects; the steer error is held
-                # until the deferred turn/start, after the retire.
+                # Completing the turn releases hold_injects; the old steer
+                # response is withheld until the new attempt.
                 return [{"id": frame["id"], "result": {}}, self._completion()]
 
             def _turn_start(self, frame):
                 if not self.prompt_sent:
                     return super()._turn_start(frame)
                 events = []
-                if self.first_steer_id is not None and not self.old_error_emitted:
-                    self.old_error_emitted = True
-                    events.append(_reject(self.first_steer_id, "late reject"))
+                if (self.second_steer_id is not None
+                        and not self.late_error_sent):
+                    self.late_error_sent = True
+                    # Real session state: the interrupt and the new attempt
+                    # must already have retired the pending association.
+                    self.pending_at_resend = dict(
+                        self.h.state.get("codex_steer_pending") or {})
+                    events.append(_reject(self.second_steer_id, "late reject"))
                 events.extend(super()._turn_start(frame))
                 return events
 
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             runner.append_inject(directory, UUID_A, "加一句")
-            runner.append_interrupt(directory, "interrupt-1")
             harness = _SessionHarness(directory, None, cycles=12)
-            protocol = _InterruptProtocol(harness)
+            protocol = _RetireProtocol(harness, directory)
             harness.responder = protocol
             harness.start()
             harness.join()
 
-        # Only the original explicit steer; the delayed error was stale. The
-        # deferred row may be resent by the existing interrupt rule as a
-        # turn/start, which is control driven and not the automatic quota.
-        self.assertEqual(len(harness.frames_of("turn/steer")), 1)
+        steers = harness.frames_of("turn/steer")
+        self.assertEqual(len(steers), 2)
+        self.assertNotEqual(steers[0]["id"], steers[1]["id"])
         starts = [frame for frame in harness.frames_of("turn/start")
                   if (frame.get("params") or {}).get("clientUserMessageId") == UUID_A]
         self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["params"]["threadId"], THREAD)
+        self.assertNotIn("expectedTurnId", starts[0]["params"])
         self.assertEqual(harness.frames_of("turn/interrupt")[0]["params"]["turnId"],
                          "turn_1")
-        self.assertEqual(harness.state["codex_steer_retry_used"], set())
+        # The interrupt retired the pending steer before the new attempt.
+        self.assertEqual(protocol.pending_at_resend, {})
+        self.assertTrue(protocol.late_error_sent)
+        # The late error is stale: no new quota, no third automatic send.
+        self.assertEqual(harness.state["codex_steer_retry_used"], {UUID_A})
         self.assertEqual(harness.state["codex_steer_pending"], {})
-        self.assertIn(UUID_A, harness.state["confirmed"])
+        self.assertEqual(harness.state["confirmed"], set())
         self.assertIn(UUID_A, harness.state["codex_written"])
 
 
