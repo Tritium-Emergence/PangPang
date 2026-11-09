@@ -108,9 +108,11 @@ class ConcurrencyTests(unittest.TestCase):
 
         class BarrierModel:
             def complete(self, profile, messages, tools):
+                # Count only after the barrier trips so a serial pool that
+                # breaks the barrier cannot inflate success.
+                barrier.wait() # all n must arrive together or this times out
                 with lock:
                     reached.append(1)
-                barrier.wait() # all n must arrive together or this times out
                 return {'content': '完成'}, {}
 
         bots = [self.app.create_bot({'name': f'W{i}', 'role': 'r'}) for i in range(n)]
@@ -122,17 +124,20 @@ class ConcurrencyTests(unittest.TestCase):
         import concurrent.futures
         sched._pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         try:
+            claimed = []
             for _ in range(n):
                 t = sched.claim_one()
                 self.assertIsNotNone(t)
+                claimed.append(t)
                 sched._submit(t)
-            # wait for all to finish
-            deadline = time.time() + 8
-            while time.time() < deadline and len(reached) < n:
-                time.sleep(0.05)
-            self.assertEqual(len(reached), n) # all reached the barrier concurrently
-        finally:
             sched._pool.shutdown(wait=True)
+            self.assertFalse(barrier.broken)
+            self.assertEqual(len(reached), n) # all crossed the barrier concurrently
+            self.assertEqual([self.app.store.get('turn', t['id'])['status'] for t in claimed],
+                             ['done'] * n)
+        finally:
+            if sched._pool is not None:
+                sched._pool.shutdown(wait=True)
 
     def test_same_service_bot_different_works_reach_barrier(self):
         # The point of the B1 default: one service Bot, three different Works,
@@ -144,9 +149,11 @@ class ConcurrencyTests(unittest.TestCase):
 
         class BarrierModel:
             def complete(self, profile, messages, tools):
+                # Count only after the barrier trips so a serial pool that
+                # breaks the barrier cannot inflate success.
+                barrier.wait() # all n must arrive together or this times out
                 with lock:
                     reached.append(1)
-                barrier.wait() # all n must arrive together or this times out
                 return {'content': '完成'}, {}
 
         bot = self.app.create_bot({'name': 'svc', 'role': 'r'})
@@ -166,12 +173,14 @@ class ConcurrencyTests(unittest.TestCase):
             self.assertEqual(len({t['work_id'] for t in claimed}), n)
             for t in claimed:
                 sched._submit(t)
-            deadline = time.time() + 8
-            while time.time() < deadline and len(reached) < n:
-                time.sleep(0.05)
-            self.assertEqual(len(reached), n)
-        finally:
             sched._pool.shutdown(wait=True)
+            self.assertFalse(barrier.broken)
+            self.assertEqual(len(reached), n)
+            self.assertEqual([self.app.store.get('turn', t['id'])['status'] for t in claimed],
+                             ['done'] * n)
+        finally:
+            if sched._pool is not None:
+                sched._pool.shutdown(wait=True)
 
     def test_shared_bot_state_patch_rejects_a_stale_revision(self):
         # Parallel Works share one Bot state; the CAS, not a lock, is the guard.
