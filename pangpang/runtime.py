@@ -745,7 +745,7 @@ class Runtime:
 
         store.once wraps every other tool. Inject is process I/O, so it follows
         the web_search shape: do the work, then journal_once. The uuid is derived
-        from the call id; a replay hits once_lookup and does not append again.
+        from (turn id, call id); a replay hits once_lookup and does not append again.
         """
         scope = "tool:" + turn["id"]
         injecting = (name == "send_bot_message" and isinstance(body.get("dep_id"), str)
@@ -784,7 +784,7 @@ class Runtime:
         from .service import inject_message_uuid
         result = self.service.inject_task_message(
             turn["bot_id"], turn["work_id"], body, turn_id=turn["id"],
-            message_uuid=inject_message_uuid(call["id"]))
+            message_uuid=inject_message_uuid(call["id"], turn["id"]))
         return self.store.journal_once(scope, call["id"], call, result)
 
     def invoke(self, turn, name, body):
