@@ -1014,6 +1014,19 @@ def _json_object(line):
     return value if isinstance(value, dict) else None
 
 
+# A Claude result frame reports its own terminal fact. Only these exact
+# subtypes are failures; an unknown future subtype alone is neither success nor
+# failure. `is_error is True` alone is enough, and one fixed short ASCII code
+# keeps provider free text, secrets, and the prompt out of the receipt.
+_CLAUDE_ERROR_SUBTYPES = frozenset({
+    "error_during_execution",
+    "error_max_turns",
+    "error_max_budget_usd",
+    "error_max_structured_output_retries",
+})
+_CLAUDE_RESULT_ERROR = "claude_result_error"
+
+
 def apply_stream_event(state, event):
     """Fold one stdout event into the running extraction.
 
@@ -1025,6 +1038,14 @@ def apply_stream_event(state, event):
     is not delivery; an interrupt with `cancel_queued` can still drop it.
     A permission `control_request` is ignored: claude-stream-json does not
     declare `permission_bridge`, so this channel does not approve tools.
+
+    A `result` also reports the native outcome for this execution: a boolean
+    `is_error` true or one of the exact error subtypes is `failed`;
+    `subtype=success` is `completed`; any other result clears the outcome.
+    The latest result wins in both directions (no sticky failure), and
+    non-result events leave it untouched. Identity is this frame's nonempty
+    string `session_id` only: Claude has no thread or turn id, and result_seq
+    is a local idle-close counter, not a native turn.
     """
     if not isinstance(event, dict):
         return
@@ -1046,6 +1067,29 @@ def apply_stream_event(state, event):
     for item in uuids:
         if isinstance(item, str) and item:
             confirmed.add(item)
+    subtype = event.get("subtype")
+    # The boolean identity matters: 1, "true", or any truthy object is not a
+    # protocol failure. A recognized subtype fails even without the flag.
+    if event.get("is_error") is True or (
+            isinstance(subtype, str) and subtype in _CLAUDE_ERROR_SUBTYPES):
+        status = "failed"
+    elif subtype == "success":
+        status = "completed"
+    else:
+        status = None
+    session_id = event.get("session_id")
+    if not (isinstance(session_id, str) and session_id):
+        session_id = None
+    if status is None:
+        # Latest result wins: an unrecognized result clears a previous fact and
+        # falls back to the existing process-exit path.
+        state["native_outcome"] = None
+    else:
+        state["native_outcome"] = {
+            "status": status,
+            "error": _CLAUDE_RESULT_ERROR if status == "failed" else None,
+            "session_id": session_id,
+        }
 
 
 def summarize_stream(blob):
@@ -3060,8 +3104,9 @@ def supervise(directory):
         # (4) Required outputs — the HARD deliverable contract (distinct from the
         # soft `outputs` hint above, which NEVER gates). Evidence only; never flips
         # receipt.status (raw execution fact is reduced from process exit, timeout,
-        # control-plane cancel, and the current Codex native turn outcome). The
-        # control plane (Service.complete_task) adjudicates business success.
+        # control-plane cancel, and the current native outcome of Codex app-server
+        # or Claude stream-json). The control plane (Service.complete_task)
+        # adjudicates business success.
         required_results = verify_required_outputs(spec.get("required_outputs", []), output_dir, roots)
         archive_artifacts(directory, artifacts, roots, execution_id)
         native_outcome = None
@@ -3096,7 +3141,7 @@ def supervise(directory):
             with stream_lock:
                 confirmed_ids = set(stream_state["confirmed"])
                 result_text = stream_state.get("result_text")
-                if session_protocol == CODEX_APP_SERVER:
+                if session_protocol in (CODEX_APP_SERVER, CLAUDE_STREAM_JSON):
                     # Snapshot under the same lock the reader folds events with.
                     # This is a supplementary execution fact, not a new entity.
                     outcome = stream_state.get("native_outcome")
@@ -3126,11 +3171,12 @@ def supervise(directory):
                                   for row in steer_rows]
         # Reduce the raw execution fact. Priority is unchanged for the
         # higher-level causes: control-plane cancel, then timeout or a non-zero
-        # process exit. Only then does the current native turn outcome count:
-        # failed/interrupted with exit 0 is still failed. An unknown or absent
-        # native outcome leaves the legacy process-only path. `exit_code` always
-        # keeps the real process value. The finally block's cleanup proof may
-        # still override this with unknown; a native failure is not a stop proof.
+        # process exit. Only then does the current protocol native outcome count
+        # (Codex turn or Claude result): failed with exit 0 is still failed. An
+        # unknown or absent native outcome leaves the legacy process-only path.
+        # `exit_code` always keeps the real process value. The finally block's
+        # cleanup proof may still override this with unknown; a native failure is
+        # not a stop proof.
         native_status = native_outcome.get("status") if native_outcome else None
         native_failed = native_status in ("failed", "interrupted")
         if cancelled:
@@ -3148,8 +3194,9 @@ def supervise(directory):
         if native_outcome is not None:
             receipt["native_outcome"] = native_outcome
         if native_failed and status == "failed" and not (timed_out or proc.returncode):
-            # Fixed short code only. Provider free text stays in the operator log.
-            receipt["error"] = _CODEX_TERMINAL_ERROR[native_status]
+            # Fixed short code only, built by the protocol fold. Provider free
+            # text stays in the operator log. Codex's two codes are unchanged.
+            receipt["error"] = native_outcome.get("error")
     except Exception as error:
         # Avoid propagating command output or credentials into diagnostic data.
         receipt.update(status="failed" if confirmed else "unknown", error=type(error).__name__ + ":" + str(error)[:200])
