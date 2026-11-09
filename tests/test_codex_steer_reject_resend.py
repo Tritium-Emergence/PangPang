@@ -619,6 +619,97 @@ class SteerRejectSessionTests(unittest.TestCase):
             self.assertEqual(harness.stop.waits, cycles)
             self.assertTrue(harness.stop.is_set())
 
+    def test_interrupt_after_completion_in_mailbox_read_idles_without_noop(self):
+        # Reject -> resend confirm. On the next mailbox read, fold turn_1
+        # completed under the real session lock and surface an explicit
+        # interrupt. Admission must see the finished turn: no interrupt RPC,
+        # no written_at_seq advance from that no-op, autonomous idle-close.
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "加一句")
+            cycles = 10
+            harness = _SessionHarness(directory, None, cycles=cycles)
+            protocol = _SessionProtocol(harness, ["reject", "confirm"])
+            harness.responder = protocol
+            real_read = runner.read_steer_mailbox
+            reads = []
+            folded = []
+
+            def read_complete_then_interrupt(path):
+                rows = real_read(path)
+                reads.append(True)
+                # After the confirmed resend, the next read observes completion
+                # and the explicit interrupt in the same selection.
+                if protocol.steer_count >= 2 and not folded:
+                    folded.append(True)
+                    with harness.lock:
+                        runner.apply_codex_event(harness.state, {
+                            "method": "turn/completed", "params": {
+                                "turn": {"id": protocol.current_turn,
+                                         "status": "completed"}}})
+                    runner.append_interrupt(directory, "interrupt-1")
+                    rows = real_read(path)
+                return rows
+
+            with patch.object(runner, "read_steer_mailbox",
+                              new=read_complete_then_interrupt):
+                with patch.object(runner, "STREAM_IDLE_CLOSE_S", 0.0):
+                    harness.start()
+                    harness.join()
+
+            self.assertTrue(folded, "completion never folded during mailbox read")
+            self.assertEqual(len(harness.frames_of("turn/steer")), 2)
+            self.assertEqual(harness.frames_of("turn/interrupt"), [])
+            self.assertFalse(harness.state.get("turn_active"))
+            self.assertIn(UUID_A, harness.state["confirmed"])
+            self.assertEqual(harness.state["codex_steer_retry_used"], {UUID_A})
+            self.assertEqual(harness.state["codex_steer_pending"], {})
+            # Autonomous idle-close: budget stop never trips.
+            self.assertLess(harness.stop.waits, cycles)
+            self.assertFalse(harness.stop.is_set())
+
+        # Control: completion arrives during the interrupt write. The frame is
+        # still sent (turn was active at admission); idle-close still works
+        # because written_at_seq is the pre-completion admission seq.
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            runner.append_inject(directory, UUID_A, "加一句")
+            cycles = 10
+            harness = _SessionHarness(directory, None, cycles=cycles)
+
+            class _CompleteDuringInterrupt(_SessionProtocol):
+                def _interrupt(self, frame):
+                    return [{"id": frame["id"], "result": {}},
+                            self._completion()]
+
+            protocol = _CompleteDuringInterrupt(harness, ["reject", "confirm"])
+            harness.responder = protocol
+            real_read = runner.read_steer_mailbox
+            armed = []
+
+            def read_then_arm_interrupt(path):
+                rows = real_read(path)
+                if protocol.steer_count >= 2 and not armed:
+                    armed.append(True)
+                    runner.append_interrupt(directory, "interrupt-1")
+                    rows = real_read(path)
+                return rows
+
+            with patch.object(runner, "read_steer_mailbox",
+                              new=read_then_arm_interrupt):
+                with patch.object(runner, "STREAM_IDLE_CLOSE_S", 0.0):
+                    harness.start()
+                    harness.join()
+
+            self.assertTrue(armed, "interrupt never armed after confirm")
+            self.assertEqual(len(harness.frames_of("turn/steer")), 2)
+            self.assertEqual(len(harness.frames_of("turn/interrupt")), 1)
+            self.assertFalse(harness.state.get("turn_active"))
+            self.assertIn(UUID_A, harness.state["confirmed"])
+            self.assertEqual(harness.state["codex_steer_retry_used"], {UUID_A})
+            self.assertLess(harness.stop.waits, cycles)
+            self.assertFalse(harness.stop.is_set())
+
     def test_defer_and_later_action_discard_keep_confirmed_written(self):
         # (a) An explicit interrupt defers an unconfirmed row. A confirmation
         # folded during the interrupt write wins: written is kept.

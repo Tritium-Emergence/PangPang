@@ -2146,18 +2146,23 @@ def codex_app_server_session(proc, directory, spec, prompt, state, lock, stop):
                 if kind == "interrupt":
                     # An explicit interrupt keeps its existing resend rule. It
                     # is control driven and neither consumes nor refreshes the
-                    # automatic quota below. Sample the result seq before the
-                    # write: a result that lands during it is newer.
+                    # automatic quota below. Sample turn route/active and seq
+                    # under one lock: a completion that landed since the loop
+                    # top must not send against a finished turn or advance the
+                    # idle baseline for a no-op.
                     defer_resend = True
                     hold_injects = True
-                    admitted = True
                     with lock:
-                        admitted_seq = state.get("result_seq", 0)
-                    if turn_active and isinstance(turn_id, str):
+                        now_turn = state.get("turn_id")
+                        now_active = bool(state.get("turn_active"))
+                        now_seq = state.get("result_seq", 0)
+                    if now_active and isinstance(now_turn, str):
                         _codex_rpc(proc, "turn/interrupt", {
-                            "threadId": thread_id, "turnId": turn_id,
+                            "threadId": thread_id, "turnId": now_turn,
                         }, request_id)
                         request_id += 1
+                        admitted = True
+                        admitted_seq = now_seq
                     continue
                 uid = row["uuid"]
                 if defer_resend:
