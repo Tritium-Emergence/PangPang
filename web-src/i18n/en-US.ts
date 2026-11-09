@@ -41,6 +41,7 @@ export default {
     host_no_workspace: 'This device has no executor working directory configured; cannot browse.',
     invalid_upload: 'Invalid file content.',
     invalid_max_concurrency: 'Concurrency must be 1–16.',
+    invalid_service_bot_max_active_turns: 'Service Bot turn cap must be 1–16.',
     invalid_timeout: 'Timeout must be 30–86400 seconds.',
     invalid_priority: 'Priority must be 1–999, or left blank.',
     installation_busy: 'The executor is still working. Wait for the current task to finish before changing it.',
@@ -213,6 +214,12 @@ export default {
     concurrency: 'Simultaneous model conversations',
 
     concurrencyRestart: 'Concurrency is saved. Restart the coordinator before it runs at the new limit.',
+
+    serviceConcurrency: 'Service Bot simultaneous turns',
+
+    serviceConcurrencyHint: 'How many different Works one service Bot may run at once. The same Work still has only one running turn. Restart the coordinator to apply a saved change.',
+
+    serviceConcurrencyRestart: 'Service Bot turn cap is saved. Restart the coordinator before it runs at the new limit.',
 
     statusBar: 'Status',
 

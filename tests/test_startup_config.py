@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pangpang.onboarding import apply_model_concurrency, empty_config
+from pangpang.onboarding import apply_model_concurrency, apply_service_bot_cap, empty_config
 from pangpang.service import Service
 
 
@@ -51,6 +51,7 @@ class StartupConfigTests(unittest.TestCase):
         try:
             self.assertEqual(app.config["turn_budget"], 3)
             self.assertEqual(app.config["delegation_budget"], 2)
+            self.assertEqual(app.scheduler_config["service_bot_max_active_turns"], 4)
             self.assertEqual(app.semantic_gate.mode, "shadow")
             self.assertFalse(app.semantic_gate.continuation_routing)
             self.assertEqual(self._ignored(), [])
@@ -88,6 +89,23 @@ class StartupConfigTests(unittest.TestCase):
             candidate = copy.deepcopy(app2.config)
             apply_model_concurrency(candidate, 2)
             self.assertEqual(candidate["scheduler"]["model_max_concurrency"], 2)
+            apply_service_bot_cap(candidate, 3)
+            self.assertEqual(candidate["scheduler"]["service_bot_max_active_turns"], 3)
+        finally:
+            app2.store.close()
+
+    def test_explicit_stored_service_cap_survives_the_new_default(self):
+        first = empty_config()
+        first["scheduler"] = {"service_bot_max_active_turns": 1}
+        app = Service(first, self.data)
+        try:
+            app.commit_managed_config(copy.deepcopy(app.config))
+        finally:
+            app.store.close()
+        second = empty_config() # no scheduler: the new default is 4
+        app2 = Service(second, self.data)
+        try:
+            self.assertEqual(app2.scheduler_config["service_bot_max_active_turns"], 1)
         finally:
             app2.store.close()
 

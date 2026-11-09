@@ -231,12 +231,14 @@ PangPang 能操作真实文件和真实机器。因此，比起展示“完全�
 
 在 Web 里设置：打开 **设置全局对话模型**（或 **设置模型**），把 **同时进行的模型对话数** 填为 1–16 的整数后保存。保存会把 `scheduler.model_max_concurrency` 写入 managed 行。值为 1 时同时把 `reserved_user_slots` 记为 0，这样下次启动能通过校验。大于 1 时，若已存储的 `reserved_user_slots` 仍在合法范围内则保留，否则记为 1。不改其他 scheduler 键。重启协调器后新上限才生效。没有环境变量可以设置这个上限。
 
+同一个服务 Bot 可以同时运行多个不同的 Work。在同一个弹窗里把 **服务 Bot 同时进行的轮数** 填为 1–16 的整数（或对 `POST /api/v1/setup/model` 传可选的 `service_bot_max_active_turns`），保存会把 `scheduler.service_bot_max_active_turns` 写入 managed 行，缺省为 4。不传该字段不会覆盖已存值。保存前会用完整 scheduler 校验候选配置，非法值直接拒绝。重启协调器后新上限才生效；状态投影会回读 stored、effective 和是否需要重启。这只放开不同 Work：同一个 Work 仍然最多一个 running turn，全局模型上限和 main Bot 的 P0 预留也仍然生效。
+
 ### 每台电脑的任务限额
 
 在 **我的电脑** 里，可为每台主机设置任务并行数（`max_concurrency`，1–16）与默认任务超时（`timeout_s`，30–86400 秒）。留空表示沿用原规则：执行器 `max_concurrency` 默认来自目录里的 `1`，任务缺省超时应回落到 **3600** 秒。旧示例里未接线的 `parallel` 在保存前视作同一并行旋钮。改限额不会作废执行器授权。`submit_task.timeout_s` 可只覆盖单次派发。
 
 
-managed 行存在之后，`main_bot_max_active_turns`、`main_bot_reserved_user_slots` 和 `service_bot_max_active_turns` 没有受支持的修改路径。
+managed 行存在之后，`main_bot_max_active_turns` 和 `main_bot_reserved_user_slots` 没有受支持的修改路径。`service_bot_max_active_turns` 通过上面的模型设置保存流程修改，不靠编辑启动文件或数据库。
 
 Executor 的 `max_concurrency`、workspace RW claim 和本地资源锁是另一套容量域，模型容量不能重新耦合到执行器资源锁。
 

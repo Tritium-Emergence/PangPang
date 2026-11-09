@@ -28,6 +28,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
   const [outputTokens, setOutputTokens] = useState(String(model.output_tokens || DEFAULT_OUTPUT_TOKENS));
   const [contextWindow, setContextWindow] = useState(model.context_window_tokens ? String(model.context_window_tokens) : '');
   const [concurrency, setConcurrency] = useState(String(store.snapshot!.setup.model_max_concurrency || 4));
+  const [serviceCap, setServiceCap] = useState(String(store.snapshot!.setup.service_bot_max_active_turns || 4));
   type CatalogModel = {api: string; baseUrl: string; name: string; reasoning: boolean; maxTokens: number; contextWindow: number; output_floor: number; output_ceiling: number; thinkingLevelMap?: Record<string, string | null>};
   type CustomBounds = {output_floor: number; output_ceiling: number; fitted_output: number};
   const [catalog, setCatalog] = useState<Record<string, Record<string, CatalogModel>>>({});
@@ -82,7 +83,7 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
       <form id="settings-form" onSubmit={async (e) => {
         e.preventDefault(); setSaving(true); setError(t('setup.validatingToolCalls'));
         const s = secret; setSecret('');
-        try { const r = await api<any>('setup/model', {endpoint, model: name, secret: s, no_auth: noAuth, vision, provider, api: protocol, reasoning_level: reasoning, thinking_format: format, thinking_budget_field: budgetField, thinking_budget: budget ? Number(budget): null, max_tokens_field: tokenField, output_tokens: outputTokens ? Number(outputTokens): null, context_window_tokens: provider === 'custom' && contextWindow ? Number(contextWindow): null, model_max_concurrency: concurrency ? Number(concurrency): null, keep_generation_settings: keepLegacy}); onClose(); await store.refresh(); if (r?.vision_unverified) store.setNotice(t('setup.visionDisabled')); }
+        try { const r = await api<any>('setup/model', {endpoint, model: name, secret: s, no_auth: noAuth, vision, provider, api: protocol, reasoning_level: reasoning, thinking_format: format, thinking_budget_field: budgetField, thinking_budget: budget ? Number(budget): null, max_tokens_field: tokenField, output_tokens: outputTokens ? Number(outputTokens): null, context_window_tokens: provider === 'custom' && contextWindow ? Number(contextWindow): null, model_max_concurrency: concurrency ? Number(concurrency): null, service_bot_max_active_turns: serviceCap ? Number(serviceCap): null, keep_generation_settings: keepLegacy}); onClose(); await store.refresh(); if (r?.vision_unverified) store.setNotice(t('setup.visionDisabled')); }
         catch (err: any) { setError(friendlyError(err) || t('setup.saveFailed')); } finally { setSaving(false); }
       }}>
         <h2 className="text-lg font-semibold">{t('setup.modelDialogTitle')}</h2>
@@ -110,6 +111,9 @@ export function SettingsDialog({store, onClose}: {store: Store; onClose: () => v
         <p className="mt-1 text-xs text-muted">{t('setup.outputCapHint', {min: outputMin})}</p>
         <label className="mt-2 block text-sm">{t('setup.concurrency')}<input id="model-concurrency" type="number" required min={1} max={16} step="1" value={concurrency} onChange={e => setConcurrency(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         {store.snapshot?.setup.model_concurrency_restart_required ? <p className="mt-1 text-xs text-warn">{t('setup.concurrencyRestart')}</p>: null}
+        <label className="mt-2 block text-sm">{t('setup.serviceConcurrency')}<input id="service-concurrency" type="number" min={1} max={16} step="1" value={serviceCap} onChange={e => setServiceCap(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
+        <p className="mt-1 text-xs text-muted">{t('setup.serviceConcurrencyHint')}</p>
+        {store.snapshot?.setup.service_bot_concurrency_restart_required ? <p className="mt-1 text-xs text-warn">{t('setup.serviceConcurrencyRestart')}</p>: null}
         <label className="mt-2 block text-sm">{t('setup.reasoningLevel')}<select id="model-reasoning" value={reasoning} onChange={e => setReasoning(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5">
           {levels.map(level => <option key={level} value={level}>{level === 'default' ? t('setup.reasoningDefault'): level === 'off' ? t('setup.reasoningOff'): level}</option>)}
         </select></label>

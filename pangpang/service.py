@@ -832,26 +832,33 @@ class Service:
             "deadline": deadline, "created": time.time(), "settled_at": None, "schema": 1})
         return dep["id"]
 
-    def _scheduler_config(self):
-        """Validated scheduler config. Runs concurrency=1;
-        the validation already enforces the full rules, so this only
-        flips the number."""
-        cfg = dict(self.config.get("scheduler") or {})
-        c = {"model_max_concurrency": int(cfg.get("model_max_concurrency", 4)),
-             "reserved_user_slots": int(cfg.get("reserved_user_slots", 1)),
-             "max_queued_turns_per_bot": int(cfg.get("max_queued_turns_per_bot", 32)),
-             "max_global_runnable_turns": int(cfg.get("max_global_runnable_turns", 128)),
-             # four-layer budgets.
-             "max_delegation_depth": int(cfg.get("max_delegation_depth", 6)),
-             "max_delegations_per_root": int(cfg.get("max_delegations_per_root", 32)),
-             "max_outstanding_dependencies_per_work": int(cfg.get("max_outstanding_dependencies_per_work", 8)),
-             "max_model_turns_per_root": int(cfg.get("max_model_turns_per_root", 32)),
-             # per-Bot caps + reservations.
-             "main_bot_max_active_turns": int(cfg.get("main_bot_max_active_turns", 2)),
-             "main_bot_reserved_user_slots": int(cfg.get("main_bot_reserved_user_slots", 1)),
-             "service_bot_max_active_turns": int(cfg.get("service_bot_max_active_turns", 1)),
-             # sweeper batch cap (bounds wake storm on long-downtime restart).
-             "sweeper_batch_size": int(cfg.get("sweeper_batch_size", 32))}
+    def _scheduler_config(self, config=None):
+        """Validated scheduler config for `config` (default: the live config).
+
+        Pure: it reads the given document and returns a new dict, so a caller can
+        validate a managed-settings candidate before commit instead of mutating
+        the running scheduler and trying numbers. The default service Bot cap is
+        four; an explicitly stored value still wins.
+        """
+        cfg = dict(((self.config if config is None else config) or {}).get("scheduler") or {})
+        try:
+            c = {"model_max_concurrency": int(cfg.get("model_max_concurrency", 4)),
+                 "reserved_user_slots": int(cfg.get("reserved_user_slots", 1)),
+                 "max_queued_turns_per_bot": int(cfg.get("max_queued_turns_per_bot", 32)),
+                 "max_global_runnable_turns": int(cfg.get("max_global_runnable_turns", 128)),
+                 # four-layer budgets.
+                 "max_delegation_depth": int(cfg.get("max_delegation_depth", 6)),
+                 "max_delegations_per_root": int(cfg.get("max_delegations_per_root", 32)),
+                 "max_outstanding_dependencies_per_work": int(cfg.get("max_outstanding_dependencies_per_work", 8)),
+                 "max_model_turns_per_root": int(cfg.get("max_model_turns_per_root", 32)),
+                 # per-Bot caps + reservations.
+                 "main_bot_max_active_turns": int(cfg.get("main_bot_max_active_turns", 2)),
+                 "main_bot_reserved_user_slots": int(cfg.get("main_bot_reserved_user_slots", 1)),
+                 "service_bot_max_active_turns": int(cfg.get("service_bot_max_active_turns", 4)),
+                 # sweeper batch cap (bounds wake storm on long-downtime restart).
+                 "sweeper_batch_size": int(cfg.get("sweeper_batch_size", 32))}
+        except (TypeError, ValueError):
+            raise Fault("invalid_scheduler_config")
         if c["model_max_concurrency"] < 1:
             raise Fault("invalid_scheduler_config")
         if c["model_max_concurrency"] == 1 and c["reserved_user_slots"] != 0:

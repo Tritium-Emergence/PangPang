@@ -23,6 +23,7 @@ class SchedulerTests(unittest.TestCase):
         # default concurrency is 4 with 1 reserved P0 slot.
         self.assertEqual(self.app.scheduler_config['model_max_concurrency'], 4)
         self.assertEqual(self.app.scheduler_config['reserved_user_slots'], 1)
+        self.assertEqual(self.app.scheduler_config['service_bot_max_active_turns'], 4)
         # Validate the rule directly (avoid leaking half-built Services on Windows,
         # where an exception mid-__init__ leaves the vault db handle open).
         self.app.config['scheduler'] = {'model_max_concurrency': 1, 'reserved_user_slots': 1}
