@@ -29,7 +29,11 @@ export default {
   errors: {
     operation_failed: '操作失败。',
     file_action_rejected: '这台电脑的客户端不支持此文件操作，请升级连接器后重试。',
-    local_file_receive_disabled: '这台电脑没有开启接收文件，请配置连接器后重启。',
+    local_file_receive_disabled: '这台电脑没有开启接收文件。请到「我的电脑」打开该设备的「允许接收文件」，然后重试。',
+    file_receive_connector_only: '只有已配对的远程电脑可以设置接收文件。本机不使用这个开关。',
+    invalid_allow_file_receive: '接收文件只能设为开启或关闭。',
+    allow_file_receive_required: '请指明是否允许接收文件。',
+    device_action_rejected: '这台电脑的连接器不支持这个操作。请先升级该设备上的连接器。',
     upload_too_large: '单个文件最大 8MB。',
     connector_offline: '这台电脑当前离线。',
     routine_coalesced: '同一例程还有未结束的监督或待处理任务，这次没有新开工作，也不算已跑成。',
@@ -242,6 +246,10 @@ export default {
     hostTimeoutPlaceholder: '默认 {{default}} 秒',
     saveHostLimits: '保存任务限额',
     hostLimitsSaved: '任务限额已保存',
+    allowFileReceive: '允许接收文件',
+    allowFileReceiveHint: '允许这台电脑接收从别处发来的文件（例如聊天图片）。默认关闭；没有这项设置也视为关闭。打开或关闭后由这台电脑的连接器立即生效，不必重启，也不必改数据库。电脑需在线。',
+    fileReceiveSaved: '已更新「允许接收文件」',
+    fileReceivePending: '这台电脑还没确认。开关可能稍后生效，请刷新设备状态。',
   },
   chat: {
     botFallback: '胖胖', executorFallback: '执行器', emptyTitle: '先接上一个能干活的 Agent。',

@@ -27,6 +27,8 @@ Executor 的 `max_concurrency`、workspace RW claim 和本地资源锁是另一�
 
 主机级任务限额（`hosts[].max_concurrency` / `hosts[].timeout_s`）在 **我的电脑** 页保存，由云端调度与连接器 start 共同遵守；未设置时仍按执行器 `max_concurrency`（目录默认 1）与缺省超时 3600 秒。旧 `parallel` 字段在未写入 `max_concurrency` 前视为同一并行上限。改限额不改授权摘要。
 
+远程电脑接收文件（聊天图片等）由该连接器自己的 `settings/managed` 顶层 `allow_file_receive` 决定。缺这个键、或值不是 `true`，连接器拒绝写入并返回 `local_file_receive_disabled`。在 **我的电脑** 里打开该设备的 **允许接收文件** 会把这个键写进连接器正在用的配置，当前进程立即生效，不必重启连接器，也不必手改数据库。电脑需在线。默认关闭；本机协调器不使用这个开关。示例 `config/connector.example.json` 仍默认为 `false`。配对不会写入这个键。
+
 
 ## 2. Coordinator 首次启动
 

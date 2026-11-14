@@ -130,6 +130,8 @@ class UploadDeliveryTests(unittest.TestCase):
             self._submit(sent, installation_id="worker-device")
         self.assertEqual(caught.exception.code, "artifact_delivery_failed")
         self.assertIn("allow_file_receive", caught.exception.advice)
+        self.assertIn("允许接收文件", caught.exception.advice)
+        self.assertIn("我的电脑", caught.exception.advice)
         self.assertIn("lab-device", caught.exception.advice)
         self.assertEqual(self.app.store.find("task"), [])
 
@@ -255,6 +257,7 @@ class UploadDeliveryTests(unittest.TestCase):
         result = runtime.durable_tool({"id": sent["turn_id"]}, tool_call)
         self.assertEqual(result["error"], "artifact_delivery_failed")
         self.assertIn("allow_file_receive", result["advice"])
+        self.assertIn("允许接收文件", result["advice"])
         self.assertEqual(self.app.store.find("task"), [])
 
     def test_prompt_says_a_chat_upload_can_be_copied(self):

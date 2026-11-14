@@ -237,6 +237,8 @@ PangPang 能操作真实文件和真实机器。因此，比起展示“完全�
 
 在 **我的电脑** 里，可为每台主机设置任务并行数（`max_concurrency`，1–16）与默认任务超时（`timeout_s`，30–86400 秒）。留空表示沿用原规则：执行器 `max_concurrency` 默认来自目录里的 `1`，任务缺省超时应回落到 **3600** 秒。旧示例里未接线的 `parallel` 在保存前视作同一并行旋钮。改限额不会作废执行器授权。`submit_task.timeout_s` 可只覆盖单次派发。
 
+同一页上，已配对的远程电脑有 **允许接收文件**。它写入该连接器自己的 `allow_file_receive`（缺省或非 `true` 都是关闭），连接器立即按新值收或拒文件，不必重启，也不必改数据库。本机不使用这个开关。
+
 
 managed 行存在之后，`main_bot_max_active_turns` 和 `main_bot_reserved_user_slots` 没有受支持的修改路径。`service_bot_max_active_turns` 通过上面的模型设置保存流程修改，不靠编辑启动文件或数据库。
 

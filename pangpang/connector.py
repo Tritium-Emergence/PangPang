@@ -436,6 +436,29 @@ class Connector:
         self.store.put("local_run", record)
         return {"accepted": True}
 
+    def set_allow_file_receive(self, allow):
+        """Persist the file-receive opt-in where this process enforces it.
+
+        The gate below is ``config.get("allow_file_receive") is True``. A missing
+        key stays off. The value is the top-level key of this connector's
+        settings/managed document. The write is durable first, then the live
+        config object is updated in place, so the next file command sees it
+        without a restart and without rebuilding Execution (installations are
+        unchanged; an in-flight run keeps its objects).
+        """
+        if allow is not True and allow is not False:
+            raise Fault("invalid_allow_file_receive", 400)
+        if self.config.get("allow_file_receive") is allow:
+            return {"allow_file_receive": allow}
+        candidate = copy.deepcopy(self.config)
+        candidate["allow_file_receive"] = allow
+        row = self.store.put("settings", {"id": "managed", "config": candidate},
+                             expected=self.config_revision)
+        # Same document Execution already holds. Mutate it; do not swap the object.
+        self.config["allow_file_receive"] = allow
+        self.config_revision = row["revision"]
+        return {"allow_file_receive": allow}
+
     def execute(self, command):
         try:
             previous = self.store.get("local_command", command["id"])
@@ -553,6 +576,10 @@ class Connector:
                 result["policy_digest"] = policy_digest(self.config, body["installation_id"])
                 result["authorization_digest"] = authorization_digest(self.config, body["installation_id"])
                 result["manifest"] = execution_manifest(self.config, body["installation_id"])
+            elif action == "set_file_receive":
+                if not isinstance(body, dict) or "allow" not in body:
+                    raise Fault("allow_file_receive_required")
+                result = self.set_allow_file_receive(body.get("allow"))
             elif action == "file":
                 if body["action"] not in {"hash", "read", "write", "receive", "list"}:
                     raise Fault("file_action_rejected")
@@ -728,6 +755,10 @@ A run that has ALREADY been reported/acknowledged is IMMUTABLE — the
                                  "source": identity.get("source") or "unknown",
                                  "instance_id": self.instance_id,
                                  "supported_contract_version": CONTRACT_VERSION,
+                                 # Observation of the live gate. Missing on the wire
+                                 # means a connector that does not report it; the
+                                 # cloud must not invent a second permission.
+                                 "allow_file_receive": self.config.get("allow_file_receive") is True,
                                  "reports": reports, "receipts": receipts,
                                  "activities": activities,
                                  "declared_adapters": self.declared_adapters})

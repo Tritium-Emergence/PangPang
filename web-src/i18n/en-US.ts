@@ -29,7 +29,11 @@ export default {
   errors: {
     operation_failed: 'Operation failed.',
     file_action_rejected: "This computer's client does not support this file operation. Upgrade the connector and retry.",
-    local_file_receive_disabled: 'This computer has file receiving disabled. Configure the connector and restart.',
+    local_file_receive_disabled: 'This computer is not allowed to receive files. Open My computers and turn on Allow file receive for that device, then retry.',
+    file_receive_connector_only: 'Only a paired remote computer can set file receive. This computer does not use that switch.',
+    invalid_allow_file_receive: 'File receive can only be turned on or off.',
+    allow_file_receive_required: 'Say whether file receive is allowed.',
+    device_action_rejected: 'The connector on this computer does not support this operation. Upgrade the connector on that device first.',
     upload_too_large: 'Each file is at most 8MB.',
     connector_offline: 'This computer is currently offline.',
     routine_coalesced: 'This routine still has unfinished supervision or a pending task, so this run did not start.',
@@ -356,6 +360,10 @@ export default {
     hostTimeoutPlaceholder: 'Default {{default}}s',
     saveHostLimits: 'Save task limits',
     hostLimitsSaved: 'Task limits saved',
+    allowFileReceive: 'Allow file receive',
+    allowFileReceiveHint: 'Allow this computer to receive files sent from elsewhere (for example chat images). Off by default; a missing setting counts as off. The connector applies the change immediately — no restart and no database edit. The computer must be online.',
+    fileReceiveSaved: 'Allow file receive updated',
+    fileReceivePending: 'This computer has not confirmed yet. The switch may apply shortly; refresh the device status.',
 
   },
 

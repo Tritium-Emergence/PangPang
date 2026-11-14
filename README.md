@@ -235,6 +235,8 @@ A service Bot may run several different Works at once. **Service Bot simultaneou
 
 Each computer (host) can set **task concurrency** (`max_concurrency`, 1–16) and a **default task timeout** (`timeout_s`, 30–86400 seconds) from **My computers**. Blank keeps the previous rule: executor `max_concurrency` defaults to the catalog value `1`, and a missing task timeout falls through to **3600** seconds. An unused `parallel` field in older host examples is treated as the same concurrency knob until you save. Changing these limits does not invalidate executor grants. Optional `submit_task.timeout_s` overrides the computer default for one dispatch.
 
+The same page has **Allow file receive** on each paired remote computer. It writes that connector's own `allow_file_receive` (missing or any value other than `true` stays off). The connector applies the new value immediately: no restart and no database edit. The local coordinator does not use this switch.
+
 
 After the managed row exists, `main_bot_max_active_turns` and `main_bot_reserved_user_slots` have no supported change path. `service_bot_max_active_turns` is changed through the model settings save above, not by editing the startup file or the database.
 
