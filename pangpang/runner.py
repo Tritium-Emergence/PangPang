@@ -662,6 +662,17 @@ def executor_argv(spec, prompt, *, resume=False):
     `--resume` of that same derived id. It never passes both, and it never
     adds an approval flag.
 
+    An OpenCode-family command (``opencode`` or ``*-opencode``, optional
+    ``.exe`` / ``.cmd`` / ``.bat``) with no subcommand gains one trailing
+    ``run``. The default command is the interactive TUI, which waits at an
+    input prompt until this runner kills it. ``run`` with no message
+    arguments reads a closed non-TTY stdin as the message, which is the
+    prompt this runner already writes and closes. The prompt is not copied
+    onto argv: message arguments are joined with that stdin, so both would
+    deliver it twice. A stored ``run``, any other bare word, or an option
+    whose arity is not known is left unchanged. ``--auto`` is not added: it
+    approves permission prompts.
+
     ACP is a session_protocol. It does not append flags. An unregistered
     session_protocol is refused rather than falling through to closed stdin.
     """
@@ -708,7 +719,92 @@ def executor_argv(spec, prompt, *, resume=False):
         raise ValueError("stdin_protocol_unsupported:" + str(protocol))
     if resume_protocol:
         raise ValueError("resume_protocol_unsupported:" + str(resume_protocol))
-    return codex_exec_json_argv([part.replace("{prompt}", prompt) for part in raw])
+    # Scan stored tokens before {prompt} is replaced, so the prompt text is
+    # not parsed as a flag or as the `run` subcommand.
+    launched = opencode_run_argv(raw)
+    return codex_exec_json_argv([
+        part.replace("{prompt}", prompt) if isinstance(part, str) else part
+        for part in launched])
+
+
+def _cli_program_name(token):
+    """Basename of a command, with one Windows extension removed."""
+    if not isinstance(token, str) or not token or "\x00" in token:
+        return ""
+    name = os.path.basename(token.replace("\\", "/")).lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.endswith(suffix):
+            return name[:-len(suffix)]
+    return name
+
+
+def _opencode_family_basename(token):
+    """True for the OpenCode CLI or a wrapper named for it.
+
+    ``opencode`` and a basename ending in ``-opencode`` match, after one
+    ``.exe`` / ``.cmd`` / ``.bat``. A name that only contains those letters
+    (``myopencode``, ``opencode-cli``) does not. Same shape as the Claude
+    wrapper rule. It is not an allowlist of adapter names.
+    """
+    name = _cli_program_name(token)
+    return name == "opencode" or name.endswith("-opencode")
+
+
+# Flags `opencode run` (1.19) takes a value for. An unknown option is not
+# guessed: inserting `run` as its value would change the command.
+_OPENCODE_VALUE_FLAGS = frozenset({
+    "-m", "--model", "-s", "--session", "--command", "--agent", "--format",
+    "-f", "--file", "--title", "--attach", "-p", "--password", "-u", "--username",
+    "--dir", "--port", "--variant", "--log-level", "--replay-limit",
+})
+_OPENCODE_BOOL_FLAGS = frozenset({
+    "--print-logs", "--pure", "-c", "--continue", "--fork", "--thinking",
+    "-i", "--interactive", "--mini", "--replay", "--auto", "--yolo",
+    "--dangerously-skip-permissions", "--demo", "--share", "-h", "--help",
+    "-v", "--version",
+})
+
+
+def opencode_run_argv(argv):
+    """Append one ``run`` when this command would otherwise start the TUI.
+
+    Only an OpenCode-family argv[0] is considered. ``run`` is appended after
+    the stored tokens so a wrapper's ``opencode -m <model> "$@"`` receives it
+    via ``"$@"`` and keeps the model flag in front of the subcommand. The
+    prompt stays off this list: ``run`` reads it from the closed stdin this
+    runner already writes.
+
+    A bare ``run`` is already the non-interactive command and is not doubled.
+    Any other bare word is the operator's subcommand or project path and is
+    left alone. ``--`` ends the scan. A known value flag skips its value; a
+    ``--flag=value`` token is one flag. An option this table does not know
+    leaves the argv unchanged.
+    """
+    if not argv or not _opencode_family_basename(argv[0]):
+        return list(argv)
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if not isinstance(token, str):
+            return list(argv)
+        if token == "--" or token == "run":
+            return list(argv)
+        if not token.startswith("-"):
+            return list(argv)
+        name, sep, _value = token.partition("=")
+        if sep:
+            index += 1
+            continue
+        if name in _OPENCODE_VALUE_FLAGS:
+            if index + 1 >= len(argv):
+                return list(argv)
+            index += 2
+            continue
+        if name in _OPENCODE_BOOL_FLAGS:
+            index += 1
+            continue
+        return list(argv)
+    return [*argv, "run"]
 
 
 def _codex_cli_basename(token):
