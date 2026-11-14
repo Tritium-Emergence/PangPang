@@ -14,8 +14,9 @@ import threading
 import time
 import unittest
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
+from unittest.mock import patch
 
 from test_bot_runtime import config
 from pangpang.connector import Connector, policy_digest
@@ -147,6 +148,102 @@ class FileReceiveSettingTests(unittest.TestCase):
                 self.app.execution.hosts["local"], "nope.png", "receive", _b64(b"no")))
         self.assertEqual(off.exception.code, "local_file_receive_disabled")
         self.assertEqual(list(self.device_root.rglob("*nope.png")), [])
+
+    def test_stale_switch_result_does_not_clobber_newer_observation_or_revoke(self):
+        """An older switch must not write the device row after it returns.
+
+        Interleaving, with the first caller held after its command is done:
+        a later switch's sync publishes true, then revoke commits. Releasing
+        the first caller must leave both facts in place. Broker.authenticate
+        still rejects the device credential.
+        """
+        paused = threading.Event()
+        release = threading.Event()
+        get_ready = threading.Event()
+        get_resume = threading.Event()
+        switch_thread = {}
+        device_puts = []
+        real_request = self.app.broker.request
+        real_get = self.app.store.get
+        real_put = self.app.store.put
+        hold_get = {"on": False, "held": False}
+
+        def request(host_id, action, payload):
+            result = real_request(host_id, action, payload)
+            if action == "set_file_receive" and payload.get("allow") is False:
+                paused.set()
+                self.assertTrue(release.wait(5), "older switch was not released")
+            return result
+
+        def get(kind, key):
+            row = real_get(kind, key)
+            if (kind == "device" and key == "local" and hold_get["on"] and not hold_get["held"]
+                    and threading.get_ident() == switch_thread.get("id")):
+                hold_get["held"] = True
+                get_ready.set()
+                self.assertTrue(get_resume.wait(5), "stale device read was not released")
+            return row
+
+        def put(kind, obj, expected=None):
+            if kind == "device" and threading.get_ident() == switch_thread.get("id"):
+                device_puts.append(dict(obj))
+            return real_put(kind, obj, expected=expected)
+
+        def turn_off():
+            switch_thread["id"] = threading.get_ident()
+            return self.app.set_host_file_receive("local", {"allow": False})
+
+        self.app.broker.request = request
+        self.app.store.get = get
+        self.app.store.put = put
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(turn_off)
+                deadline = time.monotonic() + 10
+                while not paused.is_set() and time.monotonic() < deadline:
+                    self.connector.tick()
+                    time.sleep(0.02)
+                self.assertTrue(paused.is_set(), "older switch never finished its command")
+                self.assertIs(real_get("device", "local").get("allow_file_receive"), False)
+                self.app.broker.enqueue("local", "set_file_receive", {"allow": True})
+                deadline = time.monotonic() + 10
+                while (real_get("device", "local").get("allow_file_receive") is not True
+                       and time.monotonic() < deadline):
+                    self.connector.tick()
+                    time.sleep(0.02)
+                self.assertIs(real_get("device", "local").get("allow_file_receive"), True)
+                self.assertIs(self.connector.config.get("allow_file_receive"), True)
+                # If the older caller re-reads the device row, freeze that snapshot
+                # so a revoke can land before the caller writes it back.
+                hold_get["on"] = True
+                release.set()
+                try:
+                    result = future.result(timeout=1)
+                except FutureTimeout:
+                    self.assertTrue(get_ready.wait(1), "switch blocked without reading the device row")
+                    self.app.broker.revoke("local")
+                    get_resume.set()
+                    result = future.result(timeout=5)
+                else:
+                    self.app.broker.revoke("local")
+        finally:
+            get_resume.set()
+            release.set()
+            self.app.broker.request = real_request
+            self.app.store.get = real_get
+            self.app.store.put = real_put
+
+        self.assertEqual(result, {"host_id": "local", "allow_file_receive": False, "restart_required": False})
+        self.assertEqual(device_puts, [])
+        device = real_get("device", "local")
+        self.assertIs(device.get("allow_file_receive"), True)
+        self.assertIs(device.get("revoked"), True)
+        self.assertIs(self.connector.config.get("allow_file_receive"), True)
+        self.assertFalse(self.app.broker.online("local"))
+        with patch.dict(os.environ, {"TEST_DEVICE_KEY": "d" * 40}):
+            with self.assertRaises(Fault) as auth:
+                self.app.broker.authenticate("local", "Bearer " + "d" * 40)
+        self.assertEqual(auth.exception.code, "device_revoked")
 
     def test_rejects_local_host_bad_payload_and_offline(self):
         with self.assertRaises(Fault) as missing:

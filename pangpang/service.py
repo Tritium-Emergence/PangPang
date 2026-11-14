@@ -3590,9 +3590,12 @@ class Service:
 
         The connector enforces ``allow_file_receive is True`` on its own
         settings/managed document. This does not write a cloud host field.
-        The device row only stores the value the connector reported or just
-        applied, so the devices page can show it. Missing stays off.
-        The connector publishes the new value in the running process; no restart.
+        Broker.sync is the only publisher of the device-row observation, in
+        the same transaction as the command report. This method returns that
+        command's result and does not read or write the device row: a later
+        put of an earlier snapshot would clobber a newer observation or a
+        revoke committed while the call waited. Missing stays off. The
+        connector publishes the new value in the running process; no restart.
         """
         if not isinstance(body, dict) or "allow" not in body:
             raise Fault("allow_file_receive_required", 400)
@@ -3608,17 +3611,6 @@ class Service:
         applied = result.get("allow_file_receive")
         if applied is not True and applied is not False:
             raise Fault("invalid_allow_file_receive")
-        try:
-            device = self.store.get("device", host_id)
-        except Fault as error:
-            if error.status != 404:
-                raise
-            device = {"id": host_id}
-        if device.get("allow_file_receive") is not applied:
-            device = dict(device)
-            device.pop("last_seen", None)
-            device["allow_file_receive"] = applied
-            self.store.put("device", device)
         return {"host_id": host_id, "allow_file_receive": applied, "restart_required": False}
 
     def _rewrite_denormalized_host_labels(self, host_id, label):
