@@ -3585,6 +3585,33 @@ class Service:
         from .host_limits import limits_view
         return {"host_id": host_id, "limits": limits_view(updated)}
 
+    def set_host_file_receive(self, host_id, body):
+        """Operator-only: turn file receive on or off for one connector.
+
+        The connector enforces ``allow_file_receive is True`` on its own
+        settings/managed document. This does not write a cloud host field.
+        Broker.sync is the only publisher of the device-row observation, in
+        the same transaction as the command report. This method returns that
+        command's result and does not read or write the device row: a later
+        put of an earlier snapshot would clobber a newer observation or a
+        revoke committed while the call waited. Missing stays off. The
+        connector publishes the new value in the running process; no restart.
+        """
+        if not isinstance(body, dict) or "allow" not in body:
+            raise Fault("allow_file_receive_required", 400)
+        allow = body.get("allow")
+        if allow is not True and allow is not False:
+            raise Fault("invalid_allow_file_receive", 400)
+        host = self.execution.hosts.get(host_id)
+        if host is None:
+            raise Fault("host_not_found", 404)
+        if host.get("transport") != "connector":
+            raise Fault("file_receive_connector_only", 400)
+        result = self.broker.request(host_id, "set_file_receive", {"allow": allow})
+        applied = result.get("allow_file_receive")
+        if applied is not True and applied is not False:
+            raise Fault("invalid_allow_file_receive")
+        return {"host_id": host_id, "allow_file_receive": applied, "restart_required": False}
 
     def _rewrite_denormalized_host_labels(self, host_id, label):
         """Write the canonical display name onto rows that snapshot it.
@@ -5801,9 +5828,10 @@ class Service:
         label = (host or {}).get("name") or (host or {}).get("id") or "the target device"
         if code == "local_file_receive_disabled":
             return ("The chat upload is on the coordinator, and %s refused to receive files "
-                    "(allow_file_receive is off). Ask the operator to allow file receive on that "
-                    "device, then submit again, or choose an executor on the device that already "
-                    "has the file." % label)
+                    "(allow_file_receive is off). In 我的电脑 (My computers), turn on "
+                    "允许接收文件 (Allow file receive) for that computer. The connector applies "
+                    "it immediately; no restart and no database edit. Then submit again, or "
+                    "choose an executor on the device that already has the file." % label)
         if code == "connector_offline":
             return ("The chat upload is on the coordinator, and %s is offline, so the file cannot "
                     "be delivered. Wait until that device is connected and submit again, or choose "
@@ -5812,8 +5840,9 @@ class Service:
             return ("The chat upload is not on %s yet. Submit the task again so it can be delivered."
                     % label)
         return ("The chat upload could not be delivered to %s (%s). Choose an executor on the "
-                "device that already has the file, or retry when that device is online and allows "
-                "file receive." % (label, code))
+                "device that already has the file, or retry when that device is online. If it "
+                "refused the file, turn on 允许接收文件 (Allow file receive) for it under "
+                "我的电脑 (My computers)." % (label, code))
 
     def _placed_upload(self, artifact, host_id):
         """A prior placement of this upload on host_id, or the upload itself."""

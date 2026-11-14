@@ -143,6 +143,50 @@ function HostLimitsForm({host, store}: {host: Host; store: Store}) {
   );
 }
 
+function FileReceiveControl({host, device, store}: {host: Host; device?: {allow_file_receive?: boolean; online?: boolean; revoked?: boolean}; store: Store}) {
+  const {t} = useTranslation();
+  // Missing, false, or any other value is off — the same rule the connector enforces.
+  const serverOn = device?.allow_file_receive === true;
+  const [busy, setBusy] = useState(false);
+
+  async function toggle(next: boolean) {
+    setBusy(true);
+    try {
+      await api(`hosts/${host.id}/file-receive`, {allow: next});
+      store.setNotice(t('hosts.fileReceiveSaved'));
+      await store.refresh();
+    } catch (err: any) {
+      const code = String(err?.message || '').split(':')[0].trim();
+      store.setNotice(code === 'connector_operation_pending'
+        ? t('hosts.fileReceivePending')
+        : friendlyError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <label
+      className="mt-3 flex items-start gap-2 rounded-lg border border-line bg-surface/40 p-3 text-xs"
+      title={t('hosts.allowFileReceiveHint')}
+    >
+      <input
+        id={`host-file-receive-${host.id}`}
+        data-testid="host-file-receive"
+        className="mt-0.5"
+        type="checkbox"
+        checked={serverOn}
+        disabled={busy}
+        onChange={(e) => { void toggle(e.target.checked); }}
+      />
+      <span>
+        <span className="font-medium text-ink">{t('hosts.allowFileReceive')}</span>
+        <span className="mt-0.5 block text-[11px] text-muted">{t('hosts.allowFileReceiveHint')}</span>
+      </span>
+    </label>
+  );
+}
+
 // Hosts view (#hosts-view): devices + their executors, the global-model settings
 // entry, and device pairing. Reads server truth (hosts/devices/installations/probes);
 // never derives readiness.
@@ -328,6 +372,9 @@ export function HostsView({store}: {store: Store}) {
 ): null}
                 </div>
               </div>
+              {h.transport === 'connector' ? (
+                <FileReceiveControl host={h} device={device} store={store} />
+              ) : null}
               <HostLimitsForm host={h} store={store} />
               <div className="exec-grid mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
                 {insts.length ? insts.map((e) => {

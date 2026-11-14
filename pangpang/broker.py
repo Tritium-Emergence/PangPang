@@ -95,7 +95,7 @@ class Broker:
                 if error.status != 404:
                     raise
             durable = {"start", "cancel", "resolve_run", "configure", "credential_install",
-                       "credential_delete", "declare_adapter", "upgrade"}
+                       "credential_delete", "declare_adapter", "upgrade", "set_file_receive"}
             return self.store.put("command", {"id": identity, "host_id": host_id, "action": action,
                 "payload": payload, "status": "pending", "created": time.time(),
                 "expires": None if action in durable else time.time() + 120})
@@ -495,6 +495,12 @@ class Broker:
                 facts["supported_contract_version"] = int(body.get("supported_contract_version", 0))
             except (TypeError, ValueError):
                 facts["supported_contract_version"] = 0
+            # Observation only. The connector enforces its own config; a missing
+            # field is a legacy device, not a declaration, and is left unset
+            # (the UI treats anything other than true as off).
+            reported_receive = body.get("allow_file_receive", None)
+            if reported_receive is True or reported_receive is False:
+                facts["allow_file_receive"] = reported_receive
             # Durable device facts are written only when they change (N1).
             if declared_adapters is not None and device.get("declared_adapters") != declared_adapters:
                 facts["declared_adapters"] = declared_adapters

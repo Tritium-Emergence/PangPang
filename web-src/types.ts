@@ -209,6 +209,8 @@ export interface Device {
   commit?: string;
   ref?: string;
   source?: string;
+  // Reported by the connector. Missing or anything other than true is off.
+  allow_file_receive?: boolean;
 }
 export interface Installation {id: string; host_id?: string; [k: string]: unknown}
 export interface Probe {id: string; available?: boolean; version?: string; reason?: string}

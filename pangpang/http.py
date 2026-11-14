@@ -559,6 +559,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                         return service.set_host_execution_level(parts[1], body)
                     if len(parts) == 3 and parts[0] == "hosts" and parts[2] == "limits":
                         return service.set_host_limits(parts[1], body)
+                    if len(parts) == 3 and parts[0] == "hosts" and parts[2] == "file-receive":
+                        return service.set_host_file_receive(parts[1], body)
                     if parts == ["bots"]:
                         return service.create_bot(body)
                     if parts == ["projects"]:
@@ -643,7 +645,7 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 # runs outside Store.once: no transaction and no DB lock is held
                 # while broker.request polls.
                 external = len(parts) == 3 and (parts[2] in {"probe", "files", "uploads", "browse", "copy", "cancel",
-                                                             "reconcile", "resolve", "upgrade"})
+                                                             "reconcile", "resolve", "upgrade", "file-receive"})
                 if len(parts) == 3 and parts[0] == "installations" and parts[2] == "config":
                     committed = service.store.once_lookup("http:" + path, key, body)
                     if committed is not None:
