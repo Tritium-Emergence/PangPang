@@ -302,11 +302,11 @@ workspace = C:\Work
 
 ### connector 主机的 operator 注册入口
 
-对话式 onboarding 之外，operator 有直接注册入口：Web 设备页会列出 connector 主机上**已探测未注册**的 CLI。点「注册执行器」并在确认框里同意，就是这一次登记的授权：默认目录、CLI 自己的登录、空 endpoint，服务端直接下发 configure，不再另开一张批准卡。等价 HTTP 入口为 `POST /api/v1/setup/request`（需 session + Origin + `Idempotency-Key`，与其余变更端点同一幂等保护：同 key 同 body 重放返回首次结果，同 key 不同 body 409），body `{host_id, action:"configure", adapter}` 在该默认范围下返回 `configuring`。带 `cwd` 或 `auth:"api_key"` 时仍只创建 `needs_approval`，要等批准卡确认后才下发（endpoint 仍只在批准时由操作者提供）。凭据录入用 `action:"credential", installation_id`。字段集合按 action 严格白名单，出现任何多余字段 400。登记不写入运行授权；第一次任务仍要单独批准。取消确认框不会发请求，因此不会登记。
+对话式 onboarding 之外，operator 有直接注册入口：Web 设备页列出 connector 主机上**上次探测上报过、尚未登记**的名称。卡片写明这次提交用该电脑的默认工作目录、沿用已有凭据方式、不填新的 API 地址，并且不允许执行任务。点「登记此执行器」就是这次提交，不再弹出另一层确认，也不批准聊天里已有的提案。等价 HTTP 入口为 `POST /api/v1/setup/request`（需 session + Origin + `Idempotency-Key`，与其余变更端点同一幂等保护：同 key 同 body 重放返回首次结果，同 key 不同 body 409）。body `{host_id, action:"configure", adapter}` 且没有 `cwd`、`auth` 为 `existing` 或省略时，服务端只批准它自己写下的那份默认 proposal，并返回 `configuring`。已有另一份未完成的 configure（例如带目录、draft，或来自聊天）会返回 `setup_scope_pending`，不会把那份提案当成这次默认登记。带 `cwd`（键存在即可，含空值）或 `auth:"api_key"` 时仍只创建 `needs_approval`，要等批准卡确认后才下发（endpoint 仍只在批准时由操作者提供）。凭据录入用 `action:"credential", installation_id`。字段集合按 action 严格白名单，出现任何多余字段 400。登记不写入运行授权；第一次任务仍要单独批准。不点按钮不会发请求。
 
-`adapter` 必须是**设备最近一次探测实际上报过**的 CLI（服务端对照设备回报的 inventory 校验，客户端 body 无法自报"已安装"；未探测过的主机先跑一次 discover）。服务端再验 `ADAPTER_CATALOG`，设备在 configure 时再 `shutil.which` 复核——三层各自 fail-closed。
+`adapter` 必须出现在该主机**已保存的最近一次成功探测**回报的名称里。这份名单不证明探测仍然新鲜，页面上的版本号也不会被这次点击绑定或复核。服务端再查该主机是否认识这个名称（内置目录，或这台电脑自己已声明的行）。设备在 configure 时再 `shutil.which` 复核。`auth:"existing"` 只表示沿用已有凭据方式，不证明 CLI 已经登录。
 
-SIS 边界不变：argv 仍由 `ADAPTER_CATALOG` 生成，该入口不接收模型提案，也不开放任何 argv 字段。`auth:"api_key"` 的注册落库后保持停用，需再发起 credential 请求在专用窗口录入密钥。
+内置行的 argv 仍由 `ADAPTER_CATALOG` 生成。这个按钮不接收模型提案，也不开放 argv 字段。`auth:"api_key"` 的注册落库后保持停用，需再发起 credential 请求在专用窗口录入密钥。
 
 ### Adapter catalog / use_when
 

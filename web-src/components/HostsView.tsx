@@ -419,17 +419,27 @@ export function HostsView({store}: {store: Store}) {
 ): workingAdapters.has(String(x.adapter)) ? (
                           <p className="mt-1 text-xs text-muted">{t('hosts.registerWorking')}</p>
 ): (
-                          <button className="mt-1 text-xs text-brand" onClick={async () => {
-                            const adapter = String(x.adapter);
-                            const version = String(x.version || t('hosts.versionUnregistered'));
-                            if (!confirm(t('hosts.registerConfirm', {host: h.name || h.id, adapter, version}))) return;
-                            try {
-                              const created = await api<{status?: string}>('setup/request', {host_id: h.id, action: 'configure', adapter});
-                              store.setNotice(created?.status === 'already_registered' ? t('hosts.registerAlready') : t('hosts.registerStarted'));
-                              await store.refresh();
-                            }
-                            catch (err: any) { store.setNotice(friendlyError(err)); }
-                          }}>{t('hosts.registerExecutor')}</button>
+                          <>
+                            <p className="mt-1 text-xs text-muted" data-testid="register-scope">{t('hosts.registerScope', {host: h.name || h.id, adapter: String(x.adapter)})}</p>
+                            <button
+                              className="mt-1 text-xs text-brand disabled:opacity-50"
+                              data-testid="register-executor"
+                              disabled={busy === 'register:' + h.id + ':' + String(x.adapter)}
+                              onClick={async () => {
+                                const adapter = String(x.adapter);
+                                const key = 'register:' + h.id + ':' + adapter;
+                                if (busy != null) return;
+                                setBusy(key);
+                                try {
+                                  const created = await api<{status?: string}>('setup/request', {host_id: h.id, action: 'configure', adapter});
+                                  store.setNotice(created?.status === 'already_registered' ? t('hosts.registerAlready') : t('hosts.registerStarted'));
+                                  await store.refresh();
+                                }
+                                catch (err: unknown) { store.setNotice(friendlyError(err)); }
+                                finally { setBusy(null); }
+                              }}
+                            >{t('hosts.registerExecutor')}</button>
+                          </>
 )}
                       </div>
 ))}

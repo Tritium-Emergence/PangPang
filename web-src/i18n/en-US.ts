@@ -301,7 +301,7 @@ export default {
 
     connectWorkspace: 'Connect your workspace',
 
-    connectWorkspaceDesc: 'After pairing, the computer appears and its installed executors are detected automatically. Register executor starts that registration in one confirmation (default directory, the CLI’s own login). A custom directory, a key, or an API address is still confirmed separately. Registration does not authorize task runs.',
+    connectWorkspaceDesc: 'After pairing, executors that this computer last reported and that are not registered yet are listed below. Register this executor submits that registration: the computer’s default working directory, its existing credential mode, and no new API address. A custom directory, a key, or an API address is still confirmed separately. This registration does not authorize task runs.',
 
     noModelSet: 'No model set', endpointConfigured: 'Endpoint configured', endpointUnconfigured: 'Endpoint not configured',
 
@@ -319,9 +319,9 @@ export default {
     unavailable: 'Unavailable · {{reason}}', notProbed: 'Not checked', probeInstall: 'Check installation',
 
     noExecutors: 'No executors registered yet', pairDialogTitle: 'Connect a computer',
-    unregisteredExecutors: 'Detected, not registered', registerExecutor: 'Register executor', registerPending: 'Registration pending approval',
-    registerConfirm: 'Register {{adapter}} ({{version}}) on “{{host}}”? This uses that computer’s authorized default directory and the CLI’s own login and default address. The device checks the version. This does not authorize task runs. Cancel registers nothing.',
-    registerStarted: 'Registration started. It appears in the executor list after the device checks the version. It still cannot run tasks until you approve the first run.',
+    unregisteredExecutors: 'Detected, not registered', registerExecutor: 'Register this executor', registerPending: 'Registration pending approval',
+    registerScope: 'Registering {{adapter}} uses the default working directory on “{{host}}” and the executor’s existing credential mode. The version above is the last one the device reported; this click does not check that it still matches, and it does not prove the program is logged in. It does not authorize task runs. Not clicking does not register it.',
+    registerStarted: 'Registration submitted. It appears in the executor list after the device reports back. It still cannot run tasks until you approve the first run.',
     registerAlready: 'This executor is already registered.',
     registerWorking: 'Registering on this computer',
 

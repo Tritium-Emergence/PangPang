@@ -189,20 +189,16 @@ class OperatorSetupEntryTests(unittest.TestCase):
         self.assertNotIn("origin", row)
         self.assertEqual(self.app.store.find("command", action="configure"), [])
 
-    def test_chat_configure_reuses_the_same_scope_and_keeps_a_different_one(self):
+    def test_chat_configure_does_not_reuse_or_approve(self):
         host_id = self.paired_host()
         work = self.app.send("bot-main", {"text": "add"}, "reuse")["work_id"]
         first = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
                                                                "host_id": host_id})
         second = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
                                                                 "host_id": host_id, "auth": "existing"})
-        self.assertEqual(second["request_id"], first["request_id"])
-        self.assertTrue(second["reused"])
-        self.assertEqual(len(self.app.store.find("setup_request")), 1)
-        other = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
-                                                               "host_id": host_id, "cwd": str(self.root)})
-        self.assertNotEqual(other["request_id"], first["request_id"])
-        self.assertEqual(self.app.store.get("setup_request", other["request_id"])["status"], "needs_approval")
+        self.assertNotEqual(second["request_id"], first["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", first["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.app.store.get("setup_request", second["request_id"])["status"], "needs_approval")
         self.assertEqual(self.app.store.find("command", action="configure"), [])
 
     def test_denied_and_expired_cards_are_not_treated_as_consent(self):
@@ -264,6 +260,33 @@ class OperatorSetupEntryTests(unittest.TestCase):
         self.assertNotEqual(keyed["request_id"], other_card["request_id"])
         self.assertEqual(self.app.store.get("setup_request", other_card["request_id"])["status"], "needs_approval")
         self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
+
+    def test_default_click_does_not_approve_a_non_string_cwd_draft(self):
+        host_id = self.paired_host()
+        work = self.app.send("bot-main", {"text": "add"}, "r1")["work_id"]
+        foreign = self.app.onboarding.request("bot-main", work, {
+            "host_id": host_id, "action": "configure", "adapter": "codex",
+            "cwd": True, "draft": {"cwd": "/work/other"}})
+        stored = self.app.store.get("setup_request", foreign["request_id"])
+        self.assertEqual(stored["proposal"]["draft"]["cwd"], "/work/other")
+        self.assertIs(stored["proposal"]["cwd"], True)
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                  "adapter": "codex"})
+        self.assertEqual(ctx.exception.code, "setup_scope_pending")
+        self.assertEqual(self.app.store.get("setup_request", foreign["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.app.store.get("setup_request", foreign["request_id"])["proposal"]["draft"]["cwd"],
+                         "/work/other")
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+
+    def test_cwd_key_of_any_shape_stays_a_card(self):
+        host_id = self.paired_host()
+        for value in (None, "", True, 1, "/work/other"):
+            opened = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                           "adapter": "codex", "cwd": value})
+            self.assertEqual(opened["status"], "needs_approval", value)
+            self.assertEqual(self.app.store.find("command", action="configure"), [])
+            self.app.onboarding.deny(opened["request_id"])
 
     def test_discover_still_runs_without_an_approval_card(self):
         host_id = self.paired_host(())
