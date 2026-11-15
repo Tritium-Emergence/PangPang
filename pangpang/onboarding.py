@@ -588,46 +588,62 @@ class Onboarding:
             allowed |= {"model", "api"}
         return set(proposal) <= allowed
 
+    def _open_configures(self, host_id, adapter):
+        """Every unfinished configure for this adapter.
+
+        Store.find stops at the oldest 200 rows, so a host with a long denied
+        history would hide a later configuring row. This walks the unfinished
+        statuses to the end. Expired approval cards are not unfinished.
+        """
+        now = time.time()
+        found = []
+        for status in ("needs_approval", "configuring"):
+            cursor = None
+            while True:
+                page, cursor = self.store.find_page(
+                    "setup_request", cursor=cursor, host_id=host_id, status=status)
+                for req in page:
+                    proposal = req.get("proposal") or {}
+                    if proposal.get("action") != "configure" or proposal.get("adapter") != adapter:
+                        continue
+                    if status == "needs_approval" and req.get("expires", 0) < now:
+                        continue
+                    found.append(req)
+                if cursor is None:
+                    break
+        return found
+
     def _commit_default_operator_configure(self, host_id, adapter):
         """Enqueue one default registration. The button click is that submission.
 
-        Approves only a proposal this method itself wrote. An open card from
-        chat or from another scope is left as it is and blocks a second
-        registration of this adapter. No run grant is written.
+        Approves only the row this call creates. An older needs_approval card,
+        including one whose stored proposal no longer shows an empty cwd, is
+        not approved. A configure already in flight for this adapter blocks a
+        second command, and the default one already in flight is reused.
+        No run grant is written.
         """
         iid = installation_id(adapter, host_id)
         if iid in self.s.execution.installations:
             return {"status": "already_registered", "installation_id": iid, "yielded": False}
         if self.store.get("device", host_id).get("revoked"):
             raise Fault("device_revoked", 403)
-        now = time.time()
+        open_rows = self._open_configures(host_id, adapter)
         inflight = None
-        unsent = None
-        for req in self.store.find("setup_request", host_id=host_id):
-            proposal = req.get("proposal") or {}
-            if proposal.get("action") != "configure" or proposal.get("adapter") != adapter:
-                continue
-            status = req.get("status")
-            if status == "needs_approval" and req.get("expires", 0) < now:
-                continue
-            if status not in {"needs_approval", "configuring"}:
-                continue
-            if not self._is_default_operator_registration(host_id, adapter, req):
-                raise Fault("setup_scope_pending", 409)
-            if status == "configuring":
+        for req in open_rows:
+            if (req.get("status") == "configuring"
+                    and self._is_default_operator_registration(host_id, adapter, req)):
                 inflight = req
-            else:
-                unsent = req
+                continue
+            raise Fault("setup_scope_pending", 409)
         if inflight is not None:
             return {"request_id": inflight["id"], "status": "configuring", "accepted": True,
                     "yielded": True, "reused": True}
-        if unsent is None:
-            unsent = self.store.put("setup_request", {
-                "id": uid("setup"), "host_id": host_id, "bot_id": None, "work_id": None,
-                "origin": "operator", "proposal": self._default_operator_proposal(adapter),
-                "status": "needs_approval", "expires": time.time() + 3600})
-        approved = self.approve(unsent["id"], {})
-        approved.update(request_id=unsent["id"], status="configuring")
+        created = self.store.put("setup_request", {
+            "id": uid("setup"), "host_id": host_id, "bot_id": None, "work_id": None,
+            "origin": "operator", "proposal": self._default_operator_proposal(adapter),
+            "status": "needs_approval", "expires": time.time() + 3600})
+        approved = self.approve(created["id"], {})
+        approved.update(request_id=created["id"], status="configuring")
         return approved
 
     def operator_request(self, body):
@@ -667,7 +683,7 @@ class Onboarding:
                 return self._commit_default_operator_configure(host_id, adapter)
             proposal = {"action": "configure", "adapter": adapter,
                         "auth": body.get("auth", "existing"), "endpoint": "", "endpoint_source": "operator"}
-            if body.get("cwd"):
+            if "cwd" in body:
                 proposal["cwd"] = body["cwd"]
             status = "needs_approval"
         else:

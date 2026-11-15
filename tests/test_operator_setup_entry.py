@@ -281,12 +281,49 @@ class OperatorSetupEntryTests(unittest.TestCase):
 
     def test_cwd_key_of_any_shape_stays_a_card(self):
         host_id = self.paired_host()
-        for value in (None, "", True, 1, "/work/other"):
+        for value in (None, "", False, 0, [], {}, True, 1, "/work/other"):
             opened = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
                                                            "adapter": "codex", "cwd": value})
             self.assertEqual(opened["status"], "needs_approval", value)
+            self.assertIn("cwd", self.app.store.get("setup_request", opened["request_id"])["proposal"])
+            self.assertEqual(self.app.store.get("setup_request", opened["request_id"])["proposal"]["cwd"], value)
+            self.assertEqual(self.app.store.find("command", action="configure"), [])
+            with self.assertRaises(Fault) as ctx:
+                self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                      "adapter": "codex"})
+            self.assertEqual(ctx.exception.code, "setup_scope_pending", value)
+            self.assertEqual(self.app.store.get("setup_request", opened["request_id"])["status"], "needs_approval")
             self.assertEqual(self.app.store.find("command", action="configure"), [])
             self.app.onboarding.deny(opened["request_id"])
+
+    def test_open_configure_is_seen_past_two_hundred_old_rows(self):
+        host_id = self.paired_host()
+        for index in range(201):
+            self.app.store.put("setup_request", {
+                "id": "setup-old-%d" % index, "host_id": host_id, "status": "denied",
+                "proposal": {"action": "configure", "adapter": "codex"},
+                "expires": time.time() + 3600})
+        work = self.app.send("bot-main", {"text": "add"}, "history")["work_id"]
+        foreign = self.app.onboarding.request("bot-main", work, {
+            "host_id": host_id, "action": "configure", "adapter": "codex", "cwd": "/work/other"})
+        with self.assertRaises(Fault) as blocked:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                  "adapter": "codex"})
+        self.assertEqual(blocked.exception.code, "setup_scope_pending")
+        self.assertEqual(self.app.store.get("setup_request", foreign["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+        self.app.onboarding.deny(foreign["request_id"])
+        started = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                        "adapter": "codex"})
+        self.assertEqual(started["status"], "configuring")
+        again = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                      "adapter": "codex"})
+        self.assertEqual(again["request_id"], started["request_id"])
+        self.assertTrue(again["reused"])
+        commands = self.app.store.find("command", action="configure")
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["payload"]["request_id"], started["request_id"])
+        self.assertNotIn("cwd", commands[0]["payload"])
 
     def test_discover_still_runs_without_an_approval_card(self):
         host_id = self.paired_host(())
