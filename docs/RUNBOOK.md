@@ -302,7 +302,7 @@ workspace = C:\Work
 
 ### connector 主机的 operator 注册入口
 
-对话式 onboarding 之外，operator 有直接注册入口：Web 设备页会列出 connector 主机上**已探测未注册**的 CLI，点"注册执行器"即创建 setup_request；等价 HTTP 入口为 `POST /api/v1/setup/request`（需 session + Origin + `Idempotency-Key`，与其余变更端点同一幂等保护：同 key 同 body 重放返回首次结果，同 key 不同 body 409），body `{host_id, action:"configure", adapter, cwd?, auth?}`（凭据录入用 `action:"credential", installation_id`）。字段集合按 action 严格白名单，出现任何多余字段 400。请求进入与对话式路径相同的批准队列：operator 在待批准面板确认（endpoint 在批准时提供），设备执行 configure 并回报落库。
+对话式 onboarding 之外，operator 有直接注册入口：Web 设备页会列出 connector 主机上**已探测未注册**的 CLI。点「注册执行器」并在确认框里同意，就是这一次登记的授权：默认目录、CLI 自己的登录、空 endpoint，服务端直接下发 configure，不再另开一张批准卡。等价 HTTP 入口为 `POST /api/v1/setup/request`（需 session + Origin + `Idempotency-Key`，与其余变更端点同一幂等保护：同 key 同 body 重放返回首次结果，同 key 不同 body 409），body `{host_id, action:"configure", adapter}` 在该默认范围下返回 `configuring`。带 `cwd` 或 `auth:"api_key"` 时仍只创建 `needs_approval`，要等批准卡确认后才下发（endpoint 仍只在批准时由操作者提供）。凭据录入用 `action:"credential", installation_id`。字段集合按 action 严格白名单，出现任何多余字段 400。登记不写入运行授权；第一次任务仍要单独批准。取消确认框不会发请求，因此不会登记。
 
 `adapter` 必须是**设备最近一次探测实际上报过**的 CLI（服务端对照设备回报的 inventory 校验，客户端 body 无法自报"已安装"；未探测过的主机先跑一次 discover）。服务端再验 `ADAPTER_CATALOG`，设备在 configure 时再 `shutil.which` 复核——三层各自 fail-closed。
 

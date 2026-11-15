@@ -2,6 +2,7 @@ import http.cookiejar
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -49,7 +50,8 @@ class OperatorSetupEntryTests(unittest.TestCase):
                 if c["payload"].get("request_id") == request_id][0]
 
     def report_landing(self, request_id, host_id, adapter, cwd=None):
-        self.app.onboarding.approve(request_id, {})
+        if self.app.store.get("setup_request", request_id)["status"] == "needs_approval":
+            self.app.onboarding.approve(request_id, {})
         command = self.command_for(request_id)
         installation = {"id": adapter + "-" + host_id, "host_id": host_id, "adapter": adapter,
                         "cwd": cwd or str(self.root)}
@@ -60,15 +62,34 @@ class OperatorSetupEntryTests(unittest.TestCase):
         host_id = self.paired_host()
         r = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
                                                   "adapter": "codex"})
-        self.assertEqual(r["status"], "needs_approval")
+        self.assertEqual(r["status"], "configuring")
+        self.assertTrue(r["accepted"])
         req = self.app.store.get("setup_request", r["request_id"])
         self.assertIsNone(req["bot_id"])
         self.assertIsNone(req["work_id"])
         self.assertEqual(req["origin"], "operator")
-        self.assertEqual(req["proposal"], {"action": "configure", "adapter": "codex",
-                                           "auth": "existing", "endpoint": "", "endpoint_source": "operator"})
+        self.assertEqual(req["status"], "configuring")
+        self.assertEqual(req["proposal"]["adapter"], "codex")
+        self.assertEqual(req["proposal"]["auth"], "existing")
+        self.assertEqual(req["proposal"]["endpoint"], "")
+        self.assertEqual(req["proposal"]["endpoint_source"], "operator")
+        self.assertEqual(req["proposal"]["installation_id"], "codex-" + host_id)
+        self.assertNotIn("cwd", req["proposal"])
+        self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
+        again = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                      "adapter": "codex"})
+        self.assertEqual(again["request_id"], r["request_id"])
+        self.assertTrue(again["reused"])
+        self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
         landed = self.report_landing(r["request_id"], host_id, "codex")
         self.assertEqual(self.app.execution.installations[landed]["adapter"], "codex")
+        grants = self.app.store.get("settings", "executor_grants")
+        self.assertNotIn(landed, grants.get("grants") or {})
+        self.assertFalse(self.app._grant_matches(self.app.execution.installations[landed]))
+        parked = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                       "adapter": "codex"})
+        self.assertEqual(parked["status"], "already_registered")
+        self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
 
     def test_cwd_passes_through_and_mismatch_still_refused(self):
         host_id = self.paired_host()
@@ -128,8 +149,8 @@ class OperatorSetupEntryTests(unittest.TestCase):
         self.discover(other_host, "claude-code")
         r = self.app.onboarding.operator_request({"host_id": other_host, "action": "configure",
                                                   "adapter": "claude-code"})
-        self.assertEqual(r["status"], "needs_approval")
-        self.assertEqual(self.app.store.find("setup_request", status="needs_approval")[0]["host_id"], other_host)
+        self.assertEqual(r["status"], "configuring")
+        self.assertEqual(self.command_for(r["request_id"])["host_id"], other_host)
 
     def test_credential_request_for_landed_installation_opens_secret_window(self):
         host_id = self.paired_host()
@@ -166,6 +187,93 @@ class OperatorSetupEntryTests(unittest.TestCase):
         row = self.app.store.get("setup_request", req["request_id"])
         self.assertEqual(row["bot_id"], "bot-main")
         self.assertNotIn("origin", row)
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+
+    def test_chat_configure_reuses_the_same_scope_and_keeps_a_different_one(self):
+        host_id = self.paired_host()
+        work = self.app.send("bot-main", {"text": "add"}, "reuse")["work_id"]
+        first = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                               "host_id": host_id})
+        second = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                                "host_id": host_id, "auth": "existing"})
+        self.assertEqual(second["request_id"], first["request_id"])
+        self.assertTrue(second["reused"])
+        self.assertEqual(len(self.app.store.find("setup_request")), 1)
+        other = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                               "host_id": host_id, "cwd": str(self.root)})
+        self.assertNotEqual(other["request_id"], first["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", other["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+
+    def test_denied_and_expired_cards_are_not_treated_as_consent(self):
+        host_id = self.paired_host()
+        work = self.app.send("bot-main", {"text": "add"}, "deny")["work_id"]
+        denied = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                                "host_id": host_id})
+        self.app.onboarding.deny(denied["request_id"])
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+        started = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                        "adapter": "codex"})
+        self.assertNotEqual(started["request_id"], denied["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", denied["request_id"])["status"], "denied")
+        self.assertEqual(self.command_for(started["request_id"])["payload"]["request_id"], started["request_id"])
+        self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
+
+        other = self.paired_host()
+        expired = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                                 "host_id": other})
+        row = self.app.store.get("setup_request", expired["request_id"])
+        row["expires"] = time.time() - 5
+        self.app.store.put("setup_request", row)
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.approve(expired["request_id"], {})
+        self.assertEqual(ctx.exception.code, "setup_request_expired_or_used")
+        fresh = self.app.onboarding.operator_request({"host_id": other, "action": "configure", "adapter": "codex"})
+        self.assertNotEqual(fresh["request_id"], expired["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", expired["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.command_for(fresh["request_id"])["host_id"], other)
+
+    def test_a_different_scope_or_target_cannot_borrow_the_default_click(self):
+        host_id = self.paired_host()
+        work = self.app.send("bot-main", {"text": "add"}, "scope")["work_id"]
+        cwd = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                             "host_id": host_id, "cwd": str(self.root)})
+        with self.assertRaises(Fault) as ctx:
+            self.app.onboarding.operator_request({"host_id": host_id, "action": "configure", "adapter": "codex"})
+        self.assertEqual(ctx.exception.code, "setup_scope_pending")
+        self.assertEqual(self.app.store.get("setup_request", cwd["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+        self.app.onboarding.deny(cwd["request_id"])
+        self.assertEqual(self.app.store.find("command", action="configure"), [])
+
+        self.discover(host_id, "codex", "claude-code")
+        waiting = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "claude-code",
+                                                                 "host_id": host_id, "auth": "api_key"})
+        started = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure", "adapter": "codex"})
+        self.assertEqual(started["status"], "configuring")
+        self.assertEqual(self.app.store.get("setup_request", waiting["request_id"])["status"], "needs_approval")
+        self.assertEqual(self.command_for(started["request_id"])["payload"]["adapter"], "codex")
+        self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
+
+        other = self.paired_host()
+        other_card = self.app.onboarding.request("bot-main", work, {"action": "configure", "adapter": "codex",
+                                                                    "host_id": other})
+        keyed = self.app.onboarding.operator_request({"host_id": host_id, "action": "configure",
+                                                      "adapter": "codex", "auth": "api_key"})
+        self.assertEqual(keyed["status"], "needs_approval")
+        self.assertNotEqual(keyed["request_id"], other_card["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", other_card["request_id"])["status"], "needs_approval")
+        self.assertEqual(len(self.app.store.find("command", action="configure")), 1)
+
+    def test_discover_still_runs_without_an_approval_card(self):
+        host_id = self.paired_host(())
+        work = self.app.send("bot-main", {"text": "look"}, "discover")["work_id"]
+        found = self.app.onboarding.request("bot-main", work, {"action": "discover", "host_id": host_id})
+        self.assertIn("command_id", found)
+        self.assertEqual(self.app.store.find("setup_request"), [])
+        command = self.app.store.get("command", found["command_id"])
+        self.assertEqual(command["action"], "discover")
+        self.assertEqual(command["payload"], {"bot_id": "bot-main", "work_id": work})
 
 
 class OperatorSetupHttpTests(unittest.TestCase):
@@ -231,12 +339,14 @@ class OperatorSetupHttpTests(unittest.TestCase):
         self.assertEqual(bad_host.exception.code, 409)
         with self.request("setup/request", {"host_id": host_id, "action": "configure", "adapter": "codex"}) as r:
             created = json.load(r)
-        self.assertEqual(created["status"], "needs_approval")
+        self.assertEqual(created["status"], "configuring")
+        self.assertTrue(created["accepted"])
         with self.request("snapshot") as r:
             snap = json.load(r)
         self.assertIn(created["request_id"], [q["id"] for q in snap["setup"]["requests"]])
-        with self.request("setup/" + created["request_id"] + "/approve", {"endpoint": ""}) as r:
-            self.assertTrue(json.load(r)["accepted"])
+        with self.assertRaises(urllib.error.HTTPError) as already:
+            self.request("setup/" + created["request_id"] + "/approve", {"endpoint": ""}, key="approve-again")
+        self.assertEqual(already.exception.code, 409)
 
     def test_idempotency_key_required_replay_and_conflict(self):
         host_id = self.paired_host()

@@ -50,6 +50,7 @@ export default {
     invalid_priority: 'Priority must be 1–999, or left blank.',
     installation_busy: 'The executor is still working. Wait for the current task to finish before changing it.',
     installation_config_changed: 'The configuration was updated by another request. Please retry.',
+    setup_scope_pending: 'This executor already has a pending setup of a different scope on this computer. Handle that card first. This click did not register it.',
     cwd_outside_allowed_roots: 'The working directory is outside the authorized range or inaccessible.',
     invalid_timeout_s: 'Timeout must be 30–86400 seconds.',
     empty_host_limits: 'Provide max_concurrency and/or timeout_s.',
@@ -300,7 +301,7 @@ export default {
 
     connectWorkspace: 'Connect your workspace',
 
-    connectWorkspaceDesc: 'After the connector is paired, the computer appears automatically. Detected executors can be registered from here; each registration completes once the operator approves it.',
+    connectWorkspaceDesc: 'After pairing, the computer appears and its installed executors are detected automatically. Register executor starts that registration in one confirmation (default directory, the CLI’s own login). A custom directory, a key, or an API address is still confirmed separately. Registration does not authorize task runs.',
 
     noModelSet: 'No model set', endpointConfigured: 'Endpoint configured', endpointUnconfigured: 'Endpoint not configured',
 
@@ -319,6 +320,10 @@ export default {
 
     noExecutors: 'No executors registered yet', pairDialogTitle: 'Connect a computer',
     unregisteredExecutors: 'Detected, not registered', registerExecutor: 'Register executor', registerPending: 'Registration pending approval',
+    registerConfirm: 'Register {{adapter}} ({{version}}) on “{{host}}”? This uses that computer’s authorized default directory and the CLI’s own login and default address. The device checks the version. This does not authorize task runs. Cancel registers nothing.',
+    registerStarted: 'Registration started. It appears in the executor list after the device checks the version. It still cannot run tasks until you approve the first run.',
+    registerAlready: 'This executor is already registered.',
+    registerWorking: 'Registering on this computer',
 
     pairDialogDesc: 'Start the connector on that computer and fill in the cloud URL, allowed working directories, and the pairing code below.',
 

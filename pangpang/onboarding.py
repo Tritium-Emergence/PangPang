@@ -515,6 +515,12 @@ class Onboarding:
                                        "profile", "env", "extra_argv")):
                 raise Fault("operator_owned_setup_field", 400)
             body = dict(body, auth=body.get("auth", "existing"), endpoint="", endpoint_source="operator")
+            # A repeated proposal of this same scope reuses the open card.
+            # It does not approve it, and a denied or expired card is not reused.
+            existing = self._open_same_configure(host_id, body)
+            if existing:
+                return {"request_id": existing["id"], "status": existing["status"],
+                        "yielded": True, "reused": True}
         else:
             inst = next((i for i in self._config().get("installations", [])
                          if i["id"] == body.get("installation_id")), {})
@@ -543,6 +549,109 @@ class Onboarding:
             staged["cwd"] = body["cwd"]
         req = self.stage_executor(bot_id, work_id, None, host, staged, body)
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
+
+    def _configure_scope(self, host_id, proposal):
+        """The registration a configure card would actually perform.
+
+        Extra keys the caller echoed (host id, request id) are not part of it.
+        A directory, profile, argv suffix, env, credential id, endpoint, auth
+        mode, or locked installation id makes a different scope.
+        """
+        proposal = proposal or {}
+        draft = proposal.get("draft") if isinstance(proposal.get("draft"), dict) else {}
+
+        def pick(key):
+            if key in proposal and proposal.get(key) not in (None, ""):
+                return proposal.get(key)
+            return draft.get(key)
+
+        cwd = pick("cwd") or ""
+        profile = pick("profile") or ""
+        extra = proposal["extra_argv"] if "extra_argv" in proposal else draft.get("extra_argv")
+        env = proposal["env"] if "env" in proposal else draft.get("env")
+        refs = proposal["secret_refs"] if "secret_refs" in proposal else draft.get("secret_refs")
+        locked = proposal.get("installation_id") or ""
+        if not isinstance(locked, str):
+            locked = ""
+        adapter_name = proposal.get("adapter")
+        # approve() writes the canonical id onto the same default registration.
+        # That is not a different executor.
+        if (locked and isinstance(adapter_name, str) and isinstance(host_id, str)):
+            try:
+                if locked == installation_id(adapter_name, host_id):
+                    locked = ""
+            except Fault:
+                pass
+        return (host_id, proposal.get("action"), proposal.get("adapter"),
+                proposal.get("auth") or "existing", proposal.get("endpoint") or "",
+                cwd if isinstance(cwd, str) else "",
+                profile if isinstance(profile, str) else "",
+                tuple(extra) if isinstance(extra, list) else (),
+                encode(env) if isinstance(env, dict) and env else "",
+                encode(refs) if isinstance(refs, dict) and refs else "",
+                locked)
+
+    def _open_configure_requests(self, host_id, adapter, action="configure"):
+        """Unexpired configure cards and in-flight configures for one adapter.
+
+        Denied, expired, and finished rows are not open. An expired card is
+        not treated as consent, and a denial is not reopened here.
+        """
+        now = time.time()
+        found = []
+        for req in self.store.find("setup_request", host_id=host_id):
+            status = req.get("status")
+            if status not in {"needs_approval", "configuring"}:
+                continue
+            if status == "needs_approval" and req.get("expires", 0) < now:
+                continue
+            proposal = req.get("proposal") or {}
+            if proposal.get("action") != action or proposal.get("adapter") != adapter:
+                continue
+            found.append(req)
+        return found
+
+    def _open_same_configure(self, host_id, proposal):
+        """An open configure of this exact scope, if one exists. Never approves."""
+        scope = self._configure_scope(host_id, proposal)
+        action = proposal.get("action") or "configure"
+        for req in self._open_configure_requests(host_id, proposal.get("adapter"), action):
+            if self._configure_scope(host_id, req.get("proposal")) == scope:
+                return req
+        return None
+
+    def _commit_default_operator_configure(self, host_id, adapter):
+        """Enqueue the computers-page registration. The click already confirmed it.
+
+        Same computer, same adapter, default directory, existing CLI login, empty
+        endpoint. A second click reuses the in-flight command. A pending card for
+        a different scope is left untouched and blocks this click, so the two
+        scopes cannot share one authorization. No run grant is written.
+        """
+        iid = installation_id(adapter, host_id)
+        if iid in self.s.execution.installations:
+            return {"status": "already_registered", "installation_id": iid, "yielded": False}
+        if self.store.get("device", host_id).get("revoked"):
+            raise Fault("device_revoked", 403)
+        scope = (host_id, "configure", adapter, "existing", "", "", "", (), "", "", "")
+        same = None
+        for req in self._open_configure_requests(host_id, adapter):
+            if self._configure_scope(host_id, req.get("proposal")) != scope:
+                raise Fault("setup_scope_pending", 409)
+            if req.get("status") == "configuring":
+                return {"request_id": req["id"], "status": "configuring", "accepted": True,
+                        "yielded": True, "reused": True}
+            same = req
+        if same is None:
+            proposal = {"action": "configure", "adapter": adapter, "auth": "existing",
+                        "endpoint": "", "endpoint_source": "operator"}
+            same = self.store.put("setup_request", {
+                "id": uid("setup"), "host_id": host_id, "bot_id": None, "work_id": None,
+                "origin": "operator", "proposal": proposal, "status": "needs_approval",
+                "expires": time.time() + 3600})
+        approved = self.approve(same["id"], {})
+        approved.update(request_id=same["id"], status="configuring")
+        return approved
 
     def operator_request(self, body):
         action = body.get("action", "configure")
@@ -573,6 +682,13 @@ class Onboarding:
                 raise Fault("adapter_not_in_inventory",
                             advice="only adapters the device itself reported in its latest "
                                    "discovery can be registered; run executor discovery on that computer first")
+            # The computers-page button discloses exactly this scope: this adapter,
+            # this computer, the device's default directory, the CLI's own login,
+            # and an empty endpoint. That click is the confirmation, so the
+            # configure command is enqueued here. A directory, an API key, or any
+            # other scope still opens a card. This does not grant a run.
+            if body.get("auth", "existing") == "existing" and "cwd" not in body:
+                return self._commit_default_operator_configure(host_id, adapter)
             proposal = {"action": "configure", "adapter": adapter,
                         "auth": body.get("auth", "existing"), "endpoint": "", "endpoint_source": "operator"}
             if body.get("cwd"):
@@ -615,6 +731,9 @@ class Onboarding:
             "endpoint": "",
             "endpoint_source": "operator",
         }
+        existing = self._open_same_configure(host_id, proposal)
+        if existing and (existing.get("proposal") or {}).get("base_revision") == proposal.get("base_revision"):
+            return existing
         if local and inst is None:
             sibling = self._sibling_local_installation(host_id, adapter)
             argv = (sibling or {}).get("argv") or []
