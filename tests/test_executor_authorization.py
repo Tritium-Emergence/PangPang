@@ -698,6 +698,29 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "installation_approval_mismatch")
         self.assertEqual(self.app.execution.installations["codex-local"].get("priority"), before)
 
+    def test_a_later_smaller_proposal_keeps_its_own_draft(self):
+        raised = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-local", "max_concurrency": 8})
+        lowered = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-local", "max_concurrency": 2})
+        self.assertNotEqual(raised["staged"]["request_id"], lowered["staged"]["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", raised["staged"]["request_id"])
+                         ["proposal"]["draft"]["max_concurrency"], 8)
+        self.assertEqual(self.app.store.get("setup_request", lowered["staged"]["request_id"])
+                         ["proposal"]["draft"]["max_concurrency"], 2)
+        self.assertEqual(self.app.execution.installations["codex-local"].get("max_concurrency", 1), 1)
+        cleared = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-local", "env": {}})
+        longer = self.app.propose_executor("bot-main", self.work, {
+            "installation_id": "codex-local", "timeout_s": 7200})
+        self.assertNotEqual(cleared["staged"]["request_id"], longer["staged"]["request_id"])
+        self.assertEqual(self.app.store.get("setup_request", cleared["staged"]["request_id"])
+                         ["proposal"]["draft"]["env"], {})
+        self.assertEqual(self.app.store.get("setup_request", longer["staged"]["request_id"])
+                         ["proposal"]["draft"]["timeout_s"], 7200)
+        self.assertNotIn("env", self.app.store.get("setup_request", longer["staged"]["request_id"])
+                         ["proposal"]["draft"])
+
     def test_reprobe_uses_the_stored_installation(self):
         runtime = Runtime(self.app, type("M", (), {"complete": lambda *a, **k: ({"content": "x"}, {})})())
         result = runtime.invoke(

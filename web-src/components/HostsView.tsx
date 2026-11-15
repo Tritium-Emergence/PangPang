@@ -312,8 +312,13 @@ export function HostsView({store}: {store: Store}) {
 : [];
           const registered = new Set(insts.map((e) => String(e.adapter || '')));
           const unregistered = inventory.filter((x) => x.adapter && !registered.has(String(x.adapter)));
-          const pendingAdapters = new Set((snap.setup.requests || [])
-            .filter((r) => r.host_id === h.id && ['needs_approval', 'configuring'].includes(r.status))
+          const openSetup = (snap.setup.requests || [])
+            .filter((r) => r.host_id === h.id && ['needs_approval', 'configuring'].includes(r.status));
+          const pendingAdapters = new Set(openSetup
+            .filter((r) => r.status === 'needs_approval')
+            .map((r) => String((r.proposal || {}).adapter || '')));
+          const workingAdapters = new Set(openSetup
+            .filter((r) => r.status === 'configuring')
             .map((r) => String((r.proposal || {}).adapter || '')));
           const deviceBuild = h.transport === 'local'
             ? cloud
@@ -411,11 +416,30 @@ export function HostsView({store}: {store: Store}) {
                         <p className="text-xs text-muted">{String(x.version || t('hosts.versionUnregistered'))}</p>
                         {pendingAdapters.has(String(x.adapter)) ? (
                           <p className="mt-1 text-xs text-warn">{t('hosts.registerPending')}</p>
+): workingAdapters.has(String(x.adapter)) ? (
+                          <p className="mt-1 text-xs text-muted">{t('hosts.registerWorking')}</p>
 ): (
-                          <button className="mt-1 text-xs text-brand" onClick={async () => {
-                            try { await api('setup/request', {host_id: h.id, action: 'configure', adapter: String(x.adapter)}); await store.refresh(); }
-                            catch (err: any) { store.setNotice(err?.message); }
-                          }}>{t('hosts.registerExecutor')}</button>
+                          <>
+                            <p className="mt-1 text-xs text-muted" data-testid="register-scope">{t('hosts.registerScope', {host: h.name || h.id, adapter: String(x.adapter)})}</p>
+                            <button
+                              className="mt-1 text-xs text-brand disabled:opacity-50"
+                              data-testid="register-executor"
+                              disabled={busy === 'register:' + h.id + ':' + String(x.adapter)}
+                              onClick={async () => {
+                                const adapter = String(x.adapter);
+                                const key = 'register:' + h.id + ':' + adapter;
+                                if (busy != null) return;
+                                setBusy(key);
+                                try {
+                                  const created = await api<{status?: string}>('setup/request', {host_id: h.id, action: 'configure', adapter});
+                                  store.setNotice(created?.status === 'already_registered' ? t('hosts.registerAlready') : t('hosts.registerStarted'));
+                                  await store.refresh();
+                                }
+                                catch (err: unknown) { store.setNotice(friendlyError(err)); }
+                                finally { setBusy(null); }
+                              }}
+                            >{t('hosts.registerExecutor')}</button>
+                          </>
 )}
                       </div>
 ))}

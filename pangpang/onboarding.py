@@ -544,6 +544,108 @@ class Onboarding:
         req = self.stage_executor(bot_id, work_id, None, host, staged, body)
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
+    def _default_operator_proposal(self, adapter):
+        """The only proposal the computers-page button is allowed to approve.
+
+        No directory, draft, profile, env, argv suffix, or credential id. Empty
+        endpoint means the CLI's own address. auth existing selects that mode;
+        it does not prove the CLI is logged in.
+        """
+        return {"action": "configure", "adapter": adapter, "auth": "existing",
+                "endpoint": "", "endpoint_source": "operator"}
+
+    def _is_default_operator_registration(self, host_id, adapter, req):
+        """True only for a row this shortcut wrote.
+
+        approve() may stamp the canonical installation id, resource_keys, and
+        max_concurrency. A cwd of any shape, a draft, or any other execution
+        field is a different confirmation and is not this row.
+        """
+        if req.get("origin") != "operator" or req.get("bot_id") is not None:
+            return False
+        if req.get("host_id") != host_id:
+            return False
+        proposal = req.get("proposal")
+        if not isinstance(proposal, dict):
+            return False
+        if proposal.get("action") != "configure" or proposal.get("adapter") != adapter:
+            return False
+        if proposal.get("auth") != "existing" or proposal.get("endpoint") != "":
+            return False
+        if proposal.get("endpoint_source") != "operator":
+            return False
+        if "cwd" in proposal or proposal.get("draft"):
+            return False
+        for key in ("profile", "env", "extra_argv", "secret_refs", "enabled", "timeout_s"):
+            if key in proposal:
+                return False
+        canonical = installation_id(adapter, host_id)
+        if proposal.get("installation_id") not in (None, canonical):
+            return False
+        allowed = {"action", "adapter", "auth", "endpoint", "endpoint_source",
+                   "installation_id", "max_concurrency", "resource_keys"}
+        if adapter == "pi":
+            allowed |= {"model", "api"}
+        return set(proposal) <= allowed
+
+    def _open_configures(self, host_id, adapter):
+        """Every unfinished configure for this adapter.
+
+        Store.find stops at the oldest 200 rows, so a host with a long denied
+        history would hide a later configuring row. This walks the unfinished
+        statuses to the end. Expired approval cards are not unfinished.
+        """
+        now = time.time()
+        found = []
+        for status in ("needs_approval", "configuring"):
+            cursor = None
+            while True:
+                page, cursor = self.store.find_page(
+                    "setup_request", cursor=cursor, host_id=host_id, status=status)
+                for req in page:
+                    proposal = req.get("proposal") or {}
+                    if proposal.get("action") != "configure" or proposal.get("adapter") != adapter:
+                        continue
+                    if status == "needs_approval" and req.get("expires", 0) < now:
+                        continue
+                    found.append(req)
+                if cursor is None:
+                    break
+        return found
+
+    def _commit_default_operator_configure(self, host_id, adapter):
+        """Enqueue one default registration. The button click is that submission.
+
+        Approves only the row this call creates. An older needs_approval card,
+        including one whose stored proposal no longer shows an empty cwd, is
+        not approved. A configure already in flight for this adapter blocks a
+        second command, and the default one already in flight is reused.
+        No run grant is written.
+        """
+        iid = installation_id(adapter, host_id)
+        if iid in self.s.execution.installations:
+            return {"status": "already_registered", "installation_id": iid, "yielded": False}
+        if self.store.get("device", host_id).get("revoked"):
+            raise Fault("device_revoked", 403)
+        open_rows = self._open_configures(host_id, adapter)
+        inflight = None
+        for req in open_rows:
+            if (req.get("status") == "configuring"
+                    and self._is_default_operator_registration(host_id, adapter, req)):
+                inflight = req
+                continue
+            raise Fault("setup_scope_pending", 409)
+        if inflight is not None:
+            return {"request_id": inflight["id"], "status": "configuring", "accepted": True,
+                    "yielded": True, "reused": True}
+        created = self.store.put("setup_request", {
+            "id": uid("setup"), "host_id": host_id, "bot_id": None, "work_id": None,
+            "origin": "operator", "proposal": self._default_operator_proposal(adapter),
+            "status": "needs_approval", "expires": time.time() + 3600})
+        approved = self.approve(created["id"], {})
+        approved.update(request_id=created["id"], status="configuring")
+        return approved
+
     def operator_request(self, body):
         action = body.get("action", "configure")
         allowed = {"configure": {"host_id", "action", "adapter", "cwd", "auth"},
@@ -573,9 +675,15 @@ class Onboarding:
                 raise Fault("adapter_not_in_inventory",
                             advice="only adapters the device itself reported in its latest "
                                    "discovery can be registered; run executor discovery on that computer first")
+            # The computers-page button submits exactly this scope: this adapter
+            # on this computer, the device's default directory, existing-credential
+            # mode, and an empty endpoint. A directory or an API key still opens
+            # a card. This does not grant a run and does not approve a chat card.
+            if body.get("auth", "existing") == "existing" and "cwd" not in body:
+                return self._commit_default_operator_configure(host_id, adapter)
             proposal = {"action": "configure", "adapter": adapter,
                         "auth": body.get("auth", "existing"), "endpoint": "", "endpoint_source": "operator"}
-            if body.get("cwd"):
+            if "cwd" in body:
                 proposal["cwd"] = body["cwd"]
             status = "needs_approval"
         else:

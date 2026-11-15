@@ -50,6 +50,7 @@ export default {
     invalid_priority: 'Priority must be 1–999, or left blank.',
     installation_busy: 'The executor is still working. Wait for the current task to finish before changing it.',
     installation_config_changed: 'The configuration was updated by another request. Please retry.',
+    setup_scope_pending: 'This executor already has a pending setup of a different scope on this computer. Handle that card first. This click did not register it.',
     cwd_outside_allowed_roots: 'The working directory is outside the authorized range or inaccessible.',
     invalid_timeout_s: 'Timeout must be 30–86400 seconds.',
     empty_host_limits: 'Provide max_concurrency and/or timeout_s.',
@@ -300,7 +301,7 @@ export default {
 
     connectWorkspace: 'Connect your workspace',
 
-    connectWorkspaceDesc: 'After the connector is paired, the computer appears automatically. Detected executors can be registered from here; each registration completes once the operator approves it.',
+    connectWorkspaceDesc: 'After pairing, executors that this computer last reported and that are not registered yet are listed below. Register this executor submits that registration: the computer’s default working directory, its existing credential mode, and no new API address. A custom directory, a key, or an API address is still confirmed separately. This registration does not authorize task runs.',
 
     noModelSet: 'No model set', endpointConfigured: 'Endpoint configured', endpointUnconfigured: 'Endpoint not configured',
 
@@ -318,7 +319,11 @@ export default {
     unavailable: 'Unavailable · {{reason}}', notProbed: 'Not checked', probeInstall: 'Check installation',
 
     noExecutors: 'No executors registered yet', pairDialogTitle: 'Connect a computer',
-    unregisteredExecutors: 'Detected, not registered', registerExecutor: 'Register executor', registerPending: 'Registration pending approval',
+    unregisteredExecutors: 'Detected, not registered', registerExecutor: 'Register this executor', registerPending: 'Registration pending approval',
+    registerScope: 'Registering {{adapter}} uses the default working directory on “{{host}}” and the executor’s existing credential mode. The version above is the last one the device reported; this click does not check that it still matches, and it does not prove the program is logged in. It does not authorize task runs. Not clicking does not register it.',
+    registerStarted: 'Registration submitted. It appears in the executor list after the device reports back. It still cannot run tasks until you approve the first run.',
+    registerAlready: 'This executor is already registered.',
+    registerWorking: 'Registering on this computer',
 
     pairDialogDesc: 'Start the connector on that computer and fill in the cloud URL, allowed working directories, and the pairing code below.',
 
