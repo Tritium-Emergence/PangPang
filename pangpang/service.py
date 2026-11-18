@@ -942,10 +942,6 @@ class Service:
         task = self.store.get("task", task_id)
         if task["status"] in TERMINAL:
             return
-        if task.get("dreaming"):
-            # No CLI was started. Do not poll a run directory or adopt a process.
-            dreaming.close_leftover(self, task)
-            return
         host = self.execution.hosts.get(task.get("host_id"), {})
         if not host:
             self._record_observation(task, "reconcile", "execution_host_unavailable")
@@ -6448,6 +6444,17 @@ class Service:
         # still hold (last pending dep + no live user/queued/running turn). Those
         # are re-checked under the lock so a racing user message can never be lost.
         fast = self._fast_accept_decision(task, receipt)
+        # The executor already exited. Publishing the dream is a file check on
+        # the staged directory, so it stays outside the store transaction.
+        dream_reject = None
+        if current.get("dreaming") and receipt.get("status") == "succeeded":
+            try:
+                dreaming.accept_candidate(self, current)
+            except dreaming.CandidateRejected as rejected:
+                dream_reject = rejected.text
+            except Exception:
+                log.exception("dreaming publish failed task=%s", current.get("id"))
+                dream_reject = dreaming.REJECT_INTERRUPTED
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL:
@@ -6474,6 +6481,9 @@ class Service:
             elif receipt["status"] == "succeeded" and declared_missing:
                 adjudicated = "failed"
                 adj_error = "declared_output_missing"
+            if dream_reject:
+                adjudicated = "failed"
+                adj_error = dream_reject
             stored_receipt = dict(receipt)
             started_at, ended_at = stored_receipt.get("started"), stored_receipt.get("ended")
             if (type(started_at) in (int, float) and type(ended_at) in (int, float)
@@ -6491,6 +6501,9 @@ class Service:
                 # which keeps the true execution error/none). Reuses the existing
                 # `error` field — no second Task state machine.
                 current["error"] = adj_error
+            if dream_reject:
+                current["error"] = dream_reject
+                current["dream_reject"] = dream_reject
             self.store.put("task", current)
             refs = []
             # The receipt keeps the full harvest (evidence). Chat and result
@@ -6572,6 +6585,10 @@ class Service:
             # directly instead of waking the planner (Qwen-27B) — see _settle_task_dependency.
             #: carry the ADJUDICATED business status/error (not the raw receipt) to
             # the dependency, and never fast-accept a non-succeeded adjudication.
+            if dream_reject and current.get("work_id"):
+                dream_work = self.store.get("work", current["work_id"])
+                dream_work["dream_reject"] = dream_reject
+                self.store.put("work", dream_work)
             self._settle_task_dependency(current, adjudicated, tail=receipt.get("tail", ""),
                                          error=adj_error, refs=refs,
                                          fast_accept=fast if adjudicated == "succeeded" else None)
@@ -7119,8 +7136,6 @@ class Service:
         return progressed
 
     def _reconcile_active_task(self, task):
-        if task.get("dreaming"):
-            return False
         host = self.execution.hosts.get(task.get("host_id"))
         if not host:
             return self._record_observation(task, "reconcile", "execution_host_unavailable")
@@ -7682,8 +7697,6 @@ class Service:
         inst = self.execution.installations.get(task.get("installation_id"), {})
         if self._profile_derived_pi(inst) and not self._bind_profile_pi(inst):
             return self._deny_starting_task(task, "model_not_configured")
-        if task.get("dreaming"):
-            return self._run_dreaming_task(task)
         try:
             start = self.execution.start(task)
         except Fault as error:
@@ -7806,26 +7819,6 @@ class Service:
         log.warning("task %s start attempt %d/%d failed (%s); retry in %ss",
                     task["id"], attempts, self.START_ATTEMPT_BUDGET, error.code, backoff)
         return True
-
-    def _run_dreaming_task(self, task):
-        """Run the memory pass in this process once admission has a free slot.
-
-        The task is the normal queue item (approval, cap, no preemption). The
-        pass does not start the executor CLI, so it cannot read that executor's
-        session files or any path Scope refuses.
-        """
-        self._dream_inflight.add(task["id"])
-        try:
-            dreaming.execute(self, task)
-        except Exception as error:
-            log.exception("dreaming task %s failed", task["id"])
-            dreaming.fail(self, task, error)
-            return True
-        else:
-            dreaming.succeed(self, task)
-            return True
-        finally:
-            self._dream_inflight.discard(task["id"])
 
     def dreaming_view(self):
         return dreaming.public_view(self)

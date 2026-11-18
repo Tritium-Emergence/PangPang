@@ -177,13 +177,15 @@ export interface Project {
   owner_bot_id?: string;
   goal?: string;
   dreamed_at?: number;
-  dream_alert?: {kind?: 'failed' | 'needs_approval' | string; at?: number} | null;
+  dream_alert?: {kind?: 'failed' | 'needs_approval' | string; text?: string; at?: number} | null;
 }
+export interface DreamingExecutor {id: string; label: string; local: boolean}
 export interface DreamingSettings {
   enabled: boolean;
   installation_id: string;
   time: string;
   timezone: string;
+  executors?: DreamingExecutor[];
 }
 export interface Exchange {
   id: string; status?: string; source_bot_id?: string; target_bot_id?: string;

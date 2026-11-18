@@ -192,7 +192,7 @@ function DreamingForm({store}: {store: Store}) {
   const dreaming = (store.snapshot?.dreaming || {
     enabled: false, installation_id: '', time: '02:00', timezone: 'Asia/Shanghai',
   }) as DreamingSettings;
-  const installations = store.snapshot?.installations || [];
+  const executors = dreaming.executors || [];
   const [enabled, setEnabled] = useState(dreaming.enabled);
   const [executor, setExecutor] = useState(dreaming.installation_id || '');
   const [clock, setClock] = useState(dreaming.time || '02:00');
@@ -248,8 +248,10 @@ function DreamingForm({store}: {store: Store}) {
             onChange={(e) => { setExecutor(e.target.value); setDirty(true); }}
           >
             <option value="">{t('hosts.dreamingExecutorNone')}</option>
-            {installations.map((item) => (
-              <option key={item.id} value={item.id}>{String(item.adapter || item.id)} · {item.id}</option>
+            {executors.map((item) => (
+              <option key={item.id} value={item.id} disabled={!item.local}>
+                {item.label} · {item.id}{item.local ? '' : t('hosts.dreamingRemote')}
+              </option>
             ))}
           </select>
         </label>

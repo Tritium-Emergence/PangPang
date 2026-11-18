@@ -186,7 +186,7 @@ export function WorkPane({store}: {store: Store}) {
             <p className="text-xs text-muted">{botName(p.owner_bot_id)} · {tr('workpane.projectWorkCount', {n: projectWork.get(p.id)?.length || 0})}</p>
             {p.goal ? <p className="mt-1 text-sm">{p.goal}</p>: null}
             <p className="text-xs text-muted">{tr('workpane.projectAttentionCount', {n: (projectWork.get(p.id) || []).filter((w) => ['needs_attention', 'blocked', 'working', 'unknown'].includes(w.attention || 'unknown')).length})}</p>
-            {p.dream_alert?.kind === 'failed' ? <p className="mt-1 text-xs text-warn">{tr('workpane.dreamFailed')}</p> : null}
+            {p.dream_alert?.kind === 'failed' ? <p className="mt-1 text-xs text-warn">{p.dream_alert.text || tr('workpane.dreamFailed')}</p> : null}
             {p.dream_alert?.kind === 'needs_approval' ? <p className="mt-1 text-xs text-warn">{tr('workpane.dreamNeedsApproval')}</p> : null}
           </div>
 ))}

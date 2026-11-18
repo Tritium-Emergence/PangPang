@@ -1,5 +1,6 @@
-"""Dreaming: one daily pass per project over material already stored on the server."""
+"""The chosen executor writes the dream. The server only stages and checks it."""
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -15,6 +16,55 @@ from pangpang.http import serve
 from pangpang.service import Service
 from pangpang.store import Fault
 
+_DRAIN = """
+import pathlib, sys
+sys.stdin.read()
+root = pathlib.Path.cwd()
+bits = []
+signal = root / "signal"
+if signal.is_dir():
+    for path in sorted(signal.iterdir()):
+        if path.is_file():
+            bits.append(path.read_text(encoding="utf-8"))
+body = "\\n".join(bits)
+cand = root / "candidate"
+(cand / "topics").mkdir(parents=True, exist_ok=True)
+(cand / "MEMORY.md").write_text("# Memory\\nDREAMED\\n" + body, encoding="utf-8")
+(cand / "topics" / "note.md").write_text(body, encoding="utf-8")
+"""
+
+_FAIL = """
+import sys
+sys.stdin.read()
+sys.exit(1)
+"""
+
+_SYMLINK = """
+import pathlib, sys
+sys.stdin.read()
+cand = pathlib.Path("candidate")
+(cand / "topics").mkdir(parents=True, exist_ok=True)
+(cand / "MEMORY.md").write_text("# Memory\\nDREAMED\\n", encoding="utf-8")
+(cand / "topics" / "leak.md").symlink_to("/etc/passwd")
+"""
+
+_ESCAPE = """
+import pathlib, sys
+sys.stdin.read()
+cand = pathlib.Path("candidate")
+cand.mkdir(parents=True, exist_ok=True)
+(cand / "MEMORY.md").write_text("# Memory\\nDREAMED\\n", encoding="utf-8")
+pathlib.Path("outside.md").write_text("escaped", encoding="utf-8")
+"""
+
+_HUGE = """
+import pathlib, sys
+sys.stdin.read()
+cand = pathlib.Path("candidate")
+cand.mkdir(parents=True, exist_ok=True)
+(cand / "MEMORY.md").write_text("DREAMED\\n" + ("x" * 30000), encoding="utf-8")
+"""
+
 
 class DreamingTests(unittest.TestCase):
     def setUp(self):
@@ -25,10 +75,18 @@ class DreamingTests(unittest.TestCase):
         self.cfg = config(self.root)
         self.app = Service(self.cfg, self.data)
         self.app.probe("codex-local")
+        self._argv(_DRAIN)
 
     def tearDown(self):
         self.app.store.close()
         self.tmp.cleanup()
+
+    def _argv(self, code):
+        inst = self.app.execution.installations["codex-local"]
+        inst["argv"] = [sys.executable, "-c", code]
+        # The operator already approved this executor. Swapping the test command
+        # has to refresh that grant or the task waits for approval.
+        self.app._put_executor_grant(inst["id"], self.app._captured_authorization_digest(inst), "test")
 
     def _enable(self, clock="02:00"):
         return self.app.set_dreaming({
@@ -45,10 +103,21 @@ class DreamingTests(unittest.TestCase):
             })
         return project, message["work_id"]
 
+    def _drain(self):
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            self.app.task_step()
+            live = [task for task in self.app.store.find("task", limit=100)
+                    if task.get("dreaming") and task.get("status") not in {"succeeded", "failed", "cancelled"}]
+            if not live:
+                return
+            time.sleep(0.05)
+        self.fail("dreaming task did not finish")
+
     def _fire(self):
         slot = self.app.store.get("settings", "dreaming")["armed_slot"]
         self.app.dream_step(slot)
-        self.app.task_step()
+        self._drain()
         return slot
 
     def _memory_text(self, project_id):
@@ -57,16 +126,27 @@ class DreamingTests(unittest.TestCase):
         if not root.exists():
             return ""
         for path in root.rglob("*"):
-            if path.is_file() and path.suffix != ".tmp":
-                chunks.append(path.read_text(encoding="utf-8"))
+            if path.is_symlink() or not path.is_file() or path.suffix == ".tmp":
+                continue
+            chunks.append(path.read_text(encoding="utf-8"))
         return "\n".join(chunks)
 
     def test_settings_persist_and_accept_one_executor(self):
         view = self._enable("03:30")
-        self.assertEqual(view, {
-            "enabled": True, "installation_id": "codex-local",
-            "time": "03:30", "timezone": "Asia/Shanghai",
-        })
+        self.assertEqual(view["time"], "03:30")
+        self.assertTrue(view["enabled"])
+        self.assertEqual(view["installation_id"], "codex-local")
+        self.assertEqual(view["timezone"], "Asia/Shanghai")
+        self.assertTrue(any(item["id"] == "codex-local" and item["local"] for item in view["executors"]))
+        host = self.app.execution.hosts["local"]
+        host["transport"] = "connector"
+        try:
+            with self.assertRaises(Fault):
+                self.app.set_dreaming({
+                    "enabled": True, "installation_id": "codex-local", "time": "02:00",
+                })
+        finally:
+            host["transport"] = "local"
         with self.assertRaises(Fault):
             self.app.set_dreaming({
                 "enabled": True,
@@ -89,7 +169,7 @@ class DreamingTests(unittest.TestCase):
             again.store.close()
         self.app = Service(self.cfg, self.data)
 
-    def test_scheduled_run_skips_projects_without_new_material(self):
+    def test_executor_publishes_only_projects_with_new_material(self):
         secret = self.root / "session.jsonl"
         secret.write_text("SESSION-SECRET-BYTES", encoding="utf-8")
         self._enable()
@@ -109,44 +189,72 @@ class DreamingTests(unittest.TestCase):
         notes = len(self.app.store.find("notification"))
         self._fire()
         text = self._memory_text(alpha["id"])
+        self.assertIn("DREAMED", text)
         self.assertIn("ALPHA-SUMMARY", text)
         self.assertIn("receipt tail", text)
         self.assertIn("note.txt", text)
         self.assertNotIn("SESSION-SECRET-BYTES", text)
         self.assertNotIn(str(secret), text)
+        self.assertNotIn("DREAMED", dreaming.PROMPT)
         self.assertFalse((self.data / "memory" / empty["id"] / "CURRENT").exists())
-        self.assertFalse((self.root / "index.md").exists())
+        self.assertFalse((self.root / "MEMORY.md").exists())
         self.assertEqual(len(self.app.store.find("notification")), notes)
         self.assertIsNotNone(self.app.store.get("project", alpha["id"]).get("dreamed_at"))
         self.assertNotIn("dream_alert", self.app.store.get("project", alpha["id"]))
         watermark = dreaming.formal_watermark(self.app, alpha["id"])
-        dreaming_tasks = [t for t in self.app.store.find("task", limit=100) if t.get("dreaming")]
+        dreaming_tasks = [task for task in self.app.store.find("task", limit=100) if task.get("dreaming")]
         self.assertEqual(len(dreaming_tasks), 1)
+        self.assertEqual(dreaming_tasks[0]["status"], "succeeded")
         self._fire()
         self.assertEqual(dreaming.formal_watermark(self.app, alpha["id"]), watermark)
-        self.assertEqual(len([t for t in self.app.store.find("task", limit=100) if t.get("dreaming")]), 1)
+        self.assertEqual(len([task for task in self.app.store.find("task", limit=100) if task.get("dreaming")]), 1)
 
-    def test_interruption_keeps_memory_and_watermark(self):
+    def test_executor_failure_keeps_memory(self):
+        self._enable()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self._argv(_FAIL)
+        self._fire()
+        self.assertEqual(self._memory_text(alpha["id"]), "")
+        self.assertIsNone(dreaming.formal_watermark(self.app, alpha["id"]))
+        alert = self.app.store.get("project", alpha["id"])["dream_alert"]
+        self.assertEqual(alert["kind"], "failed")
+        self.assertIn("执行器", alert["text"])
+        self.assertNotIn("{", alert["text"])
+
+    def test_symlink_and_escape_and_oversize_are_rejected(self):
+        self._enable()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        for code, needle in ((_SYMLINK, "符号链接"), (_ESCAPE, "外面"), (_HUGE, "大小")):
+            self._argv(code)
+            before = dreaming.formal_watermark(self.app, alpha["id"])
+            self._fire()
+            self.assertEqual(dreaming.formal_watermark(self.app, alpha["id"]), before)
+            self.assertNotIn("DREAMED", self._memory_text(alpha["id"]))
+            self.assertIn(needle, self.app.store.get("project", alpha["id"])["dream_alert"]["text"])
+
+    def test_crash_before_publish_resumes_from_the_same_watermark(self):
         self._enable()
         alpha, work_id = self._project("Alpha", "OLD-SUMMARY", "alpha")
         self._fire()
         watermark = dreaming.formal_watermark(self.app, alpha["id"])
         index = dreaming.formal_index(self.app, alpha["id"])
+        self.assertIn("DREAMED", index)
         self.assertIn("OLD-SUMMARY", index)
         self.app.checkpoint_work("bot-main", work_id, {"summary": "NEW-SUMMARY", "phase": "build"})
+
         def stop(_project):
             raise RuntimeError("stop")
+
         self.app.dream_before_commit = stop
-        notes = len(self.app.store.find("notification"))
         self._fire()
         self.assertEqual(dreaming.formal_index(self.app, alpha["id"]), index)
         self.assertEqual(dreaming.formal_watermark(self.app, alpha["id"]), watermark)
         self.assertNotIn("NEW-SUMMARY", dreaming.formal_index(self.app, alpha["id"]))
-        self.assertEqual(self.app.store.get("project", alpha["id"])["dream_alert"]["kind"], "failed")
-        self.assertEqual(len(self.app.store.find("notification")), notes)
+        self.assertIn("中断", self.app.store.get("project", alpha["id"])["dream_alert"]["text"])
         self.app.dream_before_commit = None
         self._fire()
         self.assertIn("NEW-SUMMARY", dreaming.formal_index(self.app, alpha["id"]))
+        self.assertIn("DREAMED", dreaming.formal_index(self.app, alpha["id"]))
         self.assertNotEqual(dreaming.formal_watermark(self.app, alpha["id"]), watermark)
         self.assertNotIn("dream_alert", self.app.store.get("project", alpha["id"]))
         revised = self.app.store.get("work", work_id)["revision"]
@@ -160,38 +268,14 @@ class DreamingTests(unittest.TestCase):
         submitted = self.app.submit_task("bot-main", followed["work_id"], {"prompt": "continue the work"})
         prompt = self.app.store.get("task", submitted["task_id"])["prompt"]
         self.assertIn(dreaming.INDEX_PROMPT_LABEL, prompt)
+        self.assertIn("DREAMED", prompt)
         self.assertIn("ALPHA-SUMMARY", prompt)
         self.assertIn("Work progress", prompt)
         other = self.app.send("bot-main", {"text": "unrelated"}, "other")
         other_task = self.app.submit_task("bot-main", other["work_id"], {"prompt": "something else"})
         other_prompt = self.app.store.get("task", other_task["task_id"])["prompt"]
-        self.assertNotIn("ALPHA-SUMMARY", other_prompt)
+        self.assertNotIn("DREAMED", other_prompt)
         self.assertNotIn(dreaming.INDEX_PROMPT_LABEL, other_prompt)
-
-    def test_out_of_scope_paths_are_refused(self):
-        project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
-        root = dreaming.memory_root(self.app, project["id"])
-        gen = "gen-" + ("a" * 32)
-        write_root = root / "g" / gen
-        write_root.mkdir(parents=True)
-        scope = dreaming.Scope([], write_root)
-        secret = self.root / "session.jsonl"
-        secret.write_text("SESSION-SECRET-BYTES", encoding="utf-8")
-        with self.assertRaises(Fault) as refused:
-            scope.read(secret)
-        self.assertEqual(refused.exception.code, "dream_scope_refused")
-        with self.assertRaises(Fault):
-            scope.write(self.root / "pangpang-product.py", "no")
-        with self.assertRaises(Fault):
-            scope.write(self.data / "bots.db", "no")
-        other = dreaming.memory_root(self.app, "project-" + ("b" * 32))
-        with self.assertRaises(Fault):
-            scope.write(other / "index.md", "no")
-        scope.write(write_root / "index.md", "only this file\n")
-        self.assertEqual(dreaming.Scope([write_root], None).read(write_root / "index.md"), "only this file\n")
-        with self.assertRaises(Fault):
-            dreaming.memory_root(self.app, "../etc")
-        self.assertFalse((self.root / "pangpang-product.py").exists())
 
     def test_boot_does_not_catch_up_and_busy_executor_is_not_preempted(self):
         self._enable()
@@ -208,11 +292,12 @@ class DreamingTests(unittest.TestCase):
             self.assertGreater(stored["armed_slot"], time.time() - 1)
             self.assertFalse((self.data / "memory" / alpha["id"] / "CURRENT").exists())
             self.assertFalse(restarted.dream_step(time.time()))
-            self.assertFalse(any(t.get("dreaming") for t in restarted.store.find("task", limit=50)))
+            self.assertFalse(any(task.get("dreaming") for task in restarted.store.find("task", limit=50)))
         finally:
             restarted.store.close()
         self.app = Service(self.cfg, self.data)
         self.app.probe("codex-local")
+        self._argv(_DRAIN)
         self.app.store.put("task", {
             "id": "task-busy", "status": "running", "installation_id": "codex-local",
             "host_id": "local", "work_id": "work-busy", "owner_bot_id": "bot-main",
@@ -221,15 +306,16 @@ class DreamingTests(unittest.TestCase):
         slot = self.app.store.get("settings", "dreaming")["armed_slot"]
         self.app.dream_step(slot)
         self.assertEqual(self.app.store.get("task", "task-busy")["status"], "running")
-        self.assertFalse(any(t.get("dreaming") for t in self.app.store.find("task", limit=50)))
+        self.assertFalse(any(task.get("dreaming") for task in self.app.store.find("task", limit=50)))
         self.assertIsNotNone(self.app.store.get("settings", "dreaming").get("pending_slot"))
         busy = self.app.store.get("task", "task-busy")
         busy["status"] = "succeeded"
         self.app.store.put("task", busy)
         self.app.dream_step(time.time())
-        self.app.task_step()
-        self.assertTrue(any(t.get("dreaming") and t.get("status") == "succeeded"
-                            for t in self.app.store.find("task", limit=50)))
+        self._drain()
+        self.assertTrue(any(task.get("dreaming") and task.get("status") == "succeeded"
+                            for task in self.app.store.find("task", limit=50)))
+        self.assertIn("DREAMED", dreaming.formal_index(self.app, alpha["id"]))
         self.assertIn("ALPHA-SUMMARY", dreaming.formal_index(self.app, alpha["id"]))
 
     def test_http_form_fields_roundtrip(self):
@@ -261,6 +347,7 @@ class DreamingTests(unittest.TestCase):
             self.assertTrue(saved["enabled"])
             self.assertNotIn("armed_slot", saved)
             self.assertNotIn("pending_slot", saved)
+            self.assertTrue(saved["executors"][0]["local"])
             with request("snapshot") as response:
                 snap = json.loads(response.read().decode())
             self.assertEqual(snap["dreaming"]["installation_id"], "codex-local")
