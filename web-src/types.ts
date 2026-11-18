@@ -69,6 +69,7 @@ export interface Task {
     credential_ids?: string[];
     truncated?: boolean;
   };
+  dreaming?: boolean;
   created?: number;
   started?: number;
   reachability?: {
@@ -170,7 +171,20 @@ export interface SetupRequest {
   proposal?: Record<string, unknown>;
 }
 
-export interface Project {id: string; title: string; owner_bot_id?: string; goal?: string}
+export interface Project {
+  id: string;
+  title: string;
+  owner_bot_id?: string;
+  goal?: string;
+  dreamed_at?: number;
+  dream_alert?: {kind?: 'failed' | 'needs_approval' | string; at?: number} | null;
+}
+export interface DreamingSettings {
+  enabled: boolean;
+  installation_id: string;
+  time: string;
+  timezone: string;
+}
 export interface Exchange {
   id: string; status?: string; source_bot_id?: string; target_bot_id?: string;
   source_work_id?: string; target_work_id?: string; work_id?: string; summary?: string; request?: string;
@@ -237,6 +251,7 @@ export interface Snapshot {
   installations: Installation[];
   models: Model[];
   probes: Probe[];
+  dreaming?: DreamingSettings;
 }
 
 export interface Message {

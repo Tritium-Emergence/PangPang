@@ -107,6 +107,8 @@ export default {
     newProject: 'New project', noProjects: 'No projects yet.',
 
     projectWorkCount: 'Work items loaded: {{n}}', projectAttentionCount: '{{n}} still need attention (loaded)',
+    dreamFailed: 'Dreaming did not finish. The next scheduled time continues from the same place.',
+    dreamNeedsApproval: 'Dreaming is waiting for approval of this executor.',
 
     routines: 'Routines', noRoutines: 'No routines yet.', worksInProgress: 'Works in progress',
 
@@ -369,6 +371,17 @@ export default {
     allowFileReceiveHint: 'Allow this computer to receive files sent from elsewhere (for example chat images). Off by default; a missing setting counts as off. The connector applies the change immediately — no restart and no database edit. The computer must be online.',
     fileReceiveSaved: 'Allow file receive updated',
     fileReceivePending: 'This computer has not confirmed yet. The switch may apply shortly; refresh the device status.',
+    dreamingTitle: 'Dreaming',
+    dreamingHint: 'Once a day, one registered executor consolidates each project’s returned receipts, artifacts, and checkpoints into that project’s memory. It does not read executor sessions or other machines. If that executor is busy or offline, the pass waits for a free slot and does not interrupt a running task.',
+    dreamingEnabled: 'Dreaming on',
+    dreamingExecutor: 'Executor',
+    dreamingExecutorNone: 'Choose one executor',
+    dreamingTime: 'Time',
+    dreamingTimezone: 'Asia/Shanghai',
+    dreamingSave: 'Save dreaming',
+    dreamingSaved: 'Dreaming settings saved',
+    dreamingNeedExecutor: 'Choose one executor before turning dreaming on.',
+    dreamingTimeInvalid: 'Time must be HH:MM.',
 
   },
 

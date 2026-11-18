@@ -152,7 +152,7 @@ export function WorkPane({store}: {store: Store}) {
   const routineRef = useRef<HTMLDivElement>(null), taskRef = useRef<HTMLDivElement>(null), artifactRef = useRef<HTMLDivElement>(null);
   const [detail, setDetail] = useState<Work | null>(null);
 
-  const works = [...(snap.work || [])].reverse();
+  const works = [...(snap.work || [])].filter((w) => w.kind !== 'dreaming').reverse();
   // Group once: the project cards below need per-project Works twice each, and scanning
   // the whole (up to 1000-row) window per card made the grid O(projects x works) on
   // every snapshot refresh.
@@ -160,7 +160,7 @@ export function WorkPane({store}: {store: Store}) {
   for (const w of works) if (w.project_id) (projectWork.get(w.project_id) || projectWork.set(w.project_id, []).get(w.project_id)!).push(w);
   const wp = usePager<Work>(works, workGridRef);
   const unknownTasks = (snap.tasks || []).filter((t) => t.status === 'unknown');
-  const tasks = [...(snap.tasks || [])].reverse();
+  const tasks = [...(snap.tasks || [])].filter((t) => !(t.dreaming && (t.status === 'succeeded' || t.status === 'cancelled'))).reverse();
   const rp = usePager<Routine>([...(snap.routines || [])].reverse(), routineRef);
   const tp = usePager<Task>(tasks, taskRef);
   const latestArtifactId = (snap.artifacts || [])[snap.artifacts.length - 1]?.id || '';
@@ -186,6 +186,8 @@ export function WorkPane({store}: {store: Store}) {
             <p className="text-xs text-muted">{botName(p.owner_bot_id)} · {tr('workpane.projectWorkCount', {n: projectWork.get(p.id)?.length || 0})}</p>
             {p.goal ? <p className="mt-1 text-sm">{p.goal}</p>: null}
             <p className="text-xs text-muted">{tr('workpane.projectAttentionCount', {n: (projectWork.get(p.id) || []).filter((w) => ['needs_attention', 'blocked', 'working', 'unknown'].includes(w.attention || 'unknown')).length})}</p>
+            {p.dream_alert?.kind === 'failed' ? <p className="mt-1 text-xs text-warn">{tr('workpane.dreamFailed')}</p> : null}
+            {p.dream_alert?.kind === 'needs_approval' ? <p className="mt-1 text-xs text-warn">{tr('workpane.dreamNeedsApproval')}</p> : null}
           </div>
 ))}
       </div>
@@ -326,7 +328,7 @@ function TaskPanel({t, store}: {t: Task; store: Store}) {
         {!['succeeded', 'failed', 'cancelled'].includes(t.status) ? <Act label={tr('workpane.cancel')} run={() => api(`tasks/${t.id}/cancel`, {})} store={store} ghost />: null}
         {['unknown', 'running', 'cancel_requested'].includes(t.status) ? <Act ghost label={tr('workpane.reconcile')} run={() => api(`tasks/${t.id}/reconcile`, {})} store={store} />: null}
         {t.status === 'unknown' ? <RecoveryActions task={t} store={store} />: null}
-        {['failed', 'cancelled'].includes(t.status) ? <Act label={tr('workpane.retry')} run={() => api(`tasks/${t.id}/retry`, {})} store={store} />: null}
+        {['failed', 'cancelled'].includes(t.status) && !t.dreaming ? <Act label={tr('workpane.retry')} run={() => api(`tasks/${t.id}/retry`, {})} store={store} />: null}
       </div>
     </div>
 );
