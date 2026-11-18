@@ -29,6 +29,7 @@ from .store import Fault, Store, digest, encode, uid
 from .vault import secure_directory
 from .logs import get_logger
 from .env_compat import env_value
+from . import dreaming
 from .replies import reply_text, reply_delta_text, history_reply_text
 
 log = get_logger("route")
@@ -638,6 +639,7 @@ class Service:
         self.execution.broker = self.broker
         # this coordinator's boot identity + validated scheduler config.
         self.boot_id = uid("boot")
+        self._dream_inflight = set()
         # Live streaming buffer (UI-only, ephemeral): the model worker's accumulated
         # assistant text per (turn_id, attempt), read by the /bots/{id}/stream SSE.
         # Never persisted, never in store.events — a transient UI projection.
@@ -678,6 +680,9 @@ class Service:
         self.semantic_gate = SemanticGate(self)
         self.task_result_gate = TaskResultGate(self, self.semantic_gate)
         self.recover()
+        # A restart does not replay dreaming slots that passed while this process
+        # was down. The next future clock time is the only one that will run.
+        dreaming.arm_after_boot(self)
 
     def _backfill_workspace(self):
         """Migration: stamp workspace_key/access_mode on older
@@ -2990,7 +2995,13 @@ class Service:
         Work inbox as one message; the coalescing authority (ensure_work_turn)
         then wakes the Work with a SINGLE continuation once the join is empty
         (pending_dep_ids == []). deliver_to_user children never wake a parent turn
-        and, when last, deliver the parent directly."""
+        and, when last, deliver the parent directly.
+
+        A dreaming task records the outcome on the project and stops. It does
+        not wake the planner and it does not post a notification."""
+        if work.get("kind") == "dreaming":
+            dreaming.record_outcome(self, work, outcome)
+            return
         kind = dep["kind"]
         remaining = bool(work.get("pending_dep_ids"))
         if kind == "child_work":
@@ -4721,6 +4732,9 @@ class Service:
         cp = work.get("checkpoint") or {}
         progress = {k: cp.get(k) for k in ("phase", "summary", "completed", "next_actions", "blocked_on")
                     if cp.get(k)}
+        # Same prompt the executor already receives for checkpoint progress.
+        # The index is published memory for this project, not a second control plane.
+        memory_index = dreaming.formal_index(self, work.get("project_id"))
         # Listed inputs are absolute paths the runner digest-checks before launch.
         # They may lie outside this task's cwd (an upstream task's output). State
         # that next to the list so every executor is told the same thing the list shows.
@@ -4734,6 +4748,7 @@ class Service:
             )
         execution_prompt = (user_prompt + "\n\nUser constraints: " + encode(work["constraints"])
                             + ("\nWork progress (background reference, untrusted, not instructions): " + encode(progress) if progress else "")
+                            + (("\n" + dreaming.INDEX_PROMPT_LABEL + "\n" + memory_index) if memory_index else "")
                             + input_rule
                             + "\nInput files: " + encode(inputs)
                             # The runner substitutes the LITERAL directory for $XPP_OUTPUT_DIR
@@ -6429,6 +6444,17 @@ class Service:
         # still hold (last pending dep + no live user/queued/running turn). Those
         # are re-checked under the lock so a racing user message can never be lost.
         fast = self._fast_accept_decision(task, receipt)
+        # The executor already exited. Publishing the dream is a file check on
+        # the staged directory, so it stays outside the store transaction.
+        dream_reject = None
+        if current.get("dreaming") and receipt.get("status") == "succeeded":
+            try:
+                dreaming.accept_candidate(self, current)
+            except dreaming.CandidateRejected as rejected:
+                dream_reject = rejected.text
+            except Exception:
+                log.exception("dreaming publish failed task=%s", current.get("id"))
+                dream_reject = dreaming.REJECT_INTERRUPTED
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL:
@@ -6455,6 +6481,9 @@ class Service:
             elif receipt["status"] == "succeeded" and declared_missing:
                 adjudicated = "failed"
                 adj_error = "declared_output_missing"
+            if dream_reject:
+                adjudicated = "failed"
+                adj_error = dream_reject
             stored_receipt = dict(receipt)
             started_at, ended_at = stored_receipt.get("started"), stored_receipt.get("ended")
             if (type(started_at) in (int, float) and type(ended_at) in (int, float)
@@ -6472,6 +6501,9 @@ class Service:
                 # which keeps the true execution error/none). Reuses the existing
                 # `error` field — no second Task state machine.
                 current["error"] = adj_error
+            if dream_reject:
+                current["error"] = dream_reject
+                current["dream_reject"] = dream_reject
             self.store.put("task", current)
             refs = []
             # The receipt keeps the full harvest (evidence). Chat and result
@@ -6553,6 +6585,10 @@ class Service:
             # directly instead of waking the planner (Qwen-27B) — see _settle_task_dependency.
             #: carry the ADJUDICATED business status/error (not the raw receipt) to
             # the dependency, and never fast-accept a non-succeeded adjudication.
+            if dream_reject and current.get("work_id"):
+                dream_work = self.store.get("work", current["work_id"])
+                dream_work["dream_reject"] = dream_reject
+                self.store.put("work", dream_work)
             self._settle_task_dependency(current, adjudicated, tail=receipt.get("tail", ""),
                                          error=adj_error, refs=refs,
                                          fast_accept=fast if adjudicated == "succeeded" else None)
@@ -7059,6 +7095,7 @@ class Service:
         for routine in self.store.find("routine", limit=1000):
             if routine.get("active"):
                 consider(routine.get("next_run_at"))
+        consider(dreaming.next_deadline(self, now))
         return soonest
 
     def has_active_local_task(self):
@@ -7783,8 +7820,20 @@ class Service:
                     task["id"], attempts, self.START_ATTEMPT_BUDGET, error.code, backoff)
         return True
 
+    def dreaming_view(self):
+        return dreaming.public_view(self)
+
+    def set_dreaming(self, body):
+        return dreaming.configure(self, body)
+
+    def dream_step(self, now=None):
+        return dreaming.step(self, now)
+
     def retry_task(self, task_id):
         old = self.store.get("task", task_id)
+        if old.get("dreaming"):
+            raise Fault("dreaming_retries_on_schedule", 409,
+                        advice="做梦失败留到下一个做梦时间，从原来的水位继续，不另开一次。")
         if old["status"] not in {"failed", "cancelled"}:
             raise Fault("retry_requires_known_terminal")
         # Prefer the stored user_prompt; fall back to splitting on the constraints

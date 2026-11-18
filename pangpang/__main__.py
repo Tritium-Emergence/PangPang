@@ -294,6 +294,7 @@ def main():
                     # still waits for the next pass (full fix needs bounded parallel
                     # remote observation, tracked as follow-up).
                     progressed |= bool(runtime.scheduler.sweep_hard_timeouts())
+                    progressed |= bool(service.dream_step())
                     progressed |= bool(service.task_step())
                     progressed |= bool(service.routine_step())
                     progressed |= bool(service.sweep_deadlines())

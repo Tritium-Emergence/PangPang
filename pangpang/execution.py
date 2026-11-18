@@ -976,11 +976,16 @@ class Execution:
     def spec(self, task):
         e = self.installations[task["installation_id"]]
         h = self.hosts[e["host_id"]]
+        roots = h.get("allowed_roots", [])
+        # A dream runs only inside the staged directory. The runner's existing
+        # root check then refuses paths outside that directory.
+        if task.get("dreaming") and isinstance(task.get("launch_roots"), list) and task["launch_roots"]:
+            roots = [str(item) for item in task["launch_roots"]]
         spec = {"execution_id": task["execution_id"], "spec_digest": task["spec_digest"],
                 "attempt_uuid": task.get("attempt_uuid"),
                 "argv": list(e["argv"]) + list(e.get("extra_argv", [])),
                 "prompt": task["prompt"], "prompt_mode": e.get("prompt_mode", "stdin"),
-                "cwd": task.get("cwd", e["cwd"]), "allowed_roots": h.get("allowed_roots", []), "inputs": task["inputs"],
+                "cwd": task.get("cwd", e["cwd"]), "allowed_roots": roots, "inputs": task["inputs"],
                 "control_roots": [str(self.data)] if h["transport"] == "local" else [h["runner_root"]],
                 "outputs": task.get("outputs", []), "required_outputs": task.get("required_outputs", []),
                 "timeout_s": task.get("timeout_s", e.get("timeout_s", 3600)),

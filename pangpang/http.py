@@ -312,7 +312,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                                   "models": [{"id": p["id"], "model": p.get("model", ""), "configured": bool(p.get("endpoint")),
                                               "context_window_tokens": p.get("context_window_tokens")}
                                              for p in service.profiles.values()],
-                                  "probes": service.store.find("probe")})
+                                  "probes": service.store.find("probe"),
+                                  "dreaming": service.dreaming_view()})
                     return
                 if path == "/api/v1/setup/model-catalog":
                     from .model_config import operator_catalog, parse_context_window, custom_output_bounds
@@ -332,6 +333,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                     return
                 if path == "/api/v1/settings":
                     self.respond(public_config(service.config)); return
+                if parts == ["dreaming"]:
+                    self.respond(service.dreaming_view()); return
                 if parts == ["hosts"]:
                     self.respond(project_hosts(list(service.execution.hosts.values()))); return
                 if parts == ["projects"]:
@@ -549,6 +552,8 @@ def serve(service, token, host="127.0.0.1", port=8790, origin=None):
                 def action():
                     if parts == ["settings"]:
                         raise Fault("use_guided_model_and_conversational_setup", 410)
+                    if parts == ["dreaming"]:
+                        return service.set_dreaming(body)
                     if parts == ["setup", "request"]:
                         return service.onboarding.operator_request(body)
                     if len(parts) == 3 and parts[0] == "devices" and parts[2] == "revoke":
