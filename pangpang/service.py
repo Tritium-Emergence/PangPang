@@ -1524,6 +1524,12 @@ class Service:
             return []
         seen.add(work_id)
         ids = []
+        try:
+            work = self.store.get("work", work_id)
+        except Fault:
+            work = None
+        if work and work.get("kind") == "dreaming" and work.get("project_id"):
+            ids.append(work["project_id"])
         for task in self._all("task", work_id=work_id):
             if task.get("dreaming"):
                 ids.append(task.get("dreaming_project_id") or "")
@@ -1548,8 +1554,14 @@ class Service:
         unknown cancel-requested task. A child that was already terminal is
         not entered."""
         visited = set()
-        with dreaming.hold_publication(self._dream_projects_for_cancel(work_id)):
-            self._cancel_work_txn(work_id, visited)
+        try:
+            opening = self.store.get("work", work_id)
+        except Fault:
+            opening = {}
+        primary = [opening["project_id"]] if opening.get("kind") == "dreaming" and opening.get("project_id") else []
+        with dreaming.hold_publication(primary):
+            with dreaming.hold_publication(self._dream_projects_for_cancel(work_id)):
+                self._cancel_work_txn(work_id, visited)
         for wid in visited:
             for task in self._all("task", work_id=wid):
                 if task.get("status") == "unknown" and task.get("cancel_requested"):

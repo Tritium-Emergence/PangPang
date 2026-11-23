@@ -558,7 +558,10 @@ class ReviewTests(unittest.TestCase):
         (leftover / "MEMORY.md").write_text("stale\n", encoding="utf-8")
         orphan = self.data.resolve().parent / "dream-stage" / alpha["id"] / "run-orphan"
         orphan.mkdir(parents=True)
-        self.app.dream_step(time.time() + 1)
+        for _ in range(20):
+            self.app.dream_step(time.time() + 1)
+            if not leftover.exists() and not orphan.exists():
+                break
         self.assertTrue((root / "g" / current).is_dir())
         self.assertFalse(leftover.exists())
         self.assertFalse(orphan.exists())
@@ -795,12 +798,15 @@ class ReviewTests(unittest.TestCase):
         try:
             now = time.time()
             self.assertTrue(self.app.dream_step(now))
+            works = [row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]
+            self.assertEqual(len(works), 1)
+            self.assertEqual(works[0]["status"], "active")
             self.assertFalse(self.app.dream_step(now + 1))
+            self.assertEqual(len([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]), 1)
         finally:
             self.app.submit_task = real
-        self.assertEqual([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"
-                          and row.get("status") != "cancelled"], [])
         self.app.dream_step(time.time() + dreaming.DEFER_S + 2)
+        self.assertEqual(len([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]), 1)
         self.assertTrue(any(row.get("dreaming") for row in self.app.store.find("task", limit=20)))
 
     def test_confinement_blocks_a_read_outside_the_stage(self):
@@ -837,17 +843,28 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("WRITE_OK", completed.stdout)
         self.assertEqual((stage / "candidate" / "out.txt").read_text(encoding="utf-8"), "ok")
 
-    def test_a_deep_leftover_does_not_stop_dream_step(self):
+    def test_a_deep_leftover_is_resumed_past_the_shallow_sibling(self):
         project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
-        deep = self.data.resolve().parent / "dream-stage" / project["id"] / "run-deep"
-        current = deep
-        for _ in range(40):
-            current = current / "n"
-        current.mkdir(parents=True)
-        (current / "leaf.txt").write_text("x", encoding="utf-8")
-        os.chmod(deep, 0o755)
-        self.app.dream_step(time.time())
-        self.assertTrue(True)
+        stage = self.data.resolve().parent / "dream-stage" / project["id"] / "run-deep"
+        signal = stage / "signal"
+        signal.mkdir(parents=True)
+        (signal / "note.txt").write_text("kept\n", encoding="utf-8")
+        leaf = stage / "candidate"
+        for _ in range(80):
+            leaf = leaf / "n"
+        leaf.mkdir(parents=True)
+        (leaf / "leaf.txt").write_text("x", encoding="utf-8")
+        for _ in range(4):
+            self.app.dream_step(time.time())
+        cursor = self.app.store.get("settings", "dreaming").get("cleanup_cursor") or {}
+        frames = cursor.get("frames") or []
+        self.assertTrue(frames)
+        self.assertIn("candidate", frames[-1])
+        for _ in range(90):
+            self.app.dream_step(time.time())
+            if not (leaf / "leaf.txt").exists():
+                break
+        self.assertFalse((leaf / "leaf.txt").exists())
 
     def test_unknown_cancel_does_not_publish(self):
         self._due()
@@ -863,3 +880,77 @@ class ReviewTests(unittest.TestCase):
             dreaming.accept_candidate(self.app, task)
         root = dreaming.memory_root(self.app, alpha["id"])
         self.assertFalse((root / "CURRENT").exists())
+
+    def test_a_route_miss_does_not_build_another_work_while_waiting(self):
+        self._due()
+        self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        probe = self.app.store.get("probe", "codex-local")
+        probe["available"] = False
+        self.app.store.put("probe", probe)
+        now = time.time()
+        self.assertTrue(self.app.dream_step(now))
+        self.assertEqual([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"], [])
+        self.assertFalse(self.app.dream_step(now + 1))
+        self.assertTrue(self.app.dream_step(now + dreaming.DEFER_S + 1))
+        self.assertEqual([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"], [])
+        probe["available"] = True
+        self.app.store.put("probe", probe)
+        self.app.dream_step(time.time() + 2 * dreaming.DEFER_S + 2)
+        self.assertEqual(len([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]), 1)
+        self.assertTrue(any(row.get("dreaming") for row in self.app.store.find("task", limit=20)))
+
+    def test_runtime_paths_are_the_program_not_a_data_parent(self):
+        from pangpang import runner
+        paths = runner._runtime_read_paths([sys.executable])
+        self.assertIn(os.path.realpath(sys.executable), paths)
+        self.assertTrue(any("python" in path for path in paths))
+        self.assertFalse(any(path == "/opt" or path.startswith("/opt/") for path in paths))
+        self.assertFalse(any(path == "/private" or path.startswith("/private/") for path in paths))
+        self.assertNotIn("/usr", paths)
+        self.assertNotIn("/Library", paths)
+
+    def test_sync_recovery_uses_the_work_when_the_marker_is_missing(self):
+        self._due()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self.app.dream_step(time.time())
+        self._drain()
+        root = dreaming.memory_root(self.app, alpha["id"])
+        marker = root / "PENDING_SYNC"
+        if marker.exists():
+            marker.unlink()
+        task = next(row for row in self.app.store.find("task", limit=20) if row.get("dreaming"))
+        work = self.app.store.get("work", task["work_id"])
+        work["dream_sync_pending"] = True
+        work["status"] = "active"
+        self.app.store.put("work", work)
+        project = self.app.store.get("project", alpha["id"])
+        project.pop("dreamed_at", None)
+        self.app.store.put("project", project)
+        dreaming.recover_sync(self.app)
+        settled = self.app.store.get("work", work["id"])
+        self.assertNotIn("dream_sync_pending", settled)
+        self.assertEqual(settled["status"], "delivered")
+        self.assertTrue(self.app.store.get("project", alpha["id"]).get("dreamed_at"))
+
+    def test_watermark_chunks_cover_many_batches_without_a_chain(self):
+        project = self.app.create_project("bot-main", {"title": "Marks", "goal": "many"})
+        root = dreaming.memory_root(self.app, project["id"])
+        root.mkdir(parents=True)
+        for index in range(120):
+            dreaming._append_mark(root, {"item-%d" % index: "token-%d" % index})
+        found = dreaming._read_watermark(root)
+        self.assertEqual(len(found), 120)
+        self.assertEqual(found["item-0"], "token-0")
+        self.assertEqual(found["item-119"], "token-119")
+        order = json.loads((root / "mark" / "order.json").read_text(encoding="utf-8"))
+        self.assertLessEqual(len(order), 8)
+
+    def test_cancel_uses_the_dream_work_before_a_task_exists(self):
+        project = self.app.create_project("bot-main", {"title": "Cancel", "goal": "hold"})
+        work = self.app.store.put("work", {
+            "id": uid("work"), "owner_bot_id": "bot-main", "goal": "dream", "status": "active",
+            "kind": "dreaming", "project_id": project["id"], "created": time.time(),
+        })
+        ids = self.app._dream_projects_for_cancel(work["id"])
+        self.assertIn(project["id"], ids)
+        self.assertEqual([row for row in self.app.store.find("task", limit=20) if row.get("work_id") == work["id"]], [])

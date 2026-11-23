@@ -41,9 +41,9 @@ _LANDLOCK_WRITE = (
 )
 _LANDLOCK_REFER = 1 << 13
 _LANDLOCK_TRUNCATE = 1 << 14
-_RUNTIME_READ_DIRS = (
-    "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt", "/System",
-    "/Library", "/private", "/dev", "/proc", "/Applications", "/opt/homebrew",
+_RUNTIME_FILES = (
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd",
+    "/etc/group", "/dev/null", "/dev/urandom", "/dev/zero",
 )
 _SYS_LANDLOCK_CREATE = 444
 _SYS_LANDLOCK_ADD = 445
@@ -148,18 +148,62 @@ def dream_boundary_available():
     return False
 
 
+_RUNTIME_PARENT_BLOCK = {"/", "/usr", "/opt", "/private", "/Library", "/System", "/home", "/Users", "/tmp", "/var", "/data"}
+
+
+def _allow_runtime_parent(path):
+    parent = os.path.dirname(path)
+    if not parent or parent in _RUNTIME_PARENT_BLOCK:
+        return ""
+    if parent.startswith("/opt/") or parent.startswith("/private/") or parent.startswith("/var/"):
+        return ""
+    return parent
+
+
 def _runtime_read_paths(argv):
+    """The chosen program, its libraries, and the few system files it needs.
+
+    The program's own directory and library directory are included so it can
+    be executed. Broad trees that can hold project memory or control data
+    (/usr, /opt, /private, /Library, /var) are not.
+    """
     paths = []
-    for candidate in _RUNTIME_READ_DIRS:
-        if os.path.isdir(candidate):
-            paths.append(candidate)
-    exe = argv[0] if argv else sys.executable
+
+    def add(path):
+        if path and os.path.exists(path) and path not in paths:
+            paths.append(path)
+
+    requested = argv[0] if argv else sys.executable
     try:
-        parent = os.path.dirname(os.path.realpath(exe))
+        exe = os.path.realpath(requested)
     except OSError:
-        parent = ""
-    if parent and os.path.isdir(parent) and parent not in paths:
-        paths.append(parent)
+        exe = requested
+    add(requested)
+    add(exe)
+    add(_allow_runtime_parent(requested))
+    add(_allow_runtime_parent(exe))
+    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
+    try:
+        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
+        for match in re.findall(r"(/[^ )\n]+)", listed.stdout or ""):
+            add(match)
+            add(_allow_runtime_parent(match))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if exe and "python" in os.path.basename(exe).lower():
+        try:
+            listed = subprocess.run(
+                [exe, "-c",
+                 "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
+                capture_output=True, text=True, timeout=5)
+            for line in (listed.stdout or "").splitlines():
+                add(line)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for extra in ("/etc/ssl", "/etc/ssl/certs", "/System/Library/OpenSSL"):
+        add(extra)
+    for extra in _RUNTIME_FILES:
+        add(extra)
     return paths
 
 
@@ -172,13 +216,16 @@ def _landlock_handled(abi):
     return handled
 
 
-def _add_landlock_rule(syscall, ruleset, directory, access):
+def _add_landlock_rule(syscall, ruleset, path, access):
     import ctypes
 
     class PathAttr(ctypes.Structure):
         _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
 
-    parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if os.path.isdir(path):
+        flags |= os.O_DIRECTORY
+    parent = os.open(path, flags)
     try:
         rule = PathAttr(access, parent)
         added = syscall(_SYS_LANDLOCK_ADD, ruleset, ctypes.c_uint32(1), ctypes.byref(rule), 0)
@@ -3803,9 +3850,9 @@ def main():
                         if os.environ.get("XPP_OUTPUT_DIR"):
                             writable.append(os.environ["XPP_OUTPUT_DIR"])
                         try:
-                            if sys.platform == "darwin":
-                                exec_confined([str(Path.cwd())], writable, argv)
-                            confine_dream([str(Path.cwd())], writable)
+                            # Same readable set as the process-group wrapper,
+                            # including this program and its libraries.
+                            exec_confined([str(Path.cwd())], writable, argv)
                         except OSError:
                             sys.exit(126)
                     # Inherit cwd: supervise() launched this child with
