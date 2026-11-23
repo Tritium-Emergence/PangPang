@@ -248,11 +248,14 @@ function DreamingForm({store}: {store: Store}) {
             onChange={(e) => { setExecutor(e.target.value); setDirty(true); }}
           >
             <option value="">{t('hosts.dreamingExecutorNone')}</option>
-            {executors.map((item) => (
-              <option key={item.id} value={item.id} disabled={!item.local}>
-                {item.label} · {item.id}{item.local ? '' : t('hosts.dreamingRemote')}
-              </option>
-            ))}
+            {executors.map((item) => {
+              const offered = item.local && item.bounded !== false;
+              return (
+                <option key={item.id} value={item.id} disabled={!offered}>
+                  {item.label} · {item.id}{offered ? '' : item.local ? t('hosts.dreamingUnbounded') : t('hosts.dreamingRemote')}
+                </option>
+              );
+            })}
           </select>
         </label>
         <label className="flex flex-col gap-1 text-xs text-muted">

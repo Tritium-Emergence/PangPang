@@ -179,7 +179,7 @@ export interface Project {
   dreamed_at?: number;
   dream_alert?: {kind?: 'failed' | 'needs_approval' | string; text?: string; at?: number} | null;
 }
-export interface DreamingExecutor {id: string; label: string; local: boolean}
+export interface DreamingExecutor {id: string; label: string; local: boolean; bounded?: boolean}
 export interface DreamingSettings {
   enabled: boolean;
   installation_id: string;

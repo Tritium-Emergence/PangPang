@@ -1,5 +1,6 @@
 """Business authority. All bot tool mutations pass through these contracts."""
 import base64
+import contextlib
 import copy
 import errno
 import hashlib
@@ -6465,17 +6466,30 @@ class Service:
         # still hold (last pending dep + no live user/queued/running turn). Those
         # are re-checked under the lock so a racing user message can never be lost.
         fast = self._fast_accept_decision(task, receipt)
-        # The executor already exited. Publishing the dream is a file check on
-        # the staged directory, so it stays outside the store transaction.
-        dream_reject = None
-        if current.get("dreaming") and receipt.get("status") == "succeeded":
-            try:
-                dreaming.accept_candidate(self, current)
-            except dreaming.CandidateRejected as rejected:
-                dream_reject = rejected.text
-            except Exception:
-                log.exception("dreaming publish failed task=%s", current.get("id"))
-                dream_reject = dreaming.REJECT_INTERRUPTED
+        # A dream's publish and its terminal write share one lock, so a cancel
+        # that lands first cannot be followed by a publish, and a publish that
+        # lands first is the decision the terminal row records.
+        publication = (dreaming.publication_lock(current.get("dreaming_project_id"))
+                       if current.get("dreaming") else contextlib.nullcontext())
+        with publication:
+            current = self.store.get("task", task["id"])
+            if current["status"] in TERMINAL:
+                return current
+            # The executor already exited. Publishing the dream is a file check on
+            # the staged directory, so it stays outside the store transaction.
+            dream_reject = None
+            if current.get("dreaming") and receipt.get("status") == "succeeded":
+                try:
+                    dreaming.accept_candidate(self, current)
+                except dreaming.CandidateRejected as rejected:
+                    dream_reject = rejected.text
+                except Exception:
+                    log.exception("dreaming publish failed task=%s", current.get("id"))
+                    dream_reject = dreaming.REJECT_INTERRUPTED
+            self._complete_task_locked(task, receipt, fast, dream_reject)
+        return self.store.get("task", task["id"])
+
+    def _complete_task_locked(self, task, receipt, fast, dream_reject):
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL:
@@ -7718,11 +7732,19 @@ class Service:
         inst = self.execution.installations.get(task.get("installation_id"), {})
         if self._profile_derived_pi(inst) and not self._bind_profile_pi(inst):
             return self._deny_starting_task(task, "model_not_configured")
-        # A dream work whose task was stored before its stage cwd was bound must
-        # not start in the product directory. A live attempt is left to the
-        # normal receipt rules.
-        if self._dream_unbound(task) and task.get("status") in {"queued", "starting"} and not task.get("supervisor"):
-            return self._fail_task_terminally(task["id"], "dream_unbound", {"queued", "starting"})
+        # A dream that was never started does not run as a normal task. A
+        # starting attempt needs a real launch trace: a missing supervisor
+        # field is not that proof, so observation failure stays quarantined.
+        if self._dream_unbound(task):
+            if task.get("status") == "queued":
+                return self._fail_task_terminally(task["id"], "dream_unbound", {"queued"})
+            if task.get("status") == "starting":
+                return self._deny_starting_task(task, "dream_unbound")
+        if task.get("dreaming") and not runner.dream_boundary_available():
+            if task.get("status") == "queued":
+                return self._fail_task_terminally(task["id"], "dream_boundary_unavailable", {"queued"})
+            if task.get("status") == "starting":
+                return self._deny_starting_task(task, "dream_boundary_unavailable")
         try:
             start = self.execution.start(task)
         except Fault as error:

@@ -35,6 +35,9 @@ SIGNAL_MAX = 4000
 MAX_FILES = 32
 MAX_DIRS = 8
 MAX_WALK = 128
+SIGNAL_BATCH = 64
+STAGE_TOP_MAX = 32
+COMMIT_MAX = 1024 * 1024
 DEFER_S = 30
 
 _PROJECT_ID = re.compile(r"^project-[a-f0-9]{32}$")
@@ -67,6 +70,7 @@ PROMPT = (
 
 _LOCKS = {}
 _LOCKS_GUARD = threading.Lock()
+_INFLIGHT = set()
 
 REJECT_SYMLINK = "整理稿里有符号链接，没有发布。"
 REJECT_ESCAPE = "整理稿写到了允许的目录外面，没有发布。"
@@ -111,14 +115,23 @@ def load(service):
     return row
 
 
+def _boundary_ready():
+    from . import runner
+    return runner.dream_boundary_available()
+
+
 def _executor_rows(service):
     rows = []
+    ready = _boundary_ready()
     for inst in service.execution.installations.values():
         host = service.execution.hosts.get(inst.get("host_id")) or {}
+        local = host.get("transport") == "local"
         rows.append({
             "id": inst.get("id") or "",
             "label": str(inst.get("adapter") or inst.get("id") or ""),
-            "local": host.get("transport") == "local",
+            "local": local,
+            # Selectable only when this host's runner confines writes to candidate/.
+            "bounded": bool(local and ready),
         })
     rows.sort(key=lambda item: item["id"])
     return rows
@@ -166,7 +179,10 @@ def configure(service, body):
         raise Fault("invalid_dream_executor", 400)
     if installation_id and _local_installation(service, installation_id) is None:
         raise Fault("dream_executor_not_local", 400,
-                    advice="只能选本机执行器。当前运行器没有进程级隔离，远程整理稿也收不回来。")
+                    advice="只能选本机执行器。远程整理稿收不回来。")
+    if installation_id and not _boundary_ready():
+        raise Fault("dream_boundary_unavailable", 400,
+                    advice="当前运行器不能限制执行器只写候选目录，所以不能用来做梦。")
     clock = body.get("time", DEFAULT_TIME)
     if not isinstance(clock, str):
         raise Fault("invalid_dream_time", 400)
@@ -241,15 +257,21 @@ def _current_gen(root):
 
 
 def _read_regular(path, limit):
+    """At most `limit` bytes, from one open, and only of a regular file."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        if path.is_symlink() or not path.is_file():
-            return ""
-        data = path.read_bytes()[:limit]
+        fd = os.open(path, flags)
     except OSError:
         return ""
-    if b"\x00" in data:
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return ""
+        return os.read(fd, limit).decode("utf-8", "replace")
+    except OSError:
         return ""
-    return data.decode("utf-8", "replace")
+    finally:
+        os.close(fd)
 
 
 def formal_index(service, project_id):
@@ -435,31 +457,52 @@ def stage_dir(service, project_id):
     return run.resolve()
 
 
+def _choose_material(works, tasks, artifacts, previous, limit):
+    """New material in a stable order, at most `limit` items.
+
+    The returned cursor is the previous watermark plus only these items. The
+    rest stays new for a later run, so a large backlog cannot stall the project.
+    """
+    previous = previous or {}
+    fresh = _cursor(works, tasks, artifacts)
+    pending = []
+    for work in works:
+        key = _key("work", work)
+        token = fresh.get(key)
+        if token and previous.get(key) != token:
+            pending.append((key, token, _signal_work(work), work["id"] + ".txt"))
+    for task in tasks:
+        key = _key("task", task)
+        token = fresh.get(key)
+        text = _signal_task(task)
+        if text and token and previous.get(key) != token:
+            pending.append((key, token, text, task["id"] + ".txt"))
+    for artifact in artifacts:
+        key = _key("artifact", artifact)
+        token = fresh.get(key)
+        if token and previous.get(key) != token:
+            name = str(artifact.get("id") or "artifact")
+            pending.append((key, token, _signal_artifact(artifact), name + ".txt"))
+    pending.sort(key=lambda item: item[0])
+    chosen = pending[:limit]
+    cursor = dict(previous)
+    for key, token, _text, _name in chosen:
+        cursor[key] = token
+    return chosen, cursor
+
+
 def _stage(service, project, works, tasks, artifacts, previous):
     root = memory_root(service, project["id"])
     folder = stage_dir(service, project["id"])
     _copy_published(root, folder / "memory")
     signal = folder / "signal"
     signal.mkdir(exist_ok=True)
-    previous = previous or {}
-    fresh = _cursor(works, tasks, artifacts)
-    for work in works:
-        key = _key("work", work)
-        if fresh.get(key) and previous.get(key) != fresh[key]:
-            _write_text(signal / (work["id"] + ".txt"), _signal_work(work))
-    for task in tasks:
-        key = _key("task", task)
-        text = _signal_task(task)
-        if text and fresh.get(key) and previous.get(key) != fresh[key]:
-            _write_text(signal / (task["id"] + ".txt"), text)
-    for artifact in artifacts:
-        key = _key("artifact", artifact)
-        if fresh.get(key) and previous.get(key) != fresh[key]:
-            name = str(artifact.get("id") or "artifact")
-            _write_text(signal / (name + ".txt"), _signal_artifact(artifact))
+    chosen, cursor = _choose_material(works, tasks, artifacts, previous, SIGNAL_BATCH)
+    for _key_name, _token, text, name in chosen:
+        _write_text(signal / name, text)
     (folder / "candidate").mkdir(exist_ok=True)
     _seal_inputs(folder)
-    return folder
+    return folder, cursor
 
 
 def _seal_inputs(folder):
@@ -476,54 +519,54 @@ def _seal_inputs(folder):
     os.chmod(folder, 0o755)
 
 
-def _reject_tree(stage):
-    """Refuse symlinks, '..', and files that resolve outside the stage."""
-    root = stage.resolve()
-    parent = root.parent
-    for child in parent.iterdir():
-        if child.is_symlink() or (child.is_file() and child.name != root.name):
-            raise CandidateRejected(REJECT_ESCAPE)
-    for dirpath, dirnames, filenames in os.walk(stage, followlinks=False):
-        for name in list(dirnames):
-            path = Path(dirpath) / name
-            if name in {".", ".."} or ".." in name or path.is_symlink():
-                raise CandidateRejected(REJECT_SYMLINK if path.is_symlink() else REJECT_ESCAPE)
-            try:
-                path.resolve().relative_to(root)
-            except ValueError:
-                raise CandidateRejected(REJECT_ESCAPE) from None
-        for name in filenames:
-            path = Path(dirpath) / name
-            if ".." in name or path.is_symlink():
-                raise CandidateRejected(REJECT_SYMLINK if path.is_symlink() else REJECT_ESCAPE)
-            try:
-                path.resolve().relative_to(root)
-            except ValueError:
-                raise CandidateRejected(REJECT_ESCAPE) from None
+def _dir_flags():
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
-def _read_limited(path, limit):
-    """Read one regular file from the fd we opened. At most limit+1 bytes.
-
-    A symlink, a hard link, or a replace between the open and the read is a
-    rejection. The returned bytes are the bytes that will be published.
-    """
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+def _open_dir(parent_fd, name):
     try:
-        fd = os.open(path, flags)
+        if parent_fd is None:
+            return os.open(name, _dir_flags())
+        return os.open(name, _dir_flags(), dir_fd=parent_fd)
     except OSError as error:
-        if error.errno in (errno.ELOOP, errno.EMLINK):
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise CandidateRejected(REJECT_SYMLINK) from None
+        raise CandidateRejected(REJECT_FORMAT) from None
+
+
+def _scan_fd(fd):
+    """Entries of a directory we already opened, one at a time."""
+    with os.scandir("/proc/self/fd/" + str(fd)) as listing:
+        for entry in listing:
+            yield entry
+
+
+def _read_fd(parent_fd, name, limit):
+    """Bytes from one regular file opened under parent_fd. At most limit+1.
+
+    A fifo, device, or socket is rejected from its type before any read that
+    could block. A hard link, symlink, or rewrite between the two fstats is
+    rejected. The returned text is what publish writes.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
             raise CandidateRejected(REJECT_SYMLINK) from None
         raise CandidateRejected(REJECT_FORMAT) from None
     try:
         info = os.fstat(fd)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(info.st_mode):
             raise CandidateRejected(REJECT_SYMLINK if stat.S_ISLNK(info.st_mode) else REJECT_FORMAT)
         if info.st_nlink != 1:
             raise CandidateRejected(REJECT_ESCAPE)
         data = os.read(fd, limit + 1)
         after = os.fstat(fd)
-        if (after.st_dev, after.st_ino, after.st_nlink) != (info.st_dev, info.st_ino, 1):
+        same = (after.st_dev, after.st_ino, after.st_nlink, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns)
+        before = (info.st_dev, info.st_ino, 1, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if same != before:
             raise CandidateRejected(REJECT_ESCAPE)
         if len(data) > limit:
             raise CandidateRejected(REJECT_SIZE)
@@ -537,95 +580,112 @@ def _read_limited(path, limit):
         os.close(fd)
 
 
+def _read_limited(path, limit):
+    """Read one file by pinning its parent directory, then the file itself."""
+    parent = os.open(path.parent, _dir_flags())
+    try:
+        return _read_fd(parent, path.name, limit)
+    finally:
+        os.close(parent)
+
+
 def _candidate_files(stage):
     """Allowlisted candidate bytes, or a human rejection. Does not publish."""
-    _reject_tree(stage)
-    cand = stage / "candidate"
-    info = cand.lstat() if cand.exists() else None
-    if info is None or not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        raise CandidateRejected(REJECT_MISSING)
-    found = {}
-    total = 0
-    files = dirs = walked = 0
-    for dirpath, dirnames, filenames in os.walk(cand, followlinks=False):
-        walked += 1
-        if walked > MAX_WALK or len(dirnames) + len(filenames) > MAX_WALK:
-            raise CandidateRejected(REJECT_SIZE)
-        rel_dir = Path(dirpath).relative_to(cand)
-        if any(part in {".", ".."} or part.startswith("/") for part in rel_dir.parts):
-            raise CandidateRejected(REJECT_ESCAPE)
-        if rel_dir.parts and rel_dir.parts[0] != "topics":
-            raise CandidateRejected(REJECT_FORMAT)
-        for name in dirnames:
-            dirs += 1
-            if dirs > MAX_DIRS or name != "topics" or rel_dir.parts or (Path(dirpath) / name).is_symlink():
-                raise CandidateRejected(REJECT_SYMLINK if (Path(dirpath) / name).is_symlink() else REJECT_FORMAT)
-        for name in filenames:
-            files += 1
-            if files > MAX_FILES:
+    stage_fd = _open_dir(None, stage)
+    try:
+        top = 0
+        for entry in _scan_fd(stage_fd):
+            top += 1
+            if top > STAGE_TOP_MAX:
                 raise CandidateRejected(REJECT_SIZE)
-            rel = (rel_dir / name).as_posix()
-            if rel == INDEX_NAME:
-                limit = INDEX_MAX
-            elif len(rel_dir.parts) == 1 and rel_dir.parts[0] == "topics" and _TOPIC_FILE.fullmatch(name):
-                limit = TOPIC_MAX
-            else:
-                raise CandidateRejected(REJECT_FORMAT)
-            text = _read_limited(Path(dirpath) / name, limit)
-            total += len(text.encode("utf-8"))
-            if total > TOTAL_MAX:
-                raise CandidateRejected(REJECT_SIZE)
-            found[rel] = text
+            if entry.name not in {"memory", "signal", "candidate", ".xpp-out"}:
+                raise CandidateRejected(REJECT_ESCAPE)
+            if entry.is_symlink():
+                raise CandidateRejected(REJECT_SYMLINK)
+        cand_fd = _open_dir(stage_fd, "candidate")
+        try:
+            state = {"files": 0, "dirs": 0, "walked": 0, "total": 0, "found": {}}
+            _read_candidate(cand_fd, "", state)
+        finally:
+            os.close(cand_fd)
+    finally:
+        os.close(stage_fd)
+    found = state["found"]
     if INDEX_NAME not in found or not found[INDEX_NAME].strip():
         raise CandidateRejected(REJECT_MISSING)
-    extra = 0
-    for dirpath, _dirnames, filenames in os.walk(stage, followlinks=False):
-        for name in filenames:
-            extra += 1
-            if extra > MAX_WALK:
-                raise CandidateRejected(REJECT_SIZE)
-            path = Path(dirpath) / name
-            if path.is_symlink():
-                raise CandidateRejected(REJECT_SYMLINK)
-            rel = path.relative_to(stage).as_posix()
-            if ".." in Path(rel).parts:
-                raise CandidateRejected(REJECT_ESCAPE)
-            if rel.startswith(("memory/", "signal/", ".xpp-out/")):
-                continue
-            if rel.startswith("candidate/") and rel[len("candidate/"):] in found:
-                continue
-            raise CandidateRejected(REJECT_ESCAPE)
     return found
 
 
+def _read_candidate(directory_fd, prefix, state):
+    for entry in _scan_fd(directory_fd):
+        state["walked"] += 1
+        if state["walked"] > MAX_WALK:
+            raise CandidateRejected(REJECT_SIZE)
+        name = entry.name
+        if name in {".", ".."} or ".." in name or "/" in name:
+            raise CandidateRejected(REJECT_ESCAPE)
+        if entry.is_symlink():
+            raise CandidateRejected(REJECT_SYMLINK)
+        rel = name if not prefix else prefix + "/" + name
+        if entry.is_dir(follow_symlinks=False):
+            state["dirs"] += 1
+            if state["dirs"] > MAX_DIRS or prefix or name != "topics":
+                raise CandidateRejected(REJECT_FORMAT)
+            child = _open_dir(directory_fd, name)
+            try:
+                _read_candidate(child, rel, state)
+            finally:
+                os.close(child)
+            continue
+        state["files"] += 1
+        if state["files"] > MAX_FILES:
+            raise CandidateRejected(REJECT_SIZE)
+        if rel == INDEX_NAME:
+            limit = INDEX_MAX
+        elif prefix == "topics" and _TOPIC_FILE.fullmatch(name):
+            limit = TOPIC_MAX
+        else:
+            raise CandidateRejected(REJECT_FORMAT)
+        text = _read_fd(directory_fd, name, limit)
+        state["total"] += len(text.encode("utf-8"))
+        if state["total"] > TOTAL_MAX:
+            raise CandidateRejected(REJECT_SIZE)
+        state["found"][rel] = text
+
+
 def _fsync(path):
-    fd = os.open(path, os.O_RDONLY)
+    flags = os.O_RDONLY | (os.O_DIRECTORY if Path(path).is_dir() else 0)
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
 
 
-def _write_generation(folder, files, cursor):
-    folder.mkdir(parents=True, exist_ok=True)
-    for rel, text in files.items():
-        path = folder / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        _fsync(tmp)
-        os.replace(tmp, path)
-        _fsync(path)
-    mark = folder / "watermark.json"
-    tmp = mark.with_name("watermark.json.tmp")
-    tmp.write_text(json.dumps(cursor, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+def _write_synced(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
     _fsync(tmp)
-    os.replace(tmp, mark)
-    _fsync(mark)
-    ready = folder / "READY"
-    ready.write_text("ok\n", encoding="utf-8")
-    _fsync(ready)
+    os.replace(tmp, path)
+    _fsync(path)
+    _fsync(path.parent)
+
+
+def _write_generation(folder, files, commit):
+    folder.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(commit, ensure_ascii=False, sort_keys=True)
+    if len(encoded.encode("utf-8")) > COMMIT_MAX:
+        raise CandidateRejected(REJECT_SIZE)
+    for rel, text in files.items():
+        _write_synced(folder / rel, text)
+    _write_synced(folder / "watermark.json", json.dumps(commit.get("cursor") or {}, ensure_ascii=False, sort_keys=True))
+    _write_synced(folder / "commit.json", encoded)
+    _write_synced(folder / "READY", "ok\n")
     _fsync(folder)
+    _fsync(folder.parent)
+    if folder.parent.parent.exists():
+        _fsync(folder.parent.parent)
 
 
 def _publish(root, gen):
@@ -634,14 +694,22 @@ def _publish(root, gen):
     tmp.write_text(gen + "\n", encoding="utf-8")
     _fsync(tmp)
     os.replace(tmp, pointer)
-    _fsync(root)
+    try:
+        _fsync(root)
+    except OSError:
+        if _current_gen(root) != gen:
+            raise
+
+
+def publication_lock(project_id):
+    return _project_lock(project_id or "")
 
 
 def _project_lock(project_id):
     with _LOCKS_GUARD:
         lock = _LOCKS.get(project_id)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _LOCKS[project_id] = lock
         return lock
 
@@ -662,27 +730,47 @@ def _remember(service, task_id, gen):
     service.store.put("task", current)
 
 
-def _already_published(root, cursor):
-    gen = _current_gen(root)
-    if not gen or not isinstance(cursor, dict) or not cursor:
+def _commit_record(root, gen):
+    raw = _read_regular(root / "g" / gen / "commit.json", COMMIT_MAX)
+    if not raw:
         return None
-    if not (root / "g" / gen / "READY").is_file():
-        return None
-    raw = _read_regular(root / "g" / gen / "watermark.json", TOTAL_MAX)
     try:
-        data = json.loads(raw) if raw else None
+        data = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    return gen if data == cursor else None
+    return data if isinstance(data, dict) else None
+
+
+def _generation_for_task(root, task):
+    """The generation CURRENT names, only when its commit belongs to this attempt."""
+    gen = _current_gen(root)
+    if not gen or not (root / "g" / gen / "READY").is_file():
+        return None
+    record = _commit_record(root, gen)
+    if not record:
+        return None
+    if record.get("task_id") != task.get("id"):
+        return None
+    if record.get("attempt_uuid") != task.get("attempt_uuid"):
+        return None
+    return gen
+
+
+def _still_publisher(task, base, root):
+    if task.get("status") in {"succeeded", "failed", "cancelled", "cancel_requested"}:
+        return False
+    if (_current_gen(root) or "") != base:
+        return False
+    return True
 
 
 def accept_candidate(service, task):
     """Check the candidate bytes, then publish them if this attempt still owns the base.
 
-    CURRENT moves only after the generation is fsynced and the task attempt and
-    the previous generation are still the ones this dream started from. If the
-    pointer already names a generation with this cursor, the publish is recorded
-    again instead of being reported as a missed watermark.
+    CURRENT moves only after the generation and its parent directory entries are
+    synced, and only while this task attempt is still allowed to publish. A
+    terminal or cancelled row does not publish. If CURRENT already names this
+    attempt's generation, the row is recorded again.
     """
     project_id = task.get("dreaming_project_id")
     root = memory_root(service, project_id)
@@ -691,12 +779,16 @@ def accept_candidate(service, task):
         current = service.store.get("task", task["id"])
         if current.get("attempt_uuid") != task.get("attempt_uuid"):
             raise CandidateRejected(REJECT_INTERRUPTED)
-        published = _already_published(root, current.get("dream_cursor"))
+        published = _generation_for_task(root, current)
         if published:
             _remember(service, task["id"], published)
             return
         if current.get("dream_generation") and _current_gen(root) == current.get("dream_generation"):
             return
+        if current.get("status") in {"succeeded", "failed", "cancelled", "cancel_requested"}:
+            return
+        if (_current_gen(root) or "") != (current.get("dream_base_gen") or ""):
+            raise CandidateRejected(REJECT_INTERRUPTED)
         if not stage.is_dir() or stage.is_symlink():
             raise CandidateRejected(REJECT_MISSING)
         try:
@@ -706,54 +798,70 @@ def accept_candidate(service, task):
         files = _candidate_files(stage)
         cursor = current.get("dream_cursor") if isinstance(current.get("dream_cursor"), dict) else {}
         base = current.get("dream_base_gen") or ""
-        if (_current_gen(root) or "") != base:
-            raise CandidateRejected(REJECT_INTERRUPTED)
         gen = uid("gen")
+        _INFLIGHT.add((project_id, gen))
         folder = root / "g" / gen
         try:
-            _write_generation(folder, files, cursor)
-        except OSError:
-            _discard(root, gen)
-            raise CandidateRejected(REJECT_INTERRUPTED) from None
-        hook = getattr(service, "dream_before_commit", None)
-        if hook is not None:
             try:
-                hook(project_id)
+                _write_generation(folder, files, {
+                    "task_id": current["id"], "attempt_uuid": current.get("attempt_uuid"),
+                    "cursor": cursor,
+                })
             except CandidateRejected:
                 _discard(root, gen)
                 raise
-            except Exception:
+            except OSError:
                 _discard(root, gen)
                 raise CandidateRejected(REJECT_INTERRUPTED) from None
-        again = service.store.get("task", task["id"])
-        if again.get("attempt_uuid") != task.get("attempt_uuid") or (_current_gen(root) or "") != base:
-            _discard(root, gen)
-            raise CandidateRejected(REJECT_INTERRUPTED)
-        if again.get("status") in {"succeeded", "failed", "cancelled"} and again.get("dream_generation"):
-            _discard(root, gen)
-            return
-        _publish(root, gen)
-        try:
-            _remember(service, task["id"], gen)
-        except Exception:
-            log.exception("dreaming published gen=%s but the task row was not updated", gen)
-        shutil.rmtree(stage, ignore_errors=True)
+            hook = getattr(service, "dream_before_commit", None)
+            if hook is not None:
+                try:
+                    hook(project_id)
+                except CandidateRejected:
+                    _discard(root, gen)
+                    raise
+                except Exception:
+                    _discard(root, gen)
+                    raise CandidateRejected(REJECT_INTERRUPTED) from None
+            again = service.store.get("task", task["id"])
+            if again.get("attempt_uuid") != task.get("attempt_uuid") or (_current_gen(root) or "") != base:
+                _discard(root, gen)
+                raise CandidateRejected(REJECT_INTERRUPTED)
+            if not _still_publisher(again, base, root):
+                _discard(root, gen)
+                return
+            try:
+                _publish(root, gen)
+            except OSError:
+                if _current_gen(root) != gen:
+                    _discard(root, gen)
+                    raise CandidateRejected(REJECT_INTERRUPTED) from None
+            try:
+                _remember(service, task["id"], gen)
+            except Exception:
+                log.exception("dreaming published gen=%s but the task row was not updated", gen)
+            _remove_tree(stage)
+        finally:
+            _INFLIGHT.discard((project_id, gen))
 
 
 def account_published(service):
-    """A generation already pointed at by CURRENT is recorded on its task."""
+    """Record a generation CURRENT already names, including after a failed row."""
     for status in ("queued", "starting", "running", "cancel_requested", "unknown",
-                   "awaiting_approval", "succeeded"):
-        for task in service.store.find("task", status=status, limit=200):
+                   "awaiting_approval", "succeeded", "failed", "cancelled"):
+        for task in _pages(service.store, "task", status=status):
             if not task.get("dreaming") or task.get("dream_generation"):
                 continue
             try:
                 root = memory_root(service, task.get("dreaming_project_id"))
             except Fault:
                 continue
-            gen = _already_published(root, task.get("dream_cursor"))
+            gen = _generation_for_task(root, task)
             if gen:
-                _remember(service, task["id"], gen)
+                try:
+                    _remember(service, task["id"], gen)
+                except Exception:
+                    log.exception("dreaming account gen=%s task=%s", gen, task.get("id"))
 
 
 def record_outcome(service, work, outcome):
@@ -784,19 +892,70 @@ def record_outcome(service, work, outcome):
         service.store.put("project", project)
 
 
-def sweep_finished_dirs(service):
-    """Drop stages and unpublished generations only after the attempt is terminal.
+def _chmod_tree(path):
+    """Return write permission the sealer removed, so a later delete can unlink."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fchmod(fd, 0o755)
+        with os.scandir("/proc/self/fd/" + str(fd)) as listing:
+            names = [entry.name for entry in listing]
+        for name in names:
+            child = Path(path) / name
+            try:
+                info = child.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                _chmod_tree(child)
+            else:
+                try:
+                    os.chmod(child, 0o644)
+                except OSError:
+                    log.warning("dreaming could not unseal %s", child)
+    finally:
+        os.close(fd)
 
-    An unknown or still-running attempt keeps its directory and its occupancy.
-    The generation CURRENT names is kept.
+
+def _remove_tree(path):
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        return True
+    if path.is_symlink():
+        try:
+            path.unlink()
+            return True
+        except OSError:
+            log.warning("dreaming could not remove symlink %s", path)
+            return False
+    _chmod_tree(path)
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        log.warning("dreaming could not remove %s", path)
+        return False
+    return not path.exists()
+
+
+def sweep_finished_dirs(service):
+    """Drop stages and unpublished generations only when no live attempt uses them.
+
+    The scan pages through every task. An unknown attempt keeps its stage.
+    A generation being written or waiting to commit is kept, as is CURRENT.
     """
     live_stages, live_gens = set(), set()
     for status in ("queued", "starting", "running", "cancel_requested", "unknown", "awaiting_approval"):
-        for task in service.store.find("task", status=status, limit=200):
+        for task in _pages(service.store, "task", status=status):
             if not task.get("dreaming"):
                 continue
             if task.get("dream_stage"):
-                live_stages.add(str(task["dream_stage"]))
+                live_stages.add(str(Path(task["dream_stage"]).resolve()) if Path(task["dream_stage"]).exists()
+                                else str(task["dream_stage"]))
             if task.get("dream_generation"):
                 live_gens.add((task.get("dreaming_project_id"), task["dream_generation"]))
     base = Path(service.data).resolve().parent / "dream-stage"
@@ -804,9 +963,14 @@ def sweep_finished_dirs(service):
         for project_dir in base.iterdir():
             if not project_dir.is_dir() or project_dir.is_symlink():
                 continue
-            for run in project_dir.iterdir():
-                if str(run.resolve()) not in live_stages:
-                    shutil.rmtree(run, ignore_errors=True)
+            for run in list(project_dir.iterdir()):
+                try:
+                    identity = str(run.resolve())
+                except OSError:
+                    continue
+                if identity in live_stages or str(run) in live_stages:
+                    continue
+                _remove_tree(run)
     memory = Path(service.data) / "memory"
     if not memory.is_dir():
         return
@@ -817,15 +981,18 @@ def sweep_finished_dirs(service):
             root = memory_root(service, project_dir.name)
         except Fault:
             continue
-        current = _current_gen(root)
-        gens = root / "g"
-        if not gens.is_dir() or gens.is_symlink():
-            continue
-        for gen_dir in gens.iterdir():
-            if gen_dir.name == current or (project_dir.name, gen_dir.name) in live_gens:
+        with _project_lock(project_dir.name):
+            current = _current_gen(root)
+            gens = root / "g"
+            if not gens.is_dir() or gens.is_symlink():
                 continue
-            if gen_dir.is_dir() and not gen_dir.is_symlink():
-                shutil.rmtree(gen_dir, ignore_errors=True)
+            for gen_dir in list(gens.iterdir()):
+                if gen_dir.name == current or (project_dir.name, gen_dir.name) in live_gens:
+                    continue
+                if (project_dir.name, gen_dir.name) in _INFLIGHT:
+                    continue
+                if gen_dir.is_dir() and not gen_dir.is_symlink():
+                    _remove_tree(gen_dir)
 
 
 def _executor_free(service, installation_id):
@@ -846,9 +1013,8 @@ def _executor_free(service, installation_id):
 
 def _busy_with(service, project_id):
     for status in _OPEN:
-        for task in service.store.find("task", status=status, limit=1000):
-            if task.get("dreaming") and task.get("dreaming_project_id") == project_id:
-                return True
+        if service.store.count("task", status=status, dreaming=True, dreaming_project_id=project_id):
+            return True
     return False
 
 
@@ -864,9 +1030,7 @@ def _mark_approval(service, project_id):
 def _dreams_waiting(service, installation_id):
     count = 0
     for status in ("queued", "awaiting_approval", "starting", "running", "cancel_requested", "unknown"):
-        for task in service.store.find("task", status=status, installation_id=installation_id, limit=50):
-            if task.get("dreaming"):
-                count += 1
+        count += service.store.count("task", status=status, installation_id=installation_id, dreaming=True)
     return count
 
 
@@ -882,14 +1046,16 @@ def _dispatch(service, project, installation_id):
         raise Fault("dream_executor_not_local", 400)
     if not _executor_free(service, installation_id) or _dreams_waiting(service, installation_id):
         return None
-    folder = _stage(service, project, works, tasks, artifacts, previous)
+    if not _boundary_ready():
+        raise Fault("dream_boundary_unavailable", 400)
+    folder, cursor = _stage(service, project, works, tasks, artifacts, previous)
     from .store import canonical_workspace
     host = service.execution.hosts[inst["host_id"]]
     wh, ws = canonical_workspace(host, str(folder))
     root = memory_root(service, project["id"])
     dream = {"project_id": project["id"], "stage": str(folder), "cwd": str(folder),
              "launch_roots": [str(folder)], "workspace_key": [wh, list(ws)],
-             "cursor": _cursor(works, tasks, artifacts), "base_gen": _current_gen(root) or ""}
+             "cursor": cursor, "base_gen": _current_gen(root) or ""}
     work = service.store.put("work", {
         "id": uid("work"), "owner_bot_id": project["owner_bot_id"],
         "goal": project.get("title") or "memory", "status": "active",
@@ -908,7 +1074,7 @@ def _dispatch(service, project, installation_id):
             "prompt": PROMPT, "installation_id": installation_id,
         }, dream=dream)
     except Exception:
-        shutil.rmtree(folder, ignore_errors=True)
+        _remove_tree(folder)
         work["status"] = "cancelled"
         try:
             service.store.put("work", work)
@@ -943,27 +1109,49 @@ def step(service, now=None):
     if row.get("pending_slot") is None and now >= armed:
         row["pending_slot"] = armed
         row["armed_slot"] = _next_slot(row["time"], DEFAULT_TIMEZONE, max(now, armed))
+        row["attempted"] = []
+        row["cooled"] = []
         _save(service, row)
     if row.get("pending_slot") is None:
         return False
-    if not _executor_free(service, row["installation_id"]):
+    if not _executor_free(service, row["installation_id"]) or _dreams_waiting(service, row["installation_id"]):
         return False
-    if _dreams_waiting(service, row["installation_id"]):
-        return False
+    attempted = set(row.get("attempted") or [])
+    cooled = set(row.get("cooled") or [])
     held = False
     for project in _pages(service.store, "project"):
+        if project["id"] in attempted or project["id"] in cooled:
+            continue
         if not _executor_free(service, row["installation_id"]) or _dreams_waiting(service, row["installation_id"]):
             held = True
             break
         try:
+            if not _boundary_ready():
+                raise Fault("dream_boundary_unavailable", 400)
+            service._check_backpressure(project["owner_bot_id"])
+        except Fault as error:
+            row = load(service)
+            if error.code in _DEFER or error.code == "dream_boundary_unavailable":
+                row["retry_not_before"] = now + DEFER_S
+                _save(service, row)
+                log.info("dreaming waiting (%s)", error.code)
+                return True
+            raise
+        try:
             made = _dispatch(service, project, row["installation_id"])
         except Fault as error:
-            if error.code in _DEFER:
-                row = load(service)
+            row = load(service)
+            if error.code in _DEFER or error.code == "dream_boundary_unavailable":
                 row["retry_not_before"] = now + DEFER_S
+                if error.code in _DEFER:
+                    cooled.add(project["id"])
+                    row["cooled"] = sorted(cooled)
                 _save(service, row)
                 log.info("dreaming deferred (%s)", error.code)
                 return True
+            attempted.add(project["id"])
+            row["attempted"] = sorted(attempted)
+            _save(service, row)
             log.info("dreaming skipped project=%s (%s)", project.get("id"), error.code)
             try:
                 project = service.store.get("project", project["id"])
@@ -975,11 +1163,20 @@ def step(service, now=None):
         if made is None:
             held = True
             break
+        if made:
+            attempted.add(project["id"])
+            row = load(service)
+            row["attempted"] = sorted(attempted)
+            _save(service, row)
+            held = True
+            break
     if held:
         return True
     row = load(service)
     row["pending_slot"] = None
     row["retry_not_before"] = None
+    row["attempted"] = []
+    row["cooled"] = []
     if not isinstance(row.get("armed_slot"), (int, float)) or row["armed_slot"] <= now:
         row["armed_slot"] = _next_slot(row["time"], DEFAULT_TIMEZONE, now)
     _save(service, row)

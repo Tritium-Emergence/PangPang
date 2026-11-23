@@ -118,10 +118,18 @@ class DreamingTests(unittest.TestCase):
         self.fail("dreaming task did not finish")
 
     def _fire(self):
-        slot = self.app.store.get("settings", "dreaming")["armed_slot"]
-        self.app.dream_step(slot)
+        # Each call is its own scheduled slot. A failure in one slot must not
+        # be started again until the next time the clock is due.
+        row = self.app.store.get("settings", "dreaming")
+        row["pending_slot"] = None
+        row["attempted"] = []
+        row["cooled"] = []
+        row["retry_not_before"] = None
+        row["armed_slot"] = time.time() - 1
+        self.app.store.put("settings", row)
+        self.app.dream_step(time.time())
         self._drain()
-        return slot
+        return row["armed_slot"]
 
     def _memory_text(self, project_id):
         root = self.data / "memory" / project_id
@@ -227,7 +235,7 @@ class DreamingTests(unittest.TestCase):
     def test_symlink_and_escape_and_oversize_are_rejected(self):
         self._enable()
         alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
-        for code, needle in ((_SYMLINK, "符号链接"), (_ESCAPE, "外面"), (_HUGE, "大小")):
+        for code, needle in ((_SYMLINK, "符号链接"), (_ESCAPE, "执行器"), (_HUGE, "大小")):
             self._argv(code)
             before = dreaming.formal_watermark(self.app, alpha["id"])
             self._fire()
@@ -453,22 +461,21 @@ class ReviewTests(unittest.TestCase):
     def test_a_sustained_route_fault_does_not_spin_or_stack_stages(self):
         self._due()
         self._project("Alpha", "ALPHA-SUMMARY", "alpha")
-        real = self.app.submit_task
+        real = self.app._check_backpressure
 
-        def blocked(*_args, **_kwargs):
+        def blocked(_bot_id):
             raise Fault("backpressure", 429)
 
-        self.app.submit_task = blocked
+        self.app._check_backpressure = blocked
         try:
-            started = time.time()
-            self.assertTrue(self.app.dream_step(time.time()))
-            self.assertFalse(self.app.dream_step(time.time() + 1))
-            self.assertLess(time.time() - started, 2)
+            now = time.time()
+            self.assertTrue(self.app.dream_step(now))
+            self.assertFalse(self.app.dream_step(now + 1))
+            self.assertTrue(self.app.dream_step(now + dreaming.DEFER_S + 1))
         finally:
-            self.app.submit_task = real
+            self.app._check_backpressure = real
         dreams = [row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]
-        self.assertEqual(len(dreams), 1)
-        self.assertEqual(dreams[0]["status"], "cancelled")
+        self.assertEqual(dreams, [])
         self.assertEqual(list((self.data.resolve().parent / "dream-stage").rglob("candidate")), [])
 
     def test_a_waiting_dream_is_not_failed_by_the_ordinary_queue_timeout(self):
@@ -616,6 +623,9 @@ class ReviewTests(unittest.TestCase):
         finally:
             self.app.store.put = real
         self.assertIsNone(self.app.store.get("task", task["id"]).get("dream_generation"))
+        failed = self.app.store.get("task", task["id"])
+        failed["status"] = "failed"
+        self.app.store.put("task", failed)
         self.app.dream_step(time.time() + 1)
         self.assertTrue(self.app.store.get("task", task["id"]).get("dream_generation"))
         self.assertIn("KEPT", dreaming.formal_index(self.app, alpha["id"]))
@@ -643,3 +653,131 @@ class ReviewTests(unittest.TestCase):
                                          status="succeeded", receipt={"status": "succeeded", "tail": "done"}))
         works, tasks, artifacts = dreaming._sources(self.app, project["id"])
         self.assertTrue(any(key.startswith("task:") for key in dreaming._cursor(works, tasks, artifacts)))
+
+    def test_a_starting_dream_without_a_supervisor_stays_quarantined(self):
+        project, work_id = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        work = self.app.store.get("work", work_id)
+        work["kind"] = "dreaming"
+        self.app.store.put("work", work)
+        execution_id = "exec-" + "ab" * 16
+        task = self.app.store.put("task", {
+            "id": uid("task"), "work_id": work_id, "status": "starting",
+            "host_id": "local", "installation_id": "codex-local", "execution_id": execution_id,
+            "cwd": str(self.root), "created": time.time(), "owner_bot_id": "bot-main",
+        })
+        directory = Path(self.app.execution.directory(self.app.execution.hosts["local"], execution_id))
+        directory.mkdir(parents=True)
+        (directory / "spec.json").write_text("{}", encoding="utf-8")
+        self.app.task_step()
+        stored = self.app.store.get("task", task["id"])
+        self.assertEqual(stored["status"], "unknown")
+        self.assertNotEqual(stored.get("error"), "dream_unbound")
+        self.assertFalse((self.root / "result.txt").exists())
+        self.assertEqual(self.app.store.get("project", project["id"]).get("id"), project["id"])
+
+    def test_a_failed_project_does_not_take_the_slot_again(self):
+        self._due()
+        first, _one = self._project("One", "ONE", "one")
+        second, _two = self._project("Two", "TWO", "two")
+        self.app.dream_step(time.time())
+        tasks = [row for row in self.app.store.find("task", limit=20) if row.get("dreaming")]
+        self.assertEqual(len(tasks), 1)
+        tasks[0]["status"] = "failed"
+        self.app.store.put("task", tasks[0])
+        self.app.dream_step(time.time() + 1)
+        again = [row for row in self.app.store.find("task", limit=20) if row.get("dreaming")]
+        self.assertEqual(len(again), 2)
+        self.assertEqual(sum(1 for row in again if row.get("dreaming_project_id") == first["id"]), 1)
+        self.assertEqual(sum(1 for row in again if row.get("dreaming_project_id") == second["id"]), 1)
+
+    def test_waiting_dreams_are_counted_past_the_first_page(self):
+        for _index in range(55):
+            self.app.store.put("task", {
+                "id": uid("task"), "status": "queued", "installation_id": "codex-local",
+                "created": time.time(), "dreaming": False,
+            })
+        self.app.store.put("task", {
+            "id": uid("task"), "status": "queued", "installation_id": "codex-local",
+            "created": time.time(), "dreaming": True,
+        })
+        self.assertEqual(dreaming._dreams_waiting(self.app, "codex-local"), 1)
+
+    def test_a_fifo_is_rejected_without_blocking(self):
+        stage = Path(self.tmp.name) / "fifo-stage"
+        (stage / "candidate").mkdir(parents=True)
+        os.mkfifo(stage / "candidate" / "MEMORY.md")
+        started = time.time()
+        with self.assertRaises(dreaming.CandidateRejected):
+            dreaming._candidate_files(stage)
+        self.assertLess(time.time() - started, 2)
+
+    def test_a_rewrite_during_the_read_is_rejected(self):
+        path = Path(self.tmp.name) / "MEMORY.md"
+        path.write_text("# Memory\n", encoding="utf-8")
+        real = os.read
+
+        def rewrite(fd, size):
+            with open(path, "r+b") as handle:
+                handle.write(b"y" * 32)
+                handle.flush()
+            return real(fd, size)
+
+        with mock.patch("pangpang.dreaming.os.read", rewrite):
+            with self.assertRaises(dreaming.CandidateRejected) as raised:
+                dreaming._read_limited(path, dreaming.INDEX_MAX)
+        self.assertIn("外面", str(raised.exception))
+
+    def test_sealed_inputs_are_removed_after_the_attempt_ends(self):
+        project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        stage = self.data.resolve().parent / "dream-stage" / project["id"] / "run-sealed"
+        signal = stage / "signal"
+        signal.mkdir(parents=True)
+        (signal / "note.txt").write_text("sealed\n", encoding="utf-8")
+        os.chmod(signal / "note.txt", 0o444)
+        os.chmod(signal, 0o555)
+        os.chmod(stage, 0o755)
+        self.app.store.put("task", {
+            "id": uid("task"), "status": "failed", "dreaming": True,
+            "dreaming_project_id": project["id"], "dream_stage": str(stage.resolve()),
+            "created": time.time(),
+        })
+        self.app.dream_step(time.time())
+        self.assertFalse(stage.exists())
+
+    def test_a_cancelled_attempt_does_not_publish(self):
+        self._due()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self.app.dream_step(time.time())
+        task = next(row for row in self.app.store.find("task", limit=20) if row.get("dreaming"))
+        stage = Path(task["dream_stage"])
+        (stage / "candidate" / "MEMORY.md").write_text("# Memory\nNO\n", encoding="utf-8")
+        task["status"] = "cancelled"
+        self.app.store.put("task", task)
+        dreaming.accept_candidate(self.app, task)
+        root = dreaming.memory_root(self.app, alpha["id"])
+        self.assertFalse((root / "CURRENT").exists())
+
+    def test_a_large_backlog_advances_only_the_batch_that_ran(self):
+        self._due()
+        project = self.app.create_project("bot-main", {"title": "Batch", "goal": "many"})
+        for index in range(dreaming.SIGNAL_BATCH + 6):
+            self.app.store.put("work", {
+                "id": uid("work"), "owner_bot_id": "bot-main", "goal": "item", "status": "delivered",
+                "project_id": project["id"], "created": time.time(),
+                "checkpoint": {"phase": "build", "summary": "ITEM-%02d" % index},
+            })
+        self.app.dream_step(time.time())
+        self._drain()
+        first = dreaming.formal_watermark(self.app, project["id"]) or {}
+        self.assertEqual(len(first), dreaming.SIGNAL_BATCH)
+        row = self.app.store.get("settings", "dreaming")
+        row["pending_slot"] = None
+        row["attempted"] = []
+        row["cooled"] = []
+        row["armed_slot"] = time.time() - 1
+        self.app.store.put("settings", row)
+        self.app.dream_step(time.time())
+        self._drain()
+        second = dreaming.formal_watermark(self.app, project["id"]) or {}
+        self.assertGreater(len(second), len(first))
+        self.assertIn("ITEM-", dreaming.formal_index(self.app, project["id"]))

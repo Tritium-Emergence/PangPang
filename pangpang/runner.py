@@ -29,6 +29,21 @@ from pathlib import Path
 
 
 RECEIPT_MAX_BYTES = 1024 * 1024
+
+# Landlock write rights. A dream grants these only on candidate/ and the
+# per-execution output directory. Reads are not in the handled set, so the
+# process can still read inputs. Absent on a host whose kernel cannot apply
+# the ruleset: a dream must not start there.
+_LANDLOCK_WRITE = (
+    (1 << 1) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
+    | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14)
+)
+_LANDLOCK_REFER = 1 << 13
+_LANDLOCK_TRUNCATE = 1 << 14
+_SYS_LANDLOCK_CREATE = 444
+_SYS_LANDLOCK_ADD = 445
+_SYS_LANDLOCK_RESTRICT = 446
+_PR_SET_NO_NEW_PRIVS = 38
 # L0 process-group cooperative tier. Selected ONLY when the
 # spec carries allow_pgroup_cooperative (the host operator's current risk consent,
 # see pangpang/consent.py) and no stronger backend exists on this host.
@@ -98,6 +113,83 @@ def receipt_proof_ok(receipt, floor=None):
     if label not in TREE_EVIDENCE or evidence != TREE_EVIDENCE[label]:
         return False
     return SUPERVISION_RANK[label] >= SUPERVISION_RANK.get(floor, 0)
+
+
+def _landlock_abi():
+    """Kernel landlock ABI, or 0 when this process cannot create a ruleset."""
+    if sys.platform != "linux":
+        return 0
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    version = syscall(_SYS_LANDLOCK_CREATE, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
+    if version < 1:
+        return 0
+    return int(version)
+
+
+def dream_boundary_available():
+    """True only when a dream process can be confined to candidate writes."""
+    return _landlock_abi() >= 1
+
+
+def _landlock_handled(abi):
+    handled = _LANDLOCK_WRITE
+    if abi < 3:
+        handled &= ~_LANDLOCK_TRUNCATE
+    if abi < 2:
+        handled &= ~_LANDLOCK_REFER
+    return handled
+
+
+def confine_dream_writes(writable_dirs):
+    """Make every later write fail unless it is under one of these directories.
+
+    The calling thread must be the process that will exec the executor. A
+    failure raises. Callers do not launch when this cannot be applied.
+    """
+    import ctypes
+    abi = _landlock_abi()
+    if abi < 1:
+        raise OSError(errno.ENOTSUP, "dream_boundary_unavailable")
+    handled = _landlock_handled(abi)
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+
+    class RulesetAttr(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    class PathAttr(ctypes.Structure):
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+    attr = RulesetAttr(handled)
+    ruleset = syscall(_SYS_LANDLOCK_CREATE, ctypes.byref(attr), ctypes.sizeof(attr), ctypes.c_uint32(0))
+    if ruleset < 0:
+        raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
+    try:
+        for directory in writable_dirs:
+            parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                rule = PathAttr(handled, parent)
+                added = syscall(_SYS_LANDLOCK_ADD, ruleset, ctypes.c_uint32(1), ctypes.byref(rule), 0)
+                if added < 0:
+                    raise OSError(ctypes.get_errno(), "landlock_add_rule")
+            finally:
+                os.close(parent)
+        if hasattr(libc, "prctl"):
+            limited = libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        else:
+            limited = syscall(157, _PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        if limited < 0:
+            raise OSError(ctypes.get_errno(), "no_new_privs")
+        restricted = syscall(_SYS_LANDLOCK_RESTRICT, ruleset, 0, 0)
+        if restricted < 0:
+            raise OSError(ctypes.get_errno(), "landlock_restrict_self")
+    finally:
+        os.close(ruleset)
 
 
 def check_control_separation(roots, control_roots):
@@ -2977,6 +3069,20 @@ def supervise(directory):
             stderr_reader = None
             # An open-stdin protocol keeps stderr off the stdout parser. Other
             # executors stay on the merged pipe they already had.
+            if spec.get("dream_boundary"):
+                if not dream_boundary_available():
+                    raise ValueError("dream_boundary_unavailable")
+                # Process-group launches exec the CLI directly. Confine in a
+                # wrapper that replaces itself, so the supervised pid is the
+                # executor and writes outside candidate/ fail in the kernel.
+                if scope_unit is None and os.name != "nt":
+                    writable = [str(Path(cwd) / "candidate")]
+                    if output_dir:
+                        writable.append(str(output_dir))
+                    (directory / "dream-confine.json").write_text(
+                        json.dumps({"writable": writable, "argv": argv}, ensure_ascii=False),
+                        encoding="utf-8")
+                    argv = [sys.executable, str(Path(__file__).resolve()), "confine", str(directory)]
             proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE if session_protocol else subprocess.STDOUT,
                                     start_new_session=os.name != "nt", env=env)
@@ -3561,7 +3667,7 @@ def _stdin_json():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["run", "start", "child", "inspect", "cancel", "inject", "probe", "hash", "read", "write",
+    parser.add_argument("action", choices=["run", "start", "child", "confine", "inspect", "cancel", "inject", "probe", "hash", "read", "write",
                                            "receive", "list", "artifact_read"])
     parser.add_argument("directory", nargs="?")
     args = parser.parse_args()
@@ -3611,6 +3717,14 @@ def main():
                     bound = bind_output_dir(spec["prompt"], os.environ.get("XPP_OUTPUT_DIR"))
                     argv = executor_argv(
                         spec, bound, resume=(directory / SESSION_RESUME_MARK).is_file())
+                    if spec.get("dream_boundary"):
+                        writable = [str(Path.cwd() / "candidate")]
+                        if os.environ.get("XPP_OUTPUT_DIR"):
+                            writable.append(os.environ["XPP_OUTPUT_DIR"])
+                        try:
+                            confine_dream_writes(writable)
+                        except OSError:
+                            sys.exit(126)
                     # Inherit cwd: supervise() launched this child with
                     # cwd=checked(spec["cwd"]). The raw spec value may be
                     # unexpanded (~) or re-resolve differently by now.
@@ -3620,6 +3734,10 @@ def main():
                     break
                 time.sleep(min(.1, remaining))
             sys.exit(125)
+        if args.action == "confine":
+            payload = json.loads((directory / "dream-confine.json").read_text(encoding="utf-8"))
+            confine_dream_writes(payload["writable"])
+            os.execvpe(payload["argv"][0], payload["argv"], os.environ)
         if args.action == "run":
             supervise(directory)
             return
