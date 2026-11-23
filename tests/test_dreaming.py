@@ -1,5 +1,7 @@
 """The chosen executor writes the dream. The server only stages and checks it."""
 import json
+import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -8,13 +10,14 @@ import unittest
 import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
+from unittest import mock
 
 from test_bot_runtime import config
 
 from pangpang import dreaming
 from pangpang.http import serve
 from pangpang.service import Service
-from pangpang.store import Fault
+from pangpang.store import Fault, uid
 
 _DRAIN = """
 import pathlib, sys
@@ -257,8 +260,7 @@ class DreamingTests(unittest.TestCase):
         self.assertIn("DREAMED", dreaming.formal_index(self.app, alpha["id"]))
         self.assertNotEqual(dreaming.formal_watermark(self.app, alpha["id"]), watermark)
         self.assertNotIn("dream_alert", self.app.store.get("project", alpha["id"]))
-        revised = self.app.store.get("work", work_id)["revision"]
-        self.assertEqual(dreaming.formal_watermark(self.app, alpha["id"])["work:" + work_id], revised)
+        self.assertIn("work:" + work_id, dreaming.formal_watermark(self.app, alpha["id"]))
 
     def test_next_task_prompt_includes_the_index(self):
         self._enable()
@@ -356,3 +358,288 @@ class DreamingTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+class ReviewTests(unittest.TestCase):
+    setUp = DreamingTests.setUp
+    tearDown = DreamingTests.tearDown
+    _argv = DreamingTests._argv
+    _enable = DreamingTests._enable
+    _project = DreamingTests._project
+    _drain = DreamingTests._drain
+    _memory_text = DreamingTests._memory_text
+
+    def _due(self):
+        self._enable()
+        row = self.app.store.get("settings", "dreaming")
+        row["armed_slot"] = time.time() - 5
+        self.app.store.put("settings", row)
+
+    def test_restart_does_not_run_an_unbound_dream_in_the_product_directory(self):
+        _project, work_id = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        work = self.app.store.get("work", work_id)
+        work["kind"] = "dreaming"
+        self.app.store.put("work", work)
+        # Restart reloads the configured executor. Submit with that same command
+        # so the stored grant still matches and the only reason not to start is
+        # the missing dream binding.
+        self._argv(self.cfg["installations"][0]["argv"][2])
+        submitted = self.app.submit_task("bot-main", work_id, {"prompt": "dream"})
+        task = self.app.store.get("task", submitted["task_id"])
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(task["cwd"], str(self.root))
+        self.assertNotIn("launch_roots", task)
+        self.assertNotIn("dreaming", task)
+        self.app.store.close()
+        restarted = Service(self.cfg, self.data)
+        try:
+            restarted.task_step()
+            stored = restarted.store.get("task", task["id"])
+            self.assertEqual(stored["status"], "failed")
+            self.assertEqual(stored["error"], "dream_unbound")
+            self.assertFalse((self.root / "result.txt").exists())
+        finally:
+            restarted.store.close()
+        self.app = Service(self.cfg, self.data)
+        self.app.probe("codex-local")
+        self._argv(_DRAIN)
+
+    def test_the_first_saved_task_is_already_the_dream(self):
+        self._due()
+        self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        first = {}
+        real = self.app.store.put
+
+        def spy(kind, row, expected=None):
+            stored = real(kind, row, expected)
+            if kind == "task" and row.get("dreaming") and "cwd" not in first:
+                first.update(stored)
+            return stored
+
+        self.app.store.put = spy
+        try:
+            self.app.dream_step(time.time())
+        finally:
+            self.app.store.put = real
+        self.assertEqual(first["cwd"], first["dream_stage"])
+        self.assertEqual(first["launch_roots"], [first["dream_stage"]])
+        self.assertTrue(first.get("dream_cursor"))
+        self.assertNotEqual(first["cwd"], str(self.root))
+        self.assertIn(first["status"], {"queued", "awaiting_approval"})
+
+    def test_unknown_with_a_live_process_is_not_closed_by_dream_step(self):
+        project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        stage = self.data.resolve().parent / "dream-stage" / project["id"] / "run-live"
+        stage.mkdir(parents=True)
+        (stage / "candidate").mkdir()
+        work = self.app.store.put("work", {
+            "id": uid("work"), "owner_bot_id": "bot-main", "goal": "dream", "status": "active",
+            "kind": "dreaming", "project_id": project["id"],
+            "created": time.time(), "checkpoint": {"phase": "dream"},
+        })
+        task = self.app.store.put("task", {
+            "id": uid("task"), "work_id": work["id"], "status": "unknown", "dreaming": True,
+            "dreaming_project_id": project["id"], "dream_stage": str(stage.resolve()),
+            "installation_id": "codex-local", "host_id": "local",
+            "supervisor": {"supervisor_pid": os.getpid()}, "created": time.time(),
+        })
+        self._due()
+        self.app.dream_step(time.time())
+        self.assertEqual(self.app.store.get("task", task["id"])["status"], "unknown")
+        self.assertTrue(stage.is_dir())
+        self.assertFalse(self.app.store.get("task", task["id"]).get("error"))
+        self.assertEqual(len([row for row in self.app.store.find("task", limit=20) if row.get("dreaming")]), 1)
+
+    def test_a_sustained_route_fault_does_not_spin_or_stack_stages(self):
+        self._due()
+        self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        real = self.app.submit_task
+
+        def blocked(*_args, **_kwargs):
+            raise Fault("backpressure", 429)
+
+        self.app.submit_task = blocked
+        try:
+            started = time.time()
+            self.assertTrue(self.app.dream_step(time.time()))
+            self.assertFalse(self.app.dream_step(time.time() + 1))
+            self.assertLess(time.time() - started, 2)
+        finally:
+            self.app.submit_task = real
+        dreams = [row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]
+        self.assertEqual(len(dreams), 1)
+        self.assertEqual(dreams[0]["status"], "cancelled")
+        self.assertEqual(list((self.data.resolve().parent / "dream-stage").rglob("candidate")), [])
+
+    def test_a_waiting_dream_is_not_failed_by_the_ordinary_queue_timeout(self):
+        self._due()
+        self._project("One", "ONE", "one")
+        self._project("Two", "TWO", "two")
+        self.app.execution.hosts["local"]["concurrency"] = 1
+        self.app.dream_step(time.time())
+        tasks = [row for row in self.app.store.find("task", limit=20) if row.get("dreaming")]
+        self.assertEqual(len(tasks), 1)
+        self.assertNotIn("queue_deadline", tasks[0])
+        tasks[0]["queue_deadline"] = time.time() - 5
+        self.app.store.put("task", tasks[0])
+        self.app.sweep_deadlines()
+        self.assertNotEqual(self.app.store.get("task", tasks[0]["id"])["status"], "failed")
+        self.app.dream_step(time.time() + 1)
+        self.assertEqual(len([row for row in self.app.store.find("task", limit=20) if row.get("dreaming")]), 1)
+
+    def test_a_hard_link_a_directory_symlink_and_a_replaced_file_are_rejected(self):
+        hold = Path(self.tmp.name) / "hold"
+        stage = hold / "stage"
+        (stage / "candidate" / "topics").mkdir(parents=True)
+        target = stage / "candidate" / "MEMORY.md"
+        target.write_text("# Memory\n", encoding="utf-8")
+        linked = stage / "candidate" / "topics" / "note.md"
+        os.link(target, linked)
+        with self.assertRaises(dreaming.CandidateRejected) as hard:
+            dreaming._candidate_files(stage)
+        self.assertIn("外面", str(hard.exception))
+        linked.unlink()
+        outside = hold / "outside"
+        outside.mkdir()
+        (stage / "candidate" / "topics" / "gone").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(dreaming.CandidateRejected) as link:
+            dreaming._candidate_files(stage)
+        self.assertIn("符号链接", str(link.exception))
+        (stage / "candidate" / "topics" / "gone").unlink()
+        real = os.fstat
+
+        def swapped(fd):
+            info = real(fd)
+            swapped.calls += 1
+            if swapped.calls >= 2:
+                values = list(info)
+                values[1] = info.st_ino + 1
+                return os.stat_result(values)
+            return info
+
+        swapped.calls = 0
+        with mock.patch("pangpang.dreaming.os.fstat", swapped):
+            with self.assertRaises(dreaming.CandidateRejected) as replaced:
+                dreaming._read_limited(target, dreaming.INDEX_MAX)
+        self.assertIn("外面", str(replaced.exception))
+
+    def test_an_oversized_candidate_is_refused_before_it_is_fully_read(self):
+        path = Path(self.tmp.name) / "MEMORY.md"
+        path.write_bytes(b"x" * (dreaming.INDEX_MAX + 50))
+        seen = {}
+        real = os.read
+
+        def limited(fd, size):
+            seen["size"] = size
+            return real(fd, size)
+
+        with mock.patch("pangpang.dreaming.os.read", limited):
+            with self.assertRaises(dreaming.CandidateRejected) as raised:
+                dreaming._read_limited(path, dreaming.INDEX_MAX)
+        self.assertEqual(seen["size"], dreaming.INDEX_MAX + 1)
+        self.assertIn("大小", str(raised.exception))
+
+    def test_a_finished_stage_and_unpublished_generation_are_removed(self):
+        self._due()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self.app.dream_step(time.time())
+        self._drain()
+        root = dreaming.memory_root(self.app, alpha["id"])
+        current = (root / "CURRENT").read_text(encoding="utf-8").strip()
+        leftover = root / "g" / ("gen-" + "ab" * 16)
+        leftover.mkdir()
+        (leftover / "MEMORY.md").write_text("stale\n", encoding="utf-8")
+        orphan = self.data.resolve().parent / "dream-stage" / alpha["id"] / "run-orphan"
+        orphan.mkdir(parents=True)
+        self.app.dream_step(time.time() + 1)
+        self.assertTrue((root / "g" / current).is_dir())
+        self.assertFalse(leftover.exists())
+        self.assertFalse(orphan.exists())
+        self.assertEqual(list((self.data.resolve().parent / "dream-stage").rglob("candidate")), [])
+
+    def test_two_publishes_of_one_project_do_not_both_win(self):
+        self._due()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self.app.dream_step(time.time())
+        task = next(row for row in self.app.store.find("task", limit=20) if row.get("dreaming"))
+        stage = Path(task["dream_stage"])
+        (stage / "candidate" / "MEMORY.md").write_text("# Memory\nONE\n", encoding="utf-8")
+        (stage / "candidate" / "topics").mkdir(exist_ok=True)
+        (stage / "candidate" / "topics" / "note.md").write_text("one\n", encoding="utf-8")
+        other = Path(str(stage) + "-other")
+        shutil.copytree(stage, other)
+        second = dict(task, id=uid("task"), dream_stage=str(other))
+        second["dream_cursor"] = dict(task["dream_cursor"], marker="other")
+        self.app.store.put("task", second)
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def publish(row):
+            try:
+                barrier.wait(timeout=5)
+                dreaming.accept_candidate(self.app, row)
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=publish, args=(row,)) for row in (task, second)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        rejected = [error for error in errors if isinstance(error, dreaming.CandidateRejected)]
+        self.assertEqual(len(rejected), 1)
+        root = dreaming.memory_root(self.app, alpha["id"])
+        gens = [path for path in (root / "g").iterdir() if path.is_dir()]
+        self.assertEqual(len(gens), 1)
+        self.assertEqual((root / "CURRENT").read_text(encoding="utf-8").strip(), gens[0].name)
+
+    def test_a_published_generation_is_recorded_after_the_task_write_fails(self):
+        self._due()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self.app.dream_step(time.time())
+        task = next(row for row in self.app.store.find("task", limit=20) if row.get("dreaming"))
+        stage = Path(task["dream_stage"])
+        (stage / "candidate" / "MEMORY.md").write_text("# Memory\nKEPT\n", encoding="utf-8")
+        (stage / "candidate" / "topics").mkdir(exist_ok=True)
+        (stage / "candidate" / "topics" / "note.md").write_text("kept\n", encoding="utf-8")
+        real = self.app.store.put
+
+        def fail_once(kind, row, expected=None):
+            if kind == "task" and row.get("id") == task["id"] and row.get("dream_generation"):
+                raise RuntimeError("disk")
+            return real(kind, row, expected)
+
+        self.app.store.put = fail_once
+        try:
+            dreaming.accept_candidate(self.app, task)
+        finally:
+            self.app.store.put = real
+        self.assertIsNone(self.app.store.get("task", task["id"]).get("dream_generation"))
+        self.app.dream_step(time.time() + 1)
+        self.assertTrue(self.app.store.get("task", task["id"]).get("dream_generation"))
+        self.assertIn("KEPT", dreaming.formal_index(self.app, alpha["id"]))
+        self.assertIn("KEPT", self._memory_text(alpha["id"]))
+
+    def test_a_bookkeeping_change_is_not_new_material(self):
+        project, work_id = self._project("Alpha", "SAME", "alpha")
+        works, tasks, artifacts = dreaming._sources(self.app, project["id"])
+        cursor = dreaming._cursor(works, tasks, artifacts)
+        work = self.app.store.get("work", work_id)
+        self.app.store.put("work", dict(work, status="running"))
+        works, tasks, artifacts = dreaming._sources(self.app, project["id"])
+        self.assertFalse(dreaming._has_new(cursor, works, tasks, artifacts))
+        task = self.app.store.put("task", {
+            "id": uid("task"), "work_id": work_id, "status": "running", "created": time.time(),
+        })
+        self.app.store.put("task", dict(task, last_observation_error="poll"))
+        works, tasks, artifacts = dreaming._sources(self.app, project["id"])
+        self.assertFalse(dreaming._has_new(cursor, works, tasks, artifacts))
+        self.assertEqual(dreaming._signal_task(self.app.store.get("task", task["id"])), "")
+        self.app.checkpoint_work("bot-main", work_id, {"summary": "CHANGED", "phase": "build"})
+        works, tasks, artifacts = dreaming._sources(self.app, project["id"])
+        self.assertTrue(dreaming._has_new(cursor, works, tasks, artifacts))
+        self.app.store.put("task", dict(self.app.store.get("task", task["id"]),
+                                         status="succeeded", receipt={"status": "succeeded", "tail": "done"}))
+        works, tasks, artifacts = dreaming._sources(self.app, project["id"])
+        self.assertTrue(any(key.startswith("task:") for key in dreaming._cursor(works, tasks, artifacts)))

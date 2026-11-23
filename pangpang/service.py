@@ -3207,7 +3207,7 @@ class Service:
                 # task to 'starting' wins (timeout only fires while still queued).
                 with self.store.atomic():
                     cur = self.store.get("task", obj["id"])
-                    if cur["status"] != "queued":
+                    if cur["status"] != "queued" or cur.get("dreaming"):
                         continue
                     cur.update(status="failed", error="queue_timeout", ended=time.time())
                     self.store.put("task", cur)
@@ -4639,7 +4639,7 @@ class Service:
                         [(r["installation_id"], r["reason"]) for r in rejected])
         return result
 
-    def submit_task(self, bot_id, work_id, body, *, root_request_id=None, route_quality=None, authorization=None):
+    def submit_task(self, bot_id, work_id, body, *, root_request_id=None, route_quality=None, authorization=None, dream=None):
         from .host_limits import task_timeout_s
         work, authority = self._work_for_route(
             self.store.get("work", work_id), root_request_id, authorization)
@@ -4787,18 +4787,26 @@ class Service:
         # snapshot the exact cwd + canonical workspace_key + access_mode
         # on the task so a later installation.cwd change cannot cause a claim/execute
         # mismatch (execution.spec launches task['cwd'], not the live install).
-        cwd = e.get("cwd", "")
+        # A dream passes its stage directory and workspace, already resolved
+        # outside this call, so the first stored row is the one that will run.
+        if dream:
+            cwd = dream["cwd"]
+            ws_host, ws_segs = dream["workspace_key"][0], tuple(dream["workspace_key"][1])
+            inputs = []
+        else:
+            cwd = e.get("cwd", "")
         # Reuse the installation's cached canonical workspace when its cwd is
         # unchanged, so we do NOT run Path.resolve() (filesystem I/O) here — this path
         # executes inside the durable-tool store transaction (store.once), and a slow
         # mount / reparse / AV stall on resolve() would hold the global DB lock (rule
         # B). The cache is stamped at install register/config time (see
         # _installation_workspace_key). Only recompute if cwd drifted from the cache.
-        cached = e.get("workspace_key")
-        if cached and e.get("workspace_cwd") == cwd:
-            ws_host, ws_segs = cached[0], tuple(cached[1])
-        else:
-            ws_host, ws_segs = self._canonical_workspace(host, cwd)
+        if not dream:
+            cached = e.get("workspace_key")
+            if cached and e.get("workspace_cwd") == cwd:
+                ws_host, ws_segs = cached[0], tuple(cached[1])
+            else:
+                ws_host, ws_segs = self._canonical_workspace(host, cwd)
         # Default access_mode is write; only a device-verified read-only policy
         # (installation risk=read + permission_verified) may be verified_read.
         verified_read = e.get("risk") == "read" and e.get("permission_verified") is True
@@ -4816,6 +4824,11 @@ class Service:
                 "authorization_digest": self._captured_authorization_digest(e),
                 # No device knowledge base is selected or injected.
                 "device_kb": None}
+        if dream:
+            task.update(dreaming=True, dreaming_project_id=dream["project_id"],
+                        dream_stage=dream["stage"], dream_cursor=dream["cursor"],
+                        dream_base_gen=dream.get("base_gen") or "",
+                        launch_roots=list(dream["launch_roots"]))
         # Freeze the supervision the route admitted: the runner refuses a weaker tier
         # (no silent cgroup -> process-group downgrade) and receipts are judged
         # against it rather than against a later policy.
@@ -4836,7 +4849,10 @@ class Service:
         verified_read = e.get("risk") == "read" and e.get("permission_verified") is True
         if not installation_authorized:
             task["installation_authorization"] = "required"
-            task["run_preview"] = self._run_preview(e)
+            preview = self._run_preview(e)
+            if dream:
+                preview = dict(preview, cwd=dream["cwd"], allowed_roots=list(dream["launch_roots"]))
+            task["run_preview"] = preview
         needs_approval = ((not installation_authorized)
                           or ((not work["grant_write"] or weak_route) and not verified_read))
         task["route_quality"] = route_quality or "deterministic"
@@ -4844,7 +4860,9 @@ class Service:
         # queue_deadline bounds EXECUTOR queue wait, not operator-approval wait: only
         # a queued task carries it (set at approve() otherwise). Excluded from
         # spec_digest above so setting it later does not change execution identity.
-        if task["status"] == "queued":
+        # A dream waiting for a free slot is not that queue. It must not fail the
+        # ordinary queue timeout while it waits.
+        if task["status"] == "queued" and not dream:
             task["queue_deadline"] = time.time() + self.config.get("task_queue_timeout_s", 3600)
         with self.store.atomic():
             work = self.store.get("work", work_id)
@@ -4912,8 +4930,11 @@ class Service:
             # approval is not executor queue time, so it must not count toward
             # queue_timeout (a task approved after the timeout window would otherwise
             # be swept immediately).
-            task.update(status="queued", approved_at=time.time(),
-                        queue_deadline=time.time() + self.config.get("task_queue_timeout_s", 3600))
+            task.update(status="queued", approved_at=time.time())
+            # A dream waiting for a free slot is not the executor queue. The
+            # ordinary queue timeout must not fail it after approval either.
+            if not task.get("dreaming"):
+                task["queue_deadline"] = time.time() + self.config.get("task_queue_timeout_s", 3600)
             return self.store.put("task", task)
 
     def probe(self, installation_id):
@@ -7697,6 +7718,11 @@ class Service:
         inst = self.execution.installations.get(task.get("installation_id"), {})
         if self._profile_derived_pi(inst) and not self._bind_profile_pi(inst):
             return self._deny_starting_task(task, "model_not_configured")
+        # A dream work whose task was stored before its stage cwd was bound must
+        # not start in the product directory. A live attempt is left to the
+        # normal receipt rules.
+        if self._dream_unbound(task) and task.get("status") in {"queued", "starting"} and not task.get("supervisor"):
+            return self._fail_task_terminally(task["id"], "dream_unbound", {"queued", "starting"})
         try:
             start = self.execution.start(task)
         except Fault as error:
@@ -7819,6 +7845,19 @@ class Service:
         log.warning("task %s start attempt %d/%d failed (%s); retry in %ss",
                     task["id"], attempts, self.START_ATTEMPT_BUDGET, error.code, backoff)
         return True
+
+    def _dream_unbound(self, task):
+        """True when this row belongs to a dream but would launch as a normal task."""
+        try:
+            work = self.store.get("work", task.get("work_id"))
+        except Fault:
+            return False
+        if work.get("kind") != "dreaming":
+            return False
+        stage = task.get("dream_stage")
+        roots = task.get("launch_roots")
+        return not (task.get("dreaming") is True and isinstance(roots, list) and roots
+                    and isinstance(stage, str) and stage and task.get("cwd") == stage)
 
     def dreaming_view(self):
         return dreaming.public_view(self)

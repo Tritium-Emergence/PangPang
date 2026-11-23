@@ -372,7 +372,7 @@ export default {
     fileReceiveSaved: 'Allow file receive updated',
     fileReceivePending: 'This computer has not confirmed yet. The switch may apply shortly; refresh the device status.',
     dreamingTitle: 'Dreaming',
-    dreamingHint: 'Once a day, the executor you pick rewrites each project’s memory from the receipts, artifacts, and checkpoints already returned. It only sees that project’s staged folder. A remote executor cannot be used yet, because its draft cannot be brought back. If the executor is busy or offline, the pass waits and does not interrupt a running task.',
+    dreamingHint: 'Once a day, the executor you pick rewrites each project’s memory from receipts, artifact records, and checkpoints already returned. Only the checked candidate files are kept. The run is not an OS sandbox. A remote executor cannot be used yet, because its draft cannot be brought back. If the executor is busy or offline, the pass waits and does not interrupt a running task.',
     dreamingRemote: ' (remote, draft cannot be retrieved)',
     dreamingEnabled: 'Dreaming on',
     dreamingExecutor: 'Executor',
