@@ -167,6 +167,7 @@ export interface SetupRequest {
   id: string;
   status: string;
   host_id?: string;
+  expires?: number | null;
   proposal?: Record<string, unknown>;
 }
 

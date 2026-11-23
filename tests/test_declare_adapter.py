@@ -838,7 +838,7 @@ class LocalDeclareAdapterTests(unittest.TestCase):
         self.assertEqual(self.app.onboarding.deny(denied["request_id"]), {"denied": True})
         with self.assertRaises(Fault) as ctx:
             self.app.onboarding.approve(denied["request_id"], {})
-        self.assertEqual(ctx.exception.code, "setup_request_expired_or_used")
+        self.assertEqual(ctx.exception.code, "setup_request_already_resolved")
         self.assertEqual(self.app.store.get("setup_request", denied["request_id"])["status"], "denied")
         self.assertFalse((self.data / "adapters.json").exists())
         self.assertFalse(self.app.adapter_known("host-local", "dsk-claude"))
@@ -882,7 +882,7 @@ class LocalDeclareAdapterTests(unittest.TestCase):
         self.assertEqual(results.get("approve"), {"accepted": True})
         self.assertNotIn("deny", results)
         self.assertIsInstance(results.get("deny_error"), Fault)
-        self.assertEqual(results["deny_error"].code, "setup_request_expired_or_used")
+        self.assertEqual(results["deny_error"].code, "setup_request_already_resolved")
         self.assertEqual(self.app.store.get("setup_request", identity)["status"], "done")
         stored = json.loads((self.data / "adapters.json").read_text(encoding="utf-8"))
         self.assertEqual(stored["dsk-claude"], self.row)
