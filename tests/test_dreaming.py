@@ -753,7 +753,8 @@ class ReviewTests(unittest.TestCase):
         (stage / "candidate" / "MEMORY.md").write_text("# Memory\nNO\n", encoding="utf-8")
         task["status"] = "cancelled"
         self.app.store.put("task", task)
-        dreaming.accept_candidate(self.app, task)
+        with self.assertRaises(dreaming.CandidateRejected):
+            dreaming.accept_candidate(self.app, task)
         root = dreaming.memory_root(self.app, alpha["id"])
         self.assertFalse((root / "CURRENT").exists())
 
@@ -781,3 +782,84 @@ class ReviewTests(unittest.TestCase):
         second = dreaming.formal_watermark(self.app, project["id"]) or {}
         self.assertGreater(len(second), len(first))
         self.assertIn("ITEM-", dreaming.formal_index(self.app, project["id"]))
+
+    def test_submit_backpressure_keeps_the_project_in_this_slot(self):
+        self._due()
+        self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        real = self.app.submit_task
+
+        def blocked(*_args, **_kwargs):
+            raise Fault("backpressure", 429)
+
+        self.app.submit_task = blocked
+        try:
+            now = time.time()
+            self.assertTrue(self.app.dream_step(now))
+            self.assertFalse(self.app.dream_step(now + 1))
+        finally:
+            self.app.submit_task = real
+        self.assertEqual([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"
+                          and row.get("status") != "cancelled"], [])
+        self.app.dream_step(time.time() + dreaming.DEFER_S + 2)
+        self.assertTrue(any(row.get("dreaming") for row in self.app.store.find("task", limit=20)))
+
+    def test_confinement_blocks_a_read_outside_the_stage(self):
+        from pangpang import runner
+        stage = Path(self.tmp.name) / "stage"
+        (stage / "signal").mkdir(parents=True)
+        (stage / "candidate").mkdir()
+        (stage / "signal" / "in.txt").write_text("INSIDE", encoding="utf-8")
+        outside = Path(self.tmp.name) / "other-project.txt"
+        outside.write_text("SECRET-OTHER", encoding="utf-8")
+        run = Path(self.tmp.name) / "run"
+        run.mkdir()
+        code = (
+            "import pathlib,sys\n"
+            "try:\n"
+            "    print('OUT '+pathlib.Path(sys.argv[1]).read_text())\n"
+            "except OSError as e:\n"
+            "    print('OUT_DENIED')\n"
+            "pathlib.Path('signal/in.txt').read_text()\n"
+            "pathlib.Path('candidate/out.txt').write_text('ok')\n"
+            "print('WRITE_OK')\n"
+        )
+        (run / "dream-confine.json").write_text(json.dumps({
+            "readable": [str(stage)],
+            "writable": [str(stage / "candidate")],
+            "argv": [sys.executable, "-c", code, str(outside)],
+        }), encoding="utf-8")
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, str(Path(runner.__file__)), "confine", str(run)],
+            cwd=stage, capture_output=True, text=True, timeout=20)
+        self.assertIn("OUT_DENIED", completed.stdout)
+        self.assertNotIn("SECRET-OTHER", completed.stdout)
+        self.assertIn("WRITE_OK", completed.stdout)
+        self.assertEqual((stage / "candidate" / "out.txt").read_text(encoding="utf-8"), "ok")
+
+    def test_a_deep_leftover_does_not_stop_dream_step(self):
+        project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        deep = self.data.resolve().parent / "dream-stage" / project["id"] / "run-deep"
+        current = deep
+        for _ in range(40):
+            current = current / "n"
+        current.mkdir(parents=True)
+        (current / "leaf.txt").write_text("x", encoding="utf-8")
+        os.chmod(deep, 0o755)
+        self.app.dream_step(time.time())
+        self.assertTrue(True)
+
+    def test_unknown_cancel_does_not_publish(self):
+        self._due()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self.app.dream_step(time.time())
+        task = next(row for row in self.app.store.find("task", limit=20) if row.get("dreaming"))
+        stage = Path(task["dream_stage"])
+        (stage / "candidate" / "MEMORY.md").write_text("# Memory\nNO\n", encoding="utf-8")
+        task["status"] = "unknown"
+        task["cancel_requested"] = True
+        self.app.store.put("task", task)
+        with self.assertRaises(dreaming.CandidateRejected):
+            dreaming.accept_candidate(self.app, task)
+        root = dreaming.memory_root(self.app, alpha["id"])
+        self.assertFalse((root / "CURRENT").exists())

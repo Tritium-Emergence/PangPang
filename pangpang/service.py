@@ -1518,6 +1518,19 @@ class Service:
     # tasks that need a device-side cancel. A post-commit, lock-free pass sends
     # those device cancels; anything unconfirmed goes unknown/quarantine.
 
+    def _dream_projects_for_cancel(self, work_id, seen=None):
+        seen = seen or set()
+        if work_id in seen:
+            return []
+        seen.add(work_id)
+        ids = []
+        for task in self._all("task", work_id=work_id):
+            if task.get("dreaming"):
+                ids.append(task.get("dreaming_project_id") or "")
+        for child in self.store.find("work", parent_work_id=work_id, limit=1000):
+            ids.extend(self._dream_projects_for_cancel(child["id"], seen))
+        return ids
+
     def cancel_work(self, work_id):
         """User/operator Work cancel (authority; not a model tool). Idempotent:
         a cancel on an already-terminal Work is a no-op. Device task cancels are
@@ -1535,7 +1548,8 @@ class Service:
         unknown cancel-requested task. A child that was already terminal is
         not entered."""
         visited = set()
-        self._cancel_work_txn(work_id, visited)
+        with dreaming.hold_publication(self._dream_projects_for_cancel(work_id)):
+            self._cancel_work_txn(work_id, visited)
         for wid in visited:
             for task in self._all("task", work_id=wid):
                 if task.get("status") == "unknown" and task.get("cancel_requested"):
@@ -5945,6 +5959,12 @@ class Service:
                               host_id=body["host_id"], work_id=artifact["work_id"], source=artifact_id, size=artifact["size"]))
 
     def cancel(self, task_id):
+        task = self.store.get("task", task_id)
+        projects = [task.get("dreaming_project_id") or ""] if task.get("dreaming") else []
+        with dreaming.hold_publication(projects):
+            return self._cancel_locked(task_id)
+
+    def _cancel_locked(self, task_id):
         with self.store.atomic():
             task = self.store.get("task", task_id)
             if task["status"] in TERMINAL:
@@ -6478,18 +6498,21 @@ class Service:
             # The executor already exited. Publishing the dream is a file check on
             # the staged directory, so it stays outside the store transaction.
             dream_reject = None
+            sync_pending = False
             if current.get("dreaming") and receipt.get("status") == "succeeded":
                 try:
                     dreaming.accept_candidate(self, current)
+                except dreaming.SyncPending:
+                    sync_pending = True
                 except dreaming.CandidateRejected as rejected:
                     dream_reject = rejected.text
                 except Exception:
                     log.exception("dreaming publish failed task=%s", current.get("id"))
                     dream_reject = dreaming.REJECT_INTERRUPTED
-            self._complete_task_locked(task, receipt, fast, dream_reject)
+            self._complete_task_locked(task, receipt, fast, dream_reject, sync_pending)
         return self.store.get("task", task["id"])
 
-    def _complete_task_locked(self, task, receipt, fast, dream_reject):
+    def _complete_task_locked(self, task, receipt, fast, dream_reject, sync_pending=False):
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL:
@@ -6623,6 +6646,10 @@ class Service:
             if dream_reject and current.get("work_id"):
                 dream_work = self.store.get("work", current["work_id"])
                 dream_work["dream_reject"] = dream_reject
+                self.store.put("work", dream_work)
+            if sync_pending and current.get("work_id"):
+                dream_work = self.store.get("work", current["work_id"])
+                dream_work["dream_sync_pending"] = True
                 self.store.put("work", dream_work)
             self._settle_task_dependency(current, adjudicated, tail=receipt.get("tail", ""),
                                          error=adj_error, refs=refs,
@@ -7888,7 +7915,11 @@ class Service:
         return dreaming.configure(self, body)
 
     def dream_step(self, now=None):
-        return dreaming.step(self, now)
+        try:
+            return dreaming.step(self, now)
+        except Exception:
+            log.exception("dream step failed")
+            return False
 
     def retry_task(self, task_id):
         old = self.store.get("task", task_id)

@@ -30,16 +30,21 @@ from pathlib import Path
 
 RECEIPT_MAX_BYTES = 1024 * 1024
 
-# Landlock write rights. A dream grants these only on candidate/ and the
-# per-execution output directory. Reads are not in the handled set, so the
-# process can still read inputs. Absent on a host whose kernel cannot apply
-# the ruleset: a dream must not start there.
+# Landlock rights. Reads are limited to the staged inputs and the runtime
+# paths added below. Writes, including truncate, are limited to candidate/
+# and this run's output directory. ABI 1 and 2 do not enforce truncate.
+_LANDLOCK_EXECUTE = 1 << 0
+_LANDLOCK_READ = (1 << 2) | (1 << 3)
 _LANDLOCK_WRITE = (
     (1 << 1) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
     | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14)
 )
 _LANDLOCK_REFER = 1 << 13
 _LANDLOCK_TRUNCATE = 1 << 14
+_RUNTIME_READ_DIRS = (
+    "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt", "/System",
+    "/Library", "/private", "/dev", "/proc", "/Applications", "/opt/homebrew",
+)
 _SYS_LANDLOCK_CREATE = 444
 _SYS_LANDLOCK_ADD = 445
 _SYS_LANDLOCK_RESTRICT = 446
@@ -131,12 +136,35 @@ def _landlock_abi():
 
 
 def dream_boundary_available():
-    """True only when a dream process can be confined to candidate writes."""
-    return _landlock_abi() >= 1
+    """True only when this host can enforce the dream read and write boundary.
+
+    Linux needs landlock ABI 3 so truncate is included. Mac uses the system
+    sandbox-exec. Anything weaker is not selectable and is not started.
+    """
+    if sys.platform == "linux":
+        return _landlock_abi() >= 3
+    if sys.platform == "darwin":
+        return shutil.which("sandbox-exec") is not None
+    return False
+
+
+def _runtime_read_paths(argv):
+    paths = []
+    for candidate in _RUNTIME_READ_DIRS:
+        if os.path.isdir(candidate):
+            paths.append(candidate)
+    exe = argv[0] if argv else sys.executable
+    try:
+        parent = os.path.dirname(os.path.realpath(exe))
+    except OSError:
+        parent = ""
+    if parent and os.path.isdir(parent) and parent not in paths:
+        paths.append(parent)
+    return paths
 
 
 def _landlock_handled(abi):
-    handled = _LANDLOCK_WRITE
+    handled = _LANDLOCK_EXECUTE | _LANDLOCK_READ | _LANDLOCK_WRITE
     if abi < 3:
         handled &= ~_LANDLOCK_TRUNCATE
     if abi < 2:
@@ -144,17 +172,34 @@ def _landlock_handled(abi):
     return handled
 
 
-def confine_dream_writes(writable_dirs):
-    """Make every later write fail unless it is under one of these directories.
+def _add_landlock_rule(syscall, ruleset, directory, access):
+    import ctypes
 
-    The calling thread must be the process that will exec the executor. A
-    failure raises. Callers do not launch when this cannot be applied.
+    class PathAttr(ctypes.Structure):
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+    parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        rule = PathAttr(access, parent)
+        added = syscall(_SYS_LANDLOCK_ADD, ruleset, ctypes.c_uint32(1), ctypes.byref(rule), 0)
+        if added < 0:
+            raise OSError(ctypes.get_errno(), "landlock_add_rule")
+    finally:
+        os.close(parent)
+
+
+def confine_dream(readable_dirs, writable_dirs):
+    """Apply the dream boundary in this process, then return.
+
+    Reads are allowed only under readable_dirs. Writes, including truncate,
+    are allowed only under writable_dirs. A failure raises.
     """
     import ctypes
     abi = _landlock_abi()
-    if abi < 1:
+    if abi < 3:
         raise OSError(errno.ENOTSUP, "dream_boundary_unavailable")
     handled = _landlock_handled(abi)
+    read_access = _LANDLOCK_EXECUTE | _LANDLOCK_READ
     libc = ctypes.CDLL(None, use_errno=True)
     syscall = libc.syscall
     syscall.restype = ctypes.c_long
@@ -162,23 +207,17 @@ def confine_dream_writes(writable_dirs):
     class RulesetAttr(ctypes.Structure):
         _fields_ = [("handled_access_fs", ctypes.c_uint64)]
 
-    class PathAttr(ctypes.Structure):
-        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
-
     attr = RulesetAttr(handled)
     ruleset = syscall(_SYS_LANDLOCK_CREATE, ctypes.byref(attr), ctypes.sizeof(attr), ctypes.c_uint32(0))
     if ruleset < 0:
         raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
     try:
+        for directory in readable_dirs:
+            if directory and os.path.isdir(directory):
+                _add_landlock_rule(syscall, ruleset, directory, read_access)
         for directory in writable_dirs:
-            parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-            try:
-                rule = PathAttr(handled, parent)
-                added = syscall(_SYS_LANDLOCK_ADD, ruleset, ctypes.c_uint32(1), ctypes.byref(rule), 0)
-                if added < 0:
-                    raise OSError(ctypes.get_errno(), "landlock_add_rule")
-            finally:
-                os.close(parent)
+            if directory and os.path.isdir(directory):
+                _add_landlock_rule(syscall, ruleset, directory, handled)
         if hasattr(libc, "prctl"):
             limited = libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
         else:
@@ -190,6 +229,46 @@ def confine_dream_writes(writable_dirs):
             raise OSError(ctypes.get_errno(), "landlock_restrict_self")
     finally:
         os.close(ruleset)
+
+
+def _sandbox_profile(readable_dirs, writable_dirs):
+    def subpath(path):
+        escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
+        return '(subpath "%s")' % escaped
+
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        "(allow process*)",
+        "(allow signal)",
+        "(allow sysctl-read)",
+        "(allow mach-lookup)",
+        "(allow network-outbound)",
+        "(allow network-bind)",
+        "(allow system-socket)",
+        "(allow file-ioctl)",
+    ]
+    for directory in readable_dirs:
+        if directory and os.path.isdir(directory):
+            lines.append("(allow file-read* %s)" % subpath(directory))
+    for directory in writable_dirs:
+        if directory and os.path.isdir(directory):
+            lines.append("(allow file-read* %s)" % subpath(directory))
+            lines.append("(allow file-write* %s)" % subpath(directory))
+    return "\n".join(lines) + "\n"
+
+
+def exec_confined(readable_dirs, writable_dirs, argv):
+    """Replace this process with argv inside the dream boundary."""
+    readable = [path for path in readable_dirs if path]
+    readable.extend(_runtime_read_paths(argv))
+    writable = [path for path in writable_dirs if path]
+    if sys.platform == "darwin":
+        profile = Path(tempfile.mkdtemp(prefix="pang-dream-sandbox-")) / "profile.sb"
+        profile.write_text(_sandbox_profile(readable, writable), encoding="utf-8")
+        os.execvpe("sandbox-exec", ["sandbox-exec", "-f", str(profile), "--", *argv], os.environ)
+    confine_dream(readable, writable)
+    os.execvpe(argv[0], argv, os.environ)
 
 
 def check_control_separation(roots, control_roots):
@@ -3079,9 +3158,11 @@ def supervise(directory):
                     writable = [str(Path(cwd) / "candidate")]
                     if output_dir:
                         writable.append(str(output_dir))
-                    (directory / "dream-confine.json").write_text(
-                        json.dumps({"writable": writable, "argv": argv}, ensure_ascii=False),
-                        encoding="utf-8")
+                    (directory / "dream-confine.json").write_text(json.dumps({
+                        "readable": [str(cwd)],
+                        "writable": writable,
+                        "argv": argv,
+                    }, ensure_ascii=False), encoding="utf-8")
                     argv = [sys.executable, str(Path(__file__).resolve()), "confine", str(directory)]
             proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE if session_protocol else subprocess.STDOUT,
@@ -3722,7 +3803,9 @@ def main():
                         if os.environ.get("XPP_OUTPUT_DIR"):
                             writable.append(os.environ["XPP_OUTPUT_DIR"])
                         try:
-                            confine_dream_writes(writable)
+                            if sys.platform == "darwin":
+                                exec_confined([str(Path.cwd())], writable, argv)
+                            confine_dream([str(Path.cwd())], writable)
                         except OSError:
                             sys.exit(126)
                     # Inherit cwd: supervise() launched this child with
@@ -3736,8 +3819,7 @@ def main():
             sys.exit(125)
         if args.action == "confine":
             payload = json.loads((directory / "dream-confine.json").read_text(encoding="utf-8"))
-            confine_dream_writes(payload["writable"])
-            os.execvpe(payload["argv"][0], payload["argv"], os.environ)
+            exec_confined(payload.get("readable") or [], payload.get("writable") or [], payload["argv"])
         if args.action == "run":
             supervise(directory)
             return
