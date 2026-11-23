@@ -6,7 +6,7 @@ import {api} from '../api';
 import {SettingsDialog} from './Setup';
 import {clock, dateTime, friendlyError} from '../display';
 import {canUpgradeDevice as deviceUpgradeEligible, commitsDiffer, executionFactsFor, installationSetupTone, setupClickExpired} from '../pure';
-import type {Host, HostLimits, InstallBuild} from '../types';
+import type {DreamingSettings, Host, HostLimits, InstallBuild} from '../types';
 
 function shortHash(commit?: string | null) {
   if (!commit || commit === 'unknown') return '';
@@ -187,6 +187,97 @@ function FileReceiveControl({host, device, store}: {host: Host; device?: {allow_
   );
 }
 
+function DreamingForm({store}: {store: Store}) {
+  const {t} = useTranslation();
+  const dreaming = (store.snapshot?.dreaming || {
+    enabled: false, installation_id: '', time: '02:00', timezone: 'Asia/Shanghai',
+  }) as DreamingSettings;
+  const executors = dreaming.executors || [];
+  const [enabled, setEnabled] = useState(dreaming.enabled);
+  const [executor, setExecutor] = useState(dreaming.installation_id || '');
+  const [clock, setClock] = useState(dreaming.time || '02:00');
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (dirty) return;
+    setEnabled(dreaming.enabled);
+    setExecutor(dreaming.installation_id || '');
+    setClock(dreaming.time || '02:00');
+  }, [dreaming.enabled, dreaming.installation_id, dreaming.time, dirty]);
+
+  async function save(ev: {preventDefault(): void}) {
+    ev.preventDefault();
+    const time = clock.trim();
+    if (!/^\d{2}:\d{2}$/.test(time)) {
+      store.setNotice(t('hosts.dreamingTimeInvalid'));
+      return;
+    }
+    if (enabled && !executor) {
+      store.setNotice(t('hosts.dreamingNeedExecutor'));
+      return;
+    }
+    setSaving(true);
+    try {
+      await api('dreaming', {enabled, installation_id: executor, time});
+      await store.refresh();
+      setDirty(false);
+      store.setNotice(t('hosts.dreamingSaved'));
+    } catch (err: any) {
+      store.setNotice(friendlyError(err) || t('hosts.saveFailedPrefix'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form id="dreaming-settings" className="mt-4 rounded-lg border border-line bg-surface/40 p-3" onSubmit={(e) => { void save(e); }}>
+      <p className="text-xs font-medium">{t('hosts.dreamingTitle')}</p>
+      <p className="text-[11px] text-muted">{t('hosts.dreamingHint')}</p>
+      <div className="mt-2 flex flex-wrap items-end gap-3">
+        <label className="flex items-center gap-2 text-xs">
+          <input id="dreaming-enabled" type="checkbox" checked={enabled} onChange={(e) => { setEnabled(e.target.checked); setDirty(true); }} />
+          {t('hosts.dreamingEnabled')}
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-muted">
+          {t('hosts.dreamingExecutor')}
+          <select
+            id="dreaming-executor"
+            className="rounded-lg border border-line bg-raised px-2 py-1 text-sm text-ink"
+            value={executor}
+            onChange={(e) => { setExecutor(e.target.value); setDirty(true); }}
+          >
+            <option value="">{t('hosts.dreamingExecutorNone')}</option>
+            {executors.map((item) => {
+              const offered = item.local && item.bounded !== false;
+              return (
+                <option key={item.id} value={item.id} disabled={!offered}>
+                  {item.label} · {item.id}{offered ? '' : item.local ? t('hosts.dreamingUnbounded') : t('hosts.dreamingRemote')}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-muted">
+          {t('hosts.dreamingTime')}
+          <input
+            id="dreaming-time"
+            type="time"
+            step={60}
+            className="rounded-lg border border-line bg-raised px-2 py-1 text-sm text-ink"
+            value={clock}
+            onChange={(e) => { setClock(e.target.value); setDirty(true); }}
+          />
+        </label>
+        <span className="pb-1 text-[11px] text-muted">{t('hosts.dreamingTimezone')}</span>
+        <button id="dreaming-save" type="submit" className="rounded-lg border border-line px-3 py-1.5 text-sm" disabled={saving}>
+          {saving ? t('hosts.saving') : t('hosts.dreamingSave')}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 // Hosts view (#hosts-view): devices + their executors, the global-model settings
 // entry, and device pairing. Reads server truth (hosts/devices/installations/probes);
 // never derives readiness.
@@ -297,6 +388,7 @@ export function HostsView({store}: {store: Store}) {
             try { const r = await api<any>('setup/pairing', {}); setPairCode(r.code); } catch (e: any) { store.setNotice(e?.message); }
           }}>{t('hosts.connectNewComputer')}</button>
         </div>
+        <DreamingForm store={store} />
       </div>
 
       <h2 className="mt-6 text-sm font-semibold tracking-widest text-muted">{t('hosts.myComputers')}</h2>

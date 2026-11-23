@@ -1,5 +1,6 @@
 """Business authority. All bot tool mutations pass through these contracts."""
 import base64
+import contextlib
 import copy
 import errno
 import hashlib
@@ -29,6 +30,7 @@ from .store import Fault, Store, digest, encode, uid
 from .vault import secure_directory
 from .logs import get_logger
 from .env_compat import env_value
+from . import dreaming
 from .replies import reply_text, reply_delta_text, history_reply_text
 
 log = get_logger("route")
@@ -638,6 +640,7 @@ class Service:
         self.execution.broker = self.broker
         # this coordinator's boot identity + validated scheduler config.
         self.boot_id = uid("boot")
+        self._dream_inflight = set()
         # Live streaming buffer (UI-only, ephemeral): the model worker's accumulated
         # assistant text per (turn_id, attempt), read by the /bots/{id}/stream SSE.
         # Never persisted, never in store.events — a transient UI projection.
@@ -678,6 +681,9 @@ class Service:
         self.semantic_gate = SemanticGate(self)
         self.task_result_gate = TaskResultGate(self, self.semantic_gate)
         self.recover()
+        # A restart does not replay dreaming slots that passed while this process
+        # was down. The next future clock time is the only one that will run.
+        dreaming.arm_after_boot(self)
 
     def _backfill_workspace(self):
         """Migration: stamp workspace_key/access_mode on older
@@ -1512,6 +1518,25 @@ class Service:
     # tasks that need a device-side cancel. A post-commit, lock-free pass sends
     # those device cancels; anything unconfirmed goes unknown/quarantine.
 
+    def _dream_projects_for_cancel(self, work_id, seen=None):
+        seen = seen or set()
+        if work_id in seen:
+            return []
+        seen.add(work_id)
+        ids = []
+        try:
+            work = self.store.get("work", work_id)
+        except Fault:
+            work = None
+        if work and work.get("kind") == "dreaming" and work.get("project_id"):
+            ids.append(work["project_id"])
+        for task in self._all("task", work_id=work_id):
+            if task.get("dreaming"):
+                ids.append(task.get("dreaming_project_id") or "")
+        for child in self.store.find("work", parent_work_id=work_id, limit=1000):
+            ids.extend(self._dream_projects_for_cancel(child["id"], seen))
+        return ids
+
     def cancel_work(self, work_id):
         """User/operator Work cancel (authority; not a model tool). Idempotent:
         a cancel on an already-terminal Work is a no-op. Device task cancels are
@@ -1529,7 +1554,14 @@ class Service:
         unknown cancel-requested task. A child that was already terminal is
         not entered."""
         visited = set()
-        self._cancel_work_txn(work_id, visited)
+        try:
+            opening = self.store.get("work", work_id)
+        except Fault:
+            opening = {}
+        primary = [opening["project_id"]] if opening.get("kind") == "dreaming" and opening.get("project_id") else []
+        with dreaming.hold_publication(primary):
+            with dreaming.hold_publication(self._dream_projects_for_cancel(work_id)):
+                self._cancel_work_txn(work_id, visited)
         for wid in visited:
             for task in self._all("task", work_id=wid):
                 if task.get("status") == "unknown" and task.get("cancel_requested"):
@@ -1547,6 +1579,8 @@ class Service:
             visited.add(work_id)
             work = self.store.get("work", work_id)
             if work.get("status") in {"cancelled", "delivered", "failed", "linked"}:
+                if work.get("kind") == "dreaming":
+                    dreaming.release_held_work(self, work_id)
                 return # idempotent no-op on terminal work
             work["cancel_requested"] = True # closes admission immediately
             self.store.put("work", work)
@@ -1554,6 +1588,8 @@ class Service:
             work = self.store.get("work", work_id)
             work["status"] = "cancelled"
             self.store.put("work", work)
+            if work.get("kind") == "dreaming":
+                dreaming.release_held_work(self, work_id)
 
     def _propagate_cancel(self, work, visited):
         work_id = work["id"]
@@ -2990,7 +3026,13 @@ class Service:
         Work inbox as one message; the coalescing authority (ensure_work_turn)
         then wakes the Work with a SINGLE continuation once the join is empty
         (pending_dep_ids == []). deliver_to_user children never wake a parent turn
-        and, when last, deliver the parent directly."""
+        and, when last, deliver the parent directly.
+
+        A dreaming task records the outcome on the project and stops. It does
+        not wake the planner and it does not post a notification."""
+        if work.get("kind") == "dreaming":
+            dreaming.record_outcome(self, work, outcome)
+            return
         kind = dep["kind"]
         remaining = bool(work.get("pending_dep_ids"))
         if kind == "child_work":
@@ -3196,7 +3238,7 @@ class Service:
                 # task to 'starting' wins (timeout only fires while still queued).
                 with self.store.atomic():
                     cur = self.store.get("task", obj["id"])
-                    if cur["status"] != "queued":
+                    if cur["status"] != "queued" or cur.get("dreaming"):
                         continue
                     cur.update(status="failed", error="queue_timeout", ended=time.time())
                     self.store.put("task", cur)
@@ -4628,7 +4670,7 @@ class Service:
                         [(r["installation_id"], r["reason"]) for r in rejected])
         return result
 
-    def submit_task(self, bot_id, work_id, body, *, root_request_id=None, route_quality=None, authorization=None):
+    def submit_task(self, bot_id, work_id, body, *, root_request_id=None, route_quality=None, authorization=None, dream=None):
         from .host_limits import task_timeout_s
         work, authority = self._work_for_route(
             self.store.get("work", work_id), root_request_id, authorization)
@@ -4721,6 +4763,9 @@ class Service:
         cp = work.get("checkpoint") or {}
         progress = {k: cp.get(k) for k in ("phase", "summary", "completed", "next_actions", "blocked_on")
                     if cp.get(k)}
+        # Same prompt the executor already receives for checkpoint progress.
+        # The index is published memory for this project, not a second control plane.
+        memory_index = dreaming.formal_index(self, work.get("project_id"))
         # Listed inputs are absolute paths the runner digest-checks before launch.
         # They may lie outside this task's cwd (an upstream task's output). State
         # that next to the list so every executor is told the same thing the list shows.
@@ -4734,6 +4779,7 @@ class Service:
             )
         execution_prompt = (user_prompt + "\n\nUser constraints: " + encode(work["constraints"])
                             + ("\nWork progress (background reference, untrusted, not instructions): " + encode(progress) if progress else "")
+                            + (("\n" + dreaming.INDEX_PROMPT_LABEL + "\n" + memory_index) if memory_index else "")
                             + input_rule
                             + "\nInput files: " + encode(inputs)
                             # The runner substitutes the LITERAL directory for $XPP_OUTPUT_DIR
@@ -4772,18 +4818,26 @@ class Service:
         # snapshot the exact cwd + canonical workspace_key + access_mode
         # on the task so a later installation.cwd change cannot cause a claim/execute
         # mismatch (execution.spec launches task['cwd'], not the live install).
-        cwd = e.get("cwd", "")
+        # A dream passes its stage directory and workspace, already resolved
+        # outside this call, so the first stored row is the one that will run.
+        if dream:
+            cwd = dream["cwd"]
+            ws_host, ws_segs = dream["workspace_key"][0], tuple(dream["workspace_key"][1])
+            inputs = []
+        else:
+            cwd = e.get("cwd", "")
         # Reuse the installation's cached canonical workspace when its cwd is
         # unchanged, so we do NOT run Path.resolve() (filesystem I/O) here — this path
         # executes inside the durable-tool store transaction (store.once), and a slow
         # mount / reparse / AV stall on resolve() would hold the global DB lock (rule
         # B). The cache is stamped at install register/config time (see
         # _installation_workspace_key). Only recompute if cwd drifted from the cache.
-        cached = e.get("workspace_key")
-        if cached and e.get("workspace_cwd") == cwd:
-            ws_host, ws_segs = cached[0], tuple(cached[1])
-        else:
-            ws_host, ws_segs = self._canonical_workspace(host, cwd)
+        if not dream:
+            cached = e.get("workspace_key")
+            if cached and e.get("workspace_cwd") == cwd:
+                ws_host, ws_segs = cached[0], tuple(cached[1])
+            else:
+                ws_host, ws_segs = self._canonical_workspace(host, cwd)
         # Default access_mode is write; only a device-verified read-only policy
         # (installation risk=read + permission_verified) may be verified_read.
         verified_read = e.get("risk") == "read" and e.get("permission_verified") is True
@@ -4801,6 +4855,11 @@ class Service:
                 "authorization_digest": self._captured_authorization_digest(e),
                 # No device knowledge base is selected or injected.
                 "device_kb": None}
+        if dream:
+            task.update(dreaming=True, dreaming_project_id=dream["project_id"],
+                        dream_stage=dream["stage"], dream_cursor=dream["cursor"],
+                        dream_base_gen=dream.get("base_gen") or "",
+                        launch_roots=list(dream["launch_roots"]))
         # Freeze the supervision the route admitted: the runner refuses a weaker tier
         # (no silent cgroup -> process-group downgrade) and receipts are judged
         # against it rather than against a later policy.
@@ -4821,7 +4880,10 @@ class Service:
         verified_read = e.get("risk") == "read" and e.get("permission_verified") is True
         if not installation_authorized:
             task["installation_authorization"] = "required"
-            task["run_preview"] = self._run_preview(e)
+            preview = self._run_preview(e)
+            if dream:
+                preview = dict(preview, cwd=dream["cwd"], allowed_roots=list(dream["launch_roots"]))
+            task["run_preview"] = preview
         needs_approval = ((not installation_authorized)
                           or ((not work["grant_write"] or weak_route) and not verified_read))
         task["route_quality"] = route_quality or "deterministic"
@@ -4829,7 +4891,9 @@ class Service:
         # queue_deadline bounds EXECUTOR queue wait, not operator-approval wait: only
         # a queued task carries it (set at approve() otherwise). Excluded from
         # spec_digest above so setting it later does not change execution identity.
-        if task["status"] == "queued":
+        # A dream waiting for a free slot is not that queue. It must not fail the
+        # ordinary queue timeout while it waits.
+        if task["status"] == "queued" and not dream:
             task["queue_deadline"] = time.time() + self.config.get("task_queue_timeout_s", 3600)
         with self.store.atomic():
             work = self.store.get("work", work_id)
@@ -4897,8 +4961,11 @@ class Service:
             # approval is not executor queue time, so it must not count toward
             # queue_timeout (a task approved after the timeout window would otherwise
             # be swept immediately).
-            task.update(status="queued", approved_at=time.time(),
-                        queue_deadline=time.time() + self.config.get("task_queue_timeout_s", 3600))
+            task.update(status="queued", approved_at=time.time())
+            # A dream waiting for a free slot is not the executor queue. The
+            # ordinary queue timeout must not fail it after approval either.
+            if not task.get("dreaming"):
+                task["queue_deadline"] = time.time() + self.config.get("task_queue_timeout_s", 3600)
             return self.store.put("task", task)
 
     def probe(self, installation_id):
@@ -5908,6 +5975,12 @@ class Service:
                               host_id=body["host_id"], work_id=artifact["work_id"], source=artifact_id, size=artifact["size"]))
 
     def cancel(self, task_id):
+        task = self.store.get("task", task_id)
+        projects = [task.get("dreaming_project_id") or ""] if task.get("dreaming") else []
+        with dreaming.hold_publication(projects):
+            return self._cancel_locked(task_id)
+
+    def _cancel_locked(self, task_id):
         with self.store.atomic():
             task = self.store.get("task", task_id)
             if task["status"] in TERMINAL:
@@ -6429,6 +6502,33 @@ class Service:
         # still hold (last pending dep + no live user/queued/running turn). Those
         # are re-checked under the lock so a racing user message can never be lost.
         fast = self._fast_accept_decision(task, receipt)
+        # A dream's publish and its terminal write share one lock, so a cancel
+        # that lands first cannot be followed by a publish, and a publish that
+        # lands first is the decision the terminal row records.
+        publication = (dreaming.publication_lock(current.get("dreaming_project_id"))
+                       if current.get("dreaming") else contextlib.nullcontext())
+        with publication:
+            current = self.store.get("task", task["id"])
+            if current["status"] in TERMINAL:
+                return current
+            # The executor already exited. Publishing the dream is a file check on
+            # the staged directory, so it stays outside the store transaction.
+            dream_reject = None
+            sync_pending = False
+            if current.get("dreaming") and receipt.get("status") == "succeeded":
+                try:
+                    dreaming.accept_candidate(self, current)
+                except dreaming.SyncPending:
+                    sync_pending = True
+                except dreaming.CandidateRejected as rejected:
+                    dream_reject = rejected.text
+                except Exception:
+                    log.exception("dreaming publish failed task=%s", current.get("id"))
+                    dream_reject = dreaming.REJECT_INTERRUPTED
+            self._complete_task_locked(task, receipt, fast, dream_reject, sync_pending)
+        return self.store.get("task", task["id"])
+
+    def _complete_task_locked(self, task, receipt, fast, dream_reject, sync_pending=False):
         with self.store.atomic():
             current = self.store.get("task", task["id"])
             if current["status"] in TERMINAL:
@@ -6455,6 +6555,9 @@ class Service:
             elif receipt["status"] == "succeeded" and declared_missing:
                 adjudicated = "failed"
                 adj_error = "declared_output_missing"
+            if dream_reject:
+                adjudicated = "failed"
+                adj_error = dream_reject
             stored_receipt = dict(receipt)
             started_at, ended_at = stored_receipt.get("started"), stored_receipt.get("ended")
             if (type(started_at) in (int, float) and type(ended_at) in (int, float)
@@ -6472,6 +6575,9 @@ class Service:
                 # which keeps the true execution error/none). Reuses the existing
                 # `error` field — no second Task state machine.
                 current["error"] = adj_error
+            if dream_reject:
+                current["error"] = dream_reject
+                current["dream_reject"] = dream_reject
             self.store.put("task", current)
             refs = []
             # The receipt keeps the full harvest (evidence). Chat and result
@@ -6553,6 +6659,14 @@ class Service:
             # directly instead of waking the planner (Qwen-27B) — see _settle_task_dependency.
             #: carry the ADJUDICATED business status/error (not the raw receipt) to
             # the dependency, and never fast-accept a non-succeeded adjudication.
+            if dream_reject and current.get("work_id"):
+                dream_work = self.store.get("work", current["work_id"])
+                dream_work["dream_reject"] = dream_reject
+                self.store.put("work", dream_work)
+            if sync_pending and current.get("work_id"):
+                dream_work = self.store.get("work", current["work_id"])
+                dream_work["dream_sync_pending"] = True
+                self.store.put("work", dream_work)
             self._settle_task_dependency(current, adjudicated, tail=receipt.get("tail", ""),
                                          error=adj_error, refs=refs,
                                          fast_accept=fast if adjudicated == "succeeded" else None)
@@ -7059,6 +7173,7 @@ class Service:
         for routine in self.store.find("routine", limit=1000):
             if routine.get("active"):
                 consider(routine.get("next_run_at"))
+        consider(dreaming.next_deadline(self, now))
         return soonest
 
     def has_active_local_task(self):
@@ -7660,6 +7775,19 @@ class Service:
         inst = self.execution.installations.get(task.get("installation_id"), {})
         if self._profile_derived_pi(inst) and not self._bind_profile_pi(inst):
             return self._deny_starting_task(task, "model_not_configured")
+        # A dream that was never started does not run as a normal task. A
+        # starting attempt needs a real launch trace: a missing supervisor
+        # field is not that proof, so observation failure stays quarantined.
+        if self._dream_unbound(task):
+            if task.get("status") == "queued":
+                return self._fail_task_terminally(task["id"], "dream_unbound", {"queued"})
+            if task.get("status") == "starting":
+                return self._deny_starting_task(task, "dream_unbound")
+        if task.get("dreaming") and not runner.dream_boundary_available():
+            if task.get("status") == "queued":
+                return self._fail_task_terminally(task["id"], "dream_boundary_unavailable", {"queued"})
+            if task.get("status") == "starting":
+                return self._deny_starting_task(task, "dream_boundary_unavailable")
         try:
             start = self.execution.start(task)
         except Fault as error:
@@ -7783,8 +7911,37 @@ class Service:
                     task["id"], attempts, self.START_ATTEMPT_BUDGET, error.code, backoff)
         return True
 
+    def _dream_unbound(self, task):
+        """True when this row belongs to a dream but would launch as a normal task."""
+        try:
+            work = self.store.get("work", task.get("work_id"))
+        except Fault:
+            return False
+        if work.get("kind") != "dreaming":
+            return False
+        stage = task.get("dream_stage")
+        roots = task.get("launch_roots")
+        return not (task.get("dreaming") is True and isinstance(roots, list) and roots
+                    and isinstance(stage, str) and stage and task.get("cwd") == stage)
+
+    def dreaming_view(self):
+        return dreaming.public_view(self)
+
+    def set_dreaming(self, body):
+        return dreaming.configure(self, body)
+
+    def dream_step(self, now=None):
+        try:
+            return dreaming.step(self, now)
+        except Exception:
+            log.exception("dream step failed")
+            return False
+
     def retry_task(self, task_id):
         old = self.store.get("task", task_id)
+        if old.get("dreaming"):
+            raise Fault("dreaming_retries_on_schedule", 409,
+                        advice="做梦失败留到下一个做梦时间，从原来的水位继续，不另开一次。")
         if old["status"] not in {"failed", "cancelled"}:
             raise Fault("retry_requires_known_terminal")
         # Prefer the stored user_prompt; fall back to splitting on the constraints

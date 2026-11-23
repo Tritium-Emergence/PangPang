@@ -29,6 +29,32 @@ from pathlib import Path
 
 
 RECEIPT_MAX_BYTES = 1024 * 1024
+
+# Landlock rights. Reads are limited to the staged inputs and the runtime
+# paths added below. Writes, including truncate, are limited to candidate/
+# and this run's output directory. ABI 1 and 2 do not enforce truncate.
+_LANDLOCK_EXECUTE = 1 << 0
+_LANDLOCK_READ = (1 << 2) | (1 << 3)
+_LANDLOCK_WRITE = (
+    (1 << 1) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
+    | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14)
+)
+_LANDLOCK_REFER = 1 << 13
+_LANDLOCK_TRUNCATE = 1 << 14
+# Rights the kernel accepts only on a directory. A file rule that includes
+# any of them is rejected, which would drop the file from the boundary.
+_LANDLOCK_DIR_ONLY = (
+    (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
+    | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13)
+)
+_RUNTIME_FILES = (
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd",
+    "/etc/group", "/dev/null", "/dev/urandom", "/dev/zero",
+)
+_SYS_LANDLOCK_CREATE = 444
+_SYS_LANDLOCK_ADD = 445
+_SYS_LANDLOCK_RESTRICT = 446
+_PR_SET_NO_NEW_PRIVS = 38
 # L0 process-group cooperative tier. Selected ONLY when the
 # spec carries allow_pgroup_cooperative (the host operator's current risk consent,
 # see pangpang/consent.py) and no stronger backend exists on this host.
@@ -98,6 +124,291 @@ def receipt_proof_ok(receipt, floor=None):
     if label not in TREE_EVIDENCE or evidence != TREE_EVIDENCE[label]:
         return False
     return SUPERVISION_RANK[label] >= SUPERVISION_RANK.get(floor, 0)
+
+
+def _landlock_abi():
+    """Kernel landlock ABI, or 0 when this process cannot create a ruleset."""
+    if sys.platform != "linux":
+        return 0
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    version = syscall(_SYS_LANDLOCK_CREATE, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
+    if version < 1:
+        return 0
+    return int(version)
+
+
+def dream_boundary_available():
+    """True only when this host can enforce the dream read and write boundary.
+
+    Linux needs landlock ABI 3 so truncate is included. Mac uses the system
+    sandbox-exec. Anything weaker is not selectable and is not started.
+    """
+    if sys.platform == "linux":
+        return _landlock_abi() >= 3
+    if sys.platform == "darwin":
+        return shutil.which("sandbox-exec") is not None
+    return False
+
+
+_RUNTIME_PARENT_BLOCK = {"/", "/usr", "/opt", "/private", "/Library", "/System", "/home", "/Users", "/tmp", "/var", "/data"}
+
+
+def _is_broad_runtime_dir(path):
+    """A directory that can hold another project's inputs, memory, or sessions.
+
+    The executable's own file and its library directory are fine. Its home
+    directory, and the other broad parents, are not.
+    """
+    if not path:
+        return True
+    norm = os.path.normpath(path)
+    if norm in _RUNTIME_PARENT_BLOCK:
+        return True
+    if norm.startswith("/opt/") or norm.startswith("/private/") or norm.startswith("/var/"):
+        return True
+    parts = norm.split("/")
+    if len(parts) == 3 and parts[1] in {"home", "Users"} and parts[2]:
+        return True
+    try:
+        home = os.path.normpath(os.path.expanduser("~"))
+        homes = {home, os.path.realpath(home)}
+    except OSError:
+        homes = set()
+    if norm in homes:
+        return True
+    try:
+        if os.path.exists(norm) and os.path.realpath(norm) in homes:
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _allow_runtime_parent(path):
+    parent = os.path.dirname(path)
+    if _is_broad_runtime_dir(parent):
+        return ""
+    return parent
+
+
+def _runtime_read_paths(argv):
+    """The chosen program, its libraries, and the few system files it needs.
+
+    The program's own directory and library directory are included so it can
+    be executed. Broad trees that can hold project memory or control data
+    (/usr, /opt, /private, /Library, /var) are not.
+    """
+    paths = []
+
+    def add(path):
+        if path and os.path.exists(path) and path not in paths and not _is_broad_runtime_dir(path):
+            paths.append(path)
+
+    requested = argv[0] if argv else sys.executable
+    try:
+        exe = os.path.realpath(requested)
+    except OSError:
+        exe = requested
+    add(requested)
+    add(exe)
+    add(_allow_runtime_parent(requested))
+    add(_allow_runtime_parent(exe))
+    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
+    try:
+        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
+        for match in re.findall(r"(/[^ )\n]+)", listed.stdout or ""):
+            add(match)
+            add(_allow_runtime_parent(match))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if exe and "python" in os.path.basename(exe).lower():
+        try:
+            listed = subprocess.run(
+                [exe, "-c",
+                 "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
+                capture_output=True, text=True, timeout=5)
+            for line in (listed.stdout or "").splitlines():
+                add(line)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for extra in ("/etc/ssl", "/etc/ssl/certs", "/System/Library/OpenSSL"):
+        add(extra)
+    for extra in _RUNTIME_FILES:
+        add(extra)
+    return paths
+
+
+def runtime_grant_possible(argv):
+    """False when the only way to run argv is to open a broad directory.
+
+    Select and start both refuse in that case. A missing parent that is just
+    /usr/bin stays allowed; a home directory does not.
+    """
+    if not argv or not isinstance(argv[0], str) or not argv[0]:
+        return False
+    requested = argv[0]
+    try:
+        exe = os.path.realpath(requested)
+    except OSError:
+        exe = requested
+    files = [requested, exe]
+    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
+    try:
+        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
+        files.extend(re.findall(r"(/[^ )\n]+)", listed.stdout or ""))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for path in files:
+        parent = os.path.dirname(path or "")
+        if parent and _is_broad_runtime_dir(parent):
+            return False
+    if exe and "python" in os.path.basename(exe).lower() and os.path.exists(exe):
+        try:
+            listed = subprocess.run(
+                [exe, "-c",
+                 "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
+                capture_output=True, text=True, timeout=5)
+            for line in (listed.stdout or "").splitlines():
+                if line and _is_broad_runtime_dir(line.strip()):
+                    return False
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return True
+
+
+def _landlock_handled(abi):
+    handled = _LANDLOCK_EXECUTE | _LANDLOCK_READ | _LANDLOCK_WRITE
+    if abi < 3:
+        handled &= ~_LANDLOCK_TRUNCATE
+    if abi < 2:
+        handled &= ~_LANDLOCK_REFER
+    return handled
+
+
+def _add_landlock_rule(syscall, ruleset, path, access):
+    import ctypes
+
+    class PathAttr(ctypes.Structure):
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+    directory = os.path.isdir(path) and not os.path.islink(path)
+    if not directory:
+        access &= ~_LANDLOCK_DIR_ONLY
+    if not access:
+        raise OSError(errno.EINVAL, "landlock_empty_rule")
+    if os.path.islink(path):
+        flags = os.O_PATH | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC
+    elif directory:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    else:
+        flags = os.O_RDONLY | os.O_CLOEXEC
+    parent = os.open(path, flags)
+    try:
+        rule = PathAttr(access, parent)
+        added = syscall(_SYS_LANDLOCK_ADD, ruleset, ctypes.c_uint32(1), ctypes.byref(rule), 0)
+        if added < 0:
+            raise OSError(ctypes.get_errno(), "landlock_add_rule")
+    finally:
+        os.close(parent)
+
+
+def confine_dream(readable_dirs, writable_dirs):
+    """Apply the dream boundary in this process, then return.
+
+    Reads are allowed only under readable_dirs. Writes, including truncate,
+    are allowed only under writable_dirs. A failure raises.
+    """
+    import ctypes
+    abi = _landlock_abi()
+    if abi < 3:
+        raise OSError(errno.ENOTSUP, "dream_boundary_unavailable")
+    handled = _landlock_handled(abi)
+    read_access = _LANDLOCK_EXECUTE | _LANDLOCK_READ
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+
+    class RulesetAttr(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    attr = RulesetAttr(handled)
+    ruleset = syscall(_SYS_LANDLOCK_CREATE, ctypes.byref(attr), ctypes.sizeof(attr), ctypes.c_uint32(0))
+    if ruleset < 0:
+        raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
+    try:
+        for path in _present_paths(readable_dirs):
+            _add_landlock_rule(syscall, ruleset, path, read_access)
+        for path in writable_dirs:
+            if path and os.path.isdir(path) and not os.path.islink(path):
+                _add_landlock_rule(syscall, ruleset, path, handled)
+        if hasattr(libc, "prctl"):
+            limited = libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        else:
+            limited = syscall(157, _PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        if limited < 0:
+            raise OSError(ctypes.get_errno(), "no_new_privs")
+        restricted = syscall(_SYS_LANDLOCK_RESTRICT, ruleset, 0, 0)
+        if restricted < 0:
+            raise OSError(ctypes.get_errno(), "landlock_restrict_self")
+    finally:
+        os.close(ruleset)
+
+
+def _present_paths(paths):
+    return [path for path in paths if path and os.path.lexists(path)]
+
+
+def _sandbox_filter(path):
+    escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    if os.path.isdir(path) and not os.path.islink(path):
+        return '(subpath "%s")' % escaped
+    if os.path.lexists(path):
+        return '(literal "%s")' % escaped
+    return ""
+
+
+def _sandbox_profile(readable_dirs, writable_dirs):
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        "(allow process*)",
+        "(allow signal)",
+        "(allow sysctl-read)",
+        "(allow mach-lookup)",
+        "(allow network-outbound)",
+        "(allow network-bind)",
+        "(allow system-socket)",
+        "(allow file-ioctl)",
+    ]
+    for path in readable_dirs:
+        clause = _sandbox_filter(path) if path else ""
+        if clause:
+            lines.append("(allow file-read* %s)" % clause)
+    for path in writable_dirs:
+        clause = _sandbox_filter(path) if path else ""
+        if clause and os.path.isdir(path) and not os.path.islink(path):
+            lines.append("(allow file-read* %s)" % clause)
+            lines.append("(allow file-write* %s)" % clause)
+    return "\n".join(lines) + "\n"
+
+
+def exec_confined(readable_dirs, writable_dirs, argv):
+    """Replace this process with argv inside the dream boundary."""
+    if not runtime_grant_possible(argv):
+        raise OSError(errno.EPERM, "dream_boundary_unavailable")
+    readable = [path for path in readable_dirs if path]
+    readable.extend(_runtime_read_paths(argv))
+    writable = [path for path in writable_dirs if path]
+    if sys.platform == "darwin":
+        profile = Path(tempfile.mkdtemp(prefix="pang-dream-sandbox-")) / "profile.sb"
+        profile.write_text(_sandbox_profile(readable, writable), encoding="utf-8")
+        os.execvpe("sandbox-exec", ["sandbox-exec", "-f", str(profile), "--", *argv], os.environ)
+    confine_dream(readable, writable)
+    os.execvpe(argv[0], argv, os.environ)
 
 
 def check_control_separation(roots, control_roots):
@@ -2977,6 +3288,22 @@ def supervise(directory):
             stderr_reader = None
             # An open-stdin protocol keeps stderr off the stdout parser. Other
             # executors stay on the merged pipe they already had.
+            if spec.get("dream_boundary"):
+                if not dream_boundary_available() or not runtime_grant_possible(argv):
+                    raise ValueError("dream_boundary_unavailable")
+                # Process-group launches exec the CLI directly. Confine in a
+                # wrapper that replaces itself, so the supervised pid is the
+                # executor and writes outside candidate/ fail in the kernel.
+                if scope_unit is None and os.name != "nt":
+                    writable = [str(Path(cwd) / "candidate")]
+                    if output_dir:
+                        writable.append(str(output_dir))
+                    (directory / "dream-confine.json").write_text(json.dumps({
+                        "readable": [str(cwd)],
+                        "writable": writable,
+                        "argv": argv,
+                    }, ensure_ascii=False), encoding="utf-8")
+                    argv = [sys.executable, str(Path(__file__).resolve()), "confine", str(directory)]
             proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE if session_protocol else subprocess.STDOUT,
                                     start_new_session=os.name != "nt", env=env)
@@ -3561,7 +3888,7 @@ def _stdin_json():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["run", "start", "child", "inspect", "cancel", "inject", "probe", "hash", "read", "write",
+    parser.add_argument("action", choices=["run", "start", "child", "confine", "inspect", "cancel", "inject", "probe", "hash", "read", "write",
                                            "receive", "list", "artifact_read"])
     parser.add_argument("directory", nargs="?")
     args = parser.parse_args()
@@ -3611,6 +3938,16 @@ def main():
                     bound = bind_output_dir(spec["prompt"], os.environ.get("XPP_OUTPUT_DIR"))
                     argv = executor_argv(
                         spec, bound, resume=(directory / SESSION_RESUME_MARK).is_file())
+                    if spec.get("dream_boundary"):
+                        writable = [str(Path.cwd() / "candidate")]
+                        if os.environ.get("XPP_OUTPUT_DIR"):
+                            writable.append(os.environ["XPP_OUTPUT_DIR"])
+                        try:
+                            # Same readable set as the process-group wrapper,
+                            # including this program and its libraries.
+                            exec_confined([str(Path.cwd())], writable, argv)
+                        except OSError:
+                            sys.exit(126)
                     # Inherit cwd: supervise() launched this child with
                     # cwd=checked(spec["cwd"]). The raw spec value may be
                     # unexpanded (~) or re-resolve differently by now.
@@ -3620,6 +3957,9 @@ def main():
                     break
                 time.sleep(min(.1, remaining))
             sys.exit(125)
+        if args.action == "confine":
+            payload = json.loads((directory / "dream-confine.json").read_text(encoding="utf-8"))
+            exec_confined(payload.get("readable") or [], payload.get("writable") or [], payload["argv"])
         if args.action == "run":
             supervise(directory)
             return
