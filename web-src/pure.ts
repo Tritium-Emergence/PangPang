@@ -3,6 +3,109 @@
 // imports these directly, and the tests import the SAME module (no bundle slicing,
 // no esbuild/vm, no second implementation).
 
+// A numeric expires already in the past is a confirmation card that timed out
+// under the old click deadline. Missing expires means the card is still waiting.
+export function setupClickExpired(expires: unknown, now = Date.now() / 1000): boolean {
+  return typeof expires === 'number' && Number.isFinite(expires) && expires < now;
+}
+
+// The chat setup panel. Denied and finished rows leave. An already-expired
+// waiting card stays until deny, so the operator can close it.
+const SETUP_PANEL_STATUSES = new Set(['needs_approval', 'needs_secret', 'configuring']);
+export function visibleSetupCards<T extends {status?: string}>(requests: T[] | undefined | null): T[] {
+  return (requests || []).filter((row) => SETUP_PANEL_STATUSES.has(row.status || ''));
+}
+
+// Setup-card faults. A known code is its sentence alone. Anything else — an
+// unknown code, a raw message, or JSON — is the generic prompt.
+const SETUP_FAULT_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+export function setupFaultCode(message: string): string {
+  const head = String(message || '').split(':')[0].trim();
+  return SETUP_FAULT_CODE.test(head) ? head : '';
+}
+
+export function setupCardSentence(message: string, known: (code: string) => string, generic: string): string {
+  const code = setupFaultCode(message);
+  const fallback = String(generic || '').trim();
+  if (code) {
+    const sentence = String(known(code) || '').trim();
+    if (sentence && !sentence.includes(code)) return sentence;
+  }
+  return fallback;
+}
+
+// A second click after the row already moved on should reload that status.
+// An expired waiting card stays put so Deny can close it.
+export function setupFaultRefreshes(message: string): boolean {
+  return setupFaultCode(message) === 'setup_request_already_resolved';
+}
+
+// What an approval will write. Absent fields are unchanged. An empty env map,
+// credential-ref map, or extra-argv list is a clear, and must not look like
+// “not mentioned”. Values are ordinary config and credential ids, never a JSON dump.
+export type LandingFact =
+  | {kind: 'env'; name: string; value: string}
+  | {kind: 'env-clear'}
+  | {kind: 'secret'; name: string; id: string}
+  | {kind: 'secrets-clear'}
+  | {kind: 'argv'; args: string[]}
+  | {kind: 'argv-clear'}
+  | {kind: 'secret-env'; name: string};
+
+function isEmptyLanding(value: unknown): boolean {
+  if (value == null) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value as object).length === 0;
+  return false;
+}
+
+function plainMap(value: unknown): {name: string; value: string}[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries: {name: string; value: string}[] = [];
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+      entries.push({name, value: String(raw)});
+    }
+  }
+  return entries;
+}
+
+function pushMap(facts: LandingFact[], value: unknown, kind: 'env' | 'secret') {
+  if (isEmptyLanding(value)) {
+    facts.push(kind === 'env' ? {kind: 'env-clear'} : {kind: 'secrets-clear'});
+    return;
+  }
+  const entries = plainMap(value);
+  if (!entries?.length) return;
+  for (const entry of entries) {
+    facts.push(kind === 'env'
+      ? {kind: 'env', name: entry.name, value: entry.value}
+      : {kind: 'secret', name: entry.name, id: entry.value});
+  }
+}
+
+export function landingFacts(source: Record<string, unknown> | null | undefined): LandingFact[] {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return [];
+  const facts: LandingFact[] = [];
+  if ('env' in source) pushMap(facts, source.env, 'env');
+  if ('extra_env' in source) pushMap(facts, source.extra_env, 'env');
+  if ('secret_refs' in source) pushMap(facts, source.secret_refs, 'secret');
+  if ('extra_argv' in source) {
+    const value = source.extra_argv;
+    if (isEmptyLanding(value)) facts.push({kind: 'argv-clear'});
+    else if (Array.isArray(value)) {
+      const args = value.filter((item) => typeof item === 'string' || typeof item === 'number').map(String);
+      if (args.length) facts.push({kind: 'argv', args});
+    }
+  }
+  if (typeof source.secret_env === 'string' && source.secret_env.trim()) {
+    facts.push({kind: 'secret-env', name: source.secret_env});
+  }
+  return facts;
+}
+
 // XSS gate for rendered links/images: allow http(s), site-relative,./ relative and
 // data:image only; everything else (javascript:/vbscript:/file:/data:text/html) -> ''.
 export function safeUrl(u: string): string {

@@ -30,7 +30,9 @@ test('custom adapter approval shows the full row and posts an empty body', async
   await expect(card).toContainText('my-echo');
   await expect(card).toContainText('--stdio');
   await expect(card).toContainText('echo a line');
-  await expect(card).toContainText('concurrency');
+  await expect(card).toContainText('并行');
+  await expect(card).not.toContainText('"binary"');
+  await expect(card).not.toContainText('"argv"');
   await expect(card.locator('input[type=url]')).toHaveCount(0);
   await card.getByRole('button', {name: '应用这些设置'}).click();
   expect(body).toEqual({});
@@ -66,7 +68,8 @@ test('an approve 409 stays visible on the setup card', async ({page}) => {
   const card = page.locator('#setup-panel .mini', {hasText: 'dsk-claude'});
   await card.getByRole('button', {name: '应用这些设置'}).click();
   const fault = card.getByRole('alert');
-  await expect(fault).toContainText('cli_not_installed');
-  await expect(fault).toContainText('not installed on PATH');
+  await expect(fault).toContainText('找不到要启动的程序');
+  await expect(fault).not.toContainText('cli_not_installed');
+  await expect(fault).not.toContainText('not installed on PATH');
   await expect(card.getByRole('button', {name: '应用这些设置'})).toBeVisible();
 });

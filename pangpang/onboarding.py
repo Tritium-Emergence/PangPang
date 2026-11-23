@@ -114,11 +114,53 @@ def _visible_setup_error(code, advice):
     return code + ": " + folded if folded else code
 
 
+def _click_expired(req, now=None):
+    """True when this confirmation row already passed its old click deadline.
+
+    Waiting for the operator is not a timeout. A missing expires, or any
+    non-numeric value, means there is no click deadline. Only a numeric
+    expires already in the past — a card that expired in the field — blocks
+    apply. Pairing codes use a different record and are not this check.
+    """
+    expires = req.get("expires")
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        return False
+    return expires < (time.time() if now is None else now)
+
+
 class Onboarding:
     def __init__(self, service):
         self.s, self.store, self.vault = service, service.store, service.vault
         self._declare_gates_guard = threading.Lock()
         self._declare_gates = {}
+        # Cards still waiting when this process starts must not die later
+        # because nobody clicked. Rows already past their old hour keep the
+        # deadline so apply will not land them.
+        self._disarm_click_timeouts()
+
+    def _disarm_click_timeouts(self):
+        """Remove click deadlines that have not passed yet.
+
+        A needs_approval or needs_secret row whose expires is still in the
+        future was waiting on the old one-hour click timeout. Drop that field
+        so the wait cannot expire. A deadline already in the past stays: that
+        card must not be applied, and deny is what retires it.
+        """
+        now = time.time()
+        for status in ("needs_approval", "needs_secret"):
+            cursor = None
+            while True:
+                page, cursor = self.store.find_page(
+                    "setup_request", cursor=cursor, status=status)
+                for req in page:
+                    expires = req.get("expires")
+                    if (isinstance(expires, bool) or not isinstance(expires, (int, float))
+                            or expires < now):
+                        continue
+                    req.pop("expires", None)
+                    self.store.put("setup_request", req)
+                if cursor is None:
+                    break
 
     def _declare_gate(self, identity):
         """The claim for one local declaration card. Approve and deny share it."""
@@ -346,7 +388,7 @@ class Onboarding:
                     "command": [clean["binary"], *clean["argv"]]}
         req = self.store.put("setup_request", {
             "id": uid("setup"), "host_id": host_id, "bot_id": bot_id, "work_id": work_id,
-            "proposal": proposal, "status": "needs_approval", "expires": time.time() + 3600})
+            "proposal": proposal, "status": "needs_approval"})
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
     def _project_declared(self, host_id, reported, expected_name, expected_row):
@@ -523,8 +565,7 @@ class Onboarding:
             body = dict(body, expected_policy_digest=self.store.get("probe", inst["id"])["policy_digest"],
                         endpoint=inst.get("endpoint", ""))
         req = self.store.put("setup_request", {"id": uid("setup"), "host_id": host_id, "bot_id": bot_id,
-                  "work_id": work_id, "proposal": body, "status": "needs_secret" if action == "credential" else "needs_approval",
-                  "expires": time.time() + 3600})
+                  "work_id": work_id, "proposal": body, "status": "needs_secret" if action == "credential" else "needs_approval"})
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
     def _request_local(self, bot_id, work_id, host_id, host, action, body):
@@ -606,7 +647,7 @@ class Onboarding:
                     proposal = req.get("proposal") or {}
                     if proposal.get("action") != "configure" or proposal.get("adapter") != adapter:
                         continue
-                    if status == "needs_approval" and req.get("expires", 0) < now:
+                    if status == "needs_approval" and _click_expired(req, now):
                         continue
                     found.append(req)
                 if cursor is None:
@@ -641,7 +682,7 @@ class Onboarding:
         created = self.store.put("setup_request", {
             "id": uid("setup"), "host_id": host_id, "bot_id": None, "work_id": None,
             "origin": "operator", "proposal": self._default_operator_proposal(adapter),
-            "status": "needs_approval", "expires": time.time() + 3600})
+            "status": "needs_approval"})
         approved = self.approve(created["id"], {})
         approved.update(request_id=created["id"], status="configuring")
         return approved
@@ -695,8 +736,7 @@ class Onboarding:
                             endpoint=inst.get("endpoint", ""))
             status = "needs_secret" if action == "credential" else "needs_approval"
         req = self.store.put("setup_request", {"id": uid("setup"), "host_id": host_id, "bot_id": None,
-                  "work_id": None, "origin": "operator", "proposal": proposal, "status": status,
-                  "expires": time.time() + 3600})
+                  "work_id": None, "origin": "operator", "proposal": proposal, "status": status})
         return {"request_id": req["id"], "status": req["status"], "yielded": True}
 
     def stage_executor(self, bot_id, work_id, inst, host, staged, raw):
@@ -734,8 +774,7 @@ class Onboarding:
                     proposal["command"] = shown
         req = self.store.put("setup_request", {
             "id": uid("setup"), "host_id": host_id, "bot_id": bot_id, "work_id": work_id,
-            "origin": "executor_proposal", "proposal": proposal, "status": "needs_approval",
-            "expires": time.time() + 3600})
+            "origin": "executor_proposal", "proposal": proposal, "status": "needs_approval"})
         return req
 
     def deny(self, identity):
@@ -746,9 +785,20 @@ class Onboarding:
             return self._deny_request(identity)
 
     def _deny_request(self, identity):
+        """Retire a confirmation or secret card. Nothing is applied.
+
+        A card whose old click deadline has already passed is still retired.
+        A row that already left the waiting states (approved, denied, failed)
+        is unchanged.
+        """
         with self.store.atomic():
-            req = self.checked_request(identity, "needs_approval")
+            req = self.store.get("setup_request", identity)
+            if req["status"] not in ("needs_approval", "needs_secret"):
+                raise Fault("setup_request_already_resolved", 409)
+            if not _click_expired(req):
+                self._require_host(req)
             req["status"] = "denied"
+            req.pop("expires", None)
             self.store.put("setup_request", req)
         return {"denied": True}
 
@@ -990,15 +1040,19 @@ class Onboarding:
 
     def checked_request(self, identity, status):
         req = self.store.get("setup_request", identity)
-        if req["status"] != status or req["expires"] < time.time():
+        if req["status"] != status:
+            raise Fault("setup_request_already_resolved", 409)
+        if _click_expired(req):
             raise Fault("setup_request_expired_or_used", 409)
-        # A local installation is this coordinator, not a paired device. Connector
-        # requests still require the device row and refuse a revoked one.
+        self._require_host(req)
+        return req
+
+    def _require_host(self, req):
+        """Connector cards need a live device. A local host is this coordinator."""
         host = self.s.execution.hosts.get(req.get("host_id"), {})
         if host.get("transport") != "local":
             if self.store.get("device", req["host_id"]).get("revoked"):
                 raise Fault("device_revoked", 403)
-        return req
 
     def _approve_local_declaration(self, identity):
         """Write one approved row into this coordinator's adapters file.

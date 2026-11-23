@@ -5,7 +5,7 @@ import type {Store} from '../store';
 import {api} from '../api';
 import {SettingsDialog} from './Setup';
 import {clock, dateTime, friendlyError} from '../display';
-import {canUpgradeDevice as deviceUpgradeEligible, commitsDiffer, executionFactsFor, installationSetupTone} from '../pure';
+import {canUpgradeDevice as deviceUpgradeEligible, commitsDiffer, executionFactsFor, installationSetupTone, setupClickExpired} from '../pure';
 import type {DreamingSettings, Host, HostLimits, InstallBuild} from '../types';
 
 function shortHash(commit?: string | null) {
@@ -407,7 +407,7 @@ export function HostsView({store}: {store: Store}) {
           const openSetup = (snap.setup.requests || [])
             .filter((r) => r.host_id === h.id && ['needs_approval', 'configuring'].includes(r.status));
           const pendingAdapters = new Set(openSetup
-            .filter((r) => r.status === 'needs_approval')
+            .filter((r) => r.status === 'needs_approval' && !setupClickExpired(r.expires))
             .map((r) => String((r.proposal || {}).adapter || '')));
           const workingAdapters = new Set(openSetup
             .filter((r) => r.status === 'configuring')
