@@ -68,7 +68,8 @@ test('an approve 409 stays visible on the setup card', async ({page}) => {
   const card = page.locator('#setup-panel .mini', {hasText: 'dsk-claude'});
   await card.getByRole('button', {name: '应用这些设置'}).click();
   const fault = card.getByRole('alert');
-  await expect(fault).toContainText('cli_not_installed');
-  await expect(fault).toContainText('not installed on PATH');
+  await expect(fault).toContainText('找不到要启动的程序');
+  await expect(fault).not.toContainText('cli_not_installed');
+  await expect(fault).not.toContainText('not installed on PATH');
   await expect(card.getByRole('button', {name: '应用这些设置'})).toBeVisible();
 });

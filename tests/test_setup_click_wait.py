@@ -93,6 +93,10 @@ class SetupClickWaitTests(unittest.TestCase):
         self.app.onboarding.approve(again["request_id"], {})
         self.assertEqual(self.configure_commands(again["request_id"])[0]["host_id"], host_id)
         self.assertEqual(self.configure_commands(request_id), [])
+        with self.assertRaises(Fault) as used:
+            self.app.onboarding.approve(again["request_id"], {})
+        self.assertEqual(used.exception.code, "setup_request_already_resolved")
+        self.assertEqual(len(self.configure_commands(again["request_id"])), 1)
 
     def test_expired_secret_card_can_be_dismissed_without_installing(self):
         host_id = self.paired_host()

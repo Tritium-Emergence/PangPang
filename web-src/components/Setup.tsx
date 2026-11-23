@@ -6,7 +6,7 @@ import type {Capability, SetupRequest} from '../types';
 import {api} from '../api';
 import {sealCredential, type SecretTarget} from '../crypto';
 import {capabilityLabel, capabilityStateLabel, friendlyError, setupCardFault, DEFAULT_OUTPUT_TOKENS} from '../display';
-import {executorSetupTone, visibleSetupCards} from '../pure';
+import {executorSetupTone, landingFacts, setupFaultRefreshes, visibleSetupCards} from '../pure';
 
 // Conversational-setup surface. Mirrors setup.js: the model settings dialog, the
 // pending setup-request panel (approve + sealed-secret), and credential sealing. RCB:
@@ -299,18 +299,11 @@ export function StatusStrip({store}: {store: Store}) {
 );
 }
 
-function keyList(value: unknown): string {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
-  return Object.keys(value as Record<string, unknown>).join(', ');
-}
-
 function ProposalFacts({draft, row}: {draft: Record<string, any> | null; row: Record<string, any> | null}) {
   const {t} = useTranslation();
   const source = row || draft;
   if (!source) return null;
-  const argv = Array.isArray(source.extra_argv) ? source.extra_argv.map(String).join(' ') : '';
-  const envKeys = keyList(source.extra_env || source.env);
-  const secretKeys = keyList(source.secret_env || source.secret_refs);
+  const facts = landingFacts(source);
   return (
     <>
       {source.profile ? <p className="text-xs">{t('setup.rowProfile', {profile: String(source.profile)})}</p>: null}
@@ -318,12 +311,18 @@ function ProposalFacts({draft, row}: {draft: Record<string, any> | null; row: Re
       {source.max_concurrency != null ? <p className="text-xs">{t('setup.rowConcurrency', {n: source.max_concurrency})}</p>: null}
       {source.priority != null ? <p className="text-xs">{t('setup.rowPriority', {n: source.priority})}</p>: null}
       {source.use_when ? <p className="text-xs">{t('setup.rowUseWhen', {text: String(source.use_when)})}</p>: null}
-      {argv ? <p className="text-xs">{t('setup.rowExtraArgv', {argv})}</p>: null}
       {source.stdin_protocol ? <p className="text-xs">{t('setup.rowStdin', {protocol: String(source.stdin_protocol)})}</p>: null}
       {source.timeout_s != null ? <p className="text-xs">{t('setup.rowTimeout', {n: source.timeout_s})}</p>: null}
       {'enabled' in source ? <p className="text-xs">{source.enabled ? t('setup.rowEnabled'): t('setup.rowDisabled')}</p>: null}
-      {envKeys ? <p className="text-xs">{t('setup.rowEnv', {keys: envKeys})}</p>: null}
-      {secretKeys ? <p className="text-xs">{t('setup.rowSecrets', {keys: secretKeys})}</p>: null}
+      {facts.map((fact, index) => {
+        if (fact.kind === 'env') return <p key={index} className="text-xs">{t('setup.rowEnvLine', {name: fact.name, value: fact.value})}</p>;
+        if (fact.kind === 'env-clear') return <p key={index} className="text-xs">{t('setup.rowEnvClear')}</p>;
+        if (fact.kind === 'secret') return <p key={index} className="text-xs">{t('setup.rowSecretLine', {name: fact.name, id: fact.id})}</p>;
+        if (fact.kind === 'secrets-clear') return <p key={index} className="text-xs">{t('setup.rowSecretsClear')}</p>;
+        if (fact.kind === 'argv') return <p key={index} className="text-xs">{t('setup.rowExtraArgv', {argv: fact.args.join(' ')})}</p>;
+        if (fact.kind === 'argv-clear') return <p key={index} className="text-xs">{t('setup.rowExtraArgvClear')}</p>;
+        return <p key={index} className="text-xs">{t('setup.rowSecretEnv', {name: fact.name})}</p>;
+      })}
     </>
   );
 }
@@ -342,9 +341,11 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
     : row ? [row.binary, ...(Array.isArray(row.argv) ? row.argv: [])].filter((part) => part != null && part !== '').map(String).join(' '): '';
   const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd: draft && typeof draft.cwd === 'string' && draft.cwd ? draft.cwd: '';
   const showFault = (error: unknown) => {
-    const text = setupCardFault(error) || t('setup.operationFailed');
+    const text = setupCardFault(error) || t('setup.cardRetry');
     setFault(text);
     store.setNotice(text);
+    const raw = error instanceof Error ? error.message : String(error || '');
+    if (setupFaultRefreshes(raw)) void store.refresh();
   };
   const deny = async () => {
     setFault('');
@@ -444,18 +445,27 @@ function CoordinatorEnvDialog({store, name, onClose}: {store: Store; name: strin
 function SecretDialog({store, reqId, target, onClose}: {store: Store; reqId: string; target: SecretTarget; onClose: () => void}) {
   const {t} = useTranslation();
   const [value, setValue] = useState('');
+  const [error, setError] = useState('');
   return (
     <Modal id="secret-dialog" title={t('setup.secretDialogTitle')} onClose={() => { setValue(''); onClose(); }} className="secret-modal">
       <form id="secret-form" onSubmit={async (e) => {
         e.preventDefault();
         const v = value; setValue('');
+        setError('');
         try { const sealed = await sealCredential(v, target); await api('setup/' + reqId + '/secret', {sealed}); onClose(); await store.refresh(); }
-        catch (err: unknown) { store.setNotice(setupCardFault(err) || t('setup.saveFailed')); }
+        catch (err: unknown) {
+          const text = setupCardFault(err) || t('setup.cardRetry');
+          setError(text);
+          store.setNotice(text);
+          const raw = err instanceof Error ? err.message : String(err || '');
+          if (setupFaultRefreshes(raw)) void store.refresh();
+        }
       }}>
         <h2 className="text-lg font-semibold">{t('setup.secretSaveHeading')}</h2>
         <p id="secret-purpose" className="mt-1 text-sm text-muted">{target.host_id} · {target.installation_id} · {target.endpoint || t('setup.cliDefaultEndpoint')} · {target.storage}</p>
         <label className="mt-3 block text-sm">{t('setup.secret')}<input id="device-secret" type="password" autoComplete="new-password" required value={value} onChange={(e) => setValue(e.target.value)} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5" /></label>
         <p className="mt-1 text-xs text-muted">{t('setup.secretStorageHint')}</p>
+        {error ? <p id="secret-error" role="alert" className="mt-1 text-xs text-warn">{error}</p>: null}
         <div className="mt-3 flex justify-end gap-2">
           <button type="button" id="secret-close" className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={() => { setValue(''); onClose(); }}>{t('setup.cancel')}</button>
           <button id="secret-save" className="rounded-lg bg-brand px-3 py-1.5 text-sm text-white">{t('setup.encryptAndSave')}</button>

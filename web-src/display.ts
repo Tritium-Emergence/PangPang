@@ -1,6 +1,6 @@
 import type {TFunction} from 'i18next';
 import i18n from './i18n';
-import {confirmationFaultText} from './pure';
+import {setupCardSentence} from './pure';
 import type {Routine} from './types';
 
 // Presentation only: map server codes to i18n keys; never adjudicate Work reality.
@@ -42,10 +42,10 @@ export function friendlyError(e: unknown, t: TFunction = i18n.t) {
   return label ? `${label}（${code}）`: code;
 }
 
-// Setup confirmation cards. An expired apply/deny shows the sentence alone.
+// Setup confirmation cards and the secret window. Known faults are the
+// translated sentence only. Unknown faults, raw messages, and JSON become
+// the generic prompt — never the code or the server text.
 export function setupCardFault(e: unknown, t: TFunction = i18n.t): string {
   const raw = e instanceof Error ? e.message: String(e || '');
-  const sentence = confirmationFaultText(raw, t('errors.setup_request_expired_or_used', {defaultValue: ''}));
-  if (sentence) return sentence;
-  return friendlyError(e, t);
+  return setupCardSentence(raw, (code) => t(`errors.${code}`, {defaultValue: ''}), t('setup.cardRetry'));
 }

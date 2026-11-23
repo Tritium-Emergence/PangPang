@@ -794,7 +794,7 @@ class Onboarding:
         with self.store.atomic():
             req = self.store.get("setup_request", identity)
             if req["status"] not in ("needs_approval", "needs_secret"):
-                raise Fault("setup_request_expired_or_used", 409)
+                raise Fault("setup_request_already_resolved", 409)
             if not _click_expired(req):
                 self._require_host(req)
             req["status"] = "denied"
@@ -1040,7 +1040,9 @@ class Onboarding:
 
     def checked_request(self, identity, status):
         req = self.store.get("setup_request", identity)
-        if req["status"] != status or _click_expired(req):
+        if req["status"] != status:
+            raise Fault("setup_request_already_resolved", 409)
+        if _click_expired(req):
             raise Fault("setup_request_expired_or_used", 409)
         self._require_host(req)
         return req
