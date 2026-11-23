@@ -41,6 +41,12 @@ _LANDLOCK_WRITE = (
 )
 _LANDLOCK_REFER = 1 << 13
 _LANDLOCK_TRUNCATE = 1 << 14
+# Rights the kernel accepts only on a directory. A file rule that includes
+# any of them is rejected, which would drop the file from the boundary.
+_LANDLOCK_DIR_ONLY = (
+    (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
+    | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13)
+)
 _RUNTIME_FILES = (
     "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd",
     "/etc/group", "/dev/null", "/dev/urandom", "/dev/zero",
@@ -222,9 +228,17 @@ def _add_landlock_rule(syscall, ruleset, path, access):
     class PathAttr(ctypes.Structure):
         _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
 
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    if os.path.isdir(path):
-        flags |= os.O_DIRECTORY
+    directory = os.path.isdir(path) and not os.path.islink(path)
+    if not directory:
+        access &= ~_LANDLOCK_DIR_ONLY
+    if not access:
+        raise OSError(errno.EINVAL, "landlock_empty_rule")
+    if os.path.islink(path):
+        flags = os.O_PATH | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC
+    elif directory:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    else:
+        flags = os.O_RDONLY | os.O_CLOEXEC
     parent = os.open(path, flags)
     try:
         rule = PathAttr(access, parent)
@@ -259,12 +273,11 @@ def confine_dream(readable_dirs, writable_dirs):
     if ruleset < 0:
         raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
     try:
-        for directory in readable_dirs:
-            if directory and os.path.isdir(directory):
-                _add_landlock_rule(syscall, ruleset, directory, read_access)
-        for directory in writable_dirs:
-            if directory and os.path.isdir(directory):
-                _add_landlock_rule(syscall, ruleset, directory, handled)
+        for path in _present_paths(readable_dirs):
+            _add_landlock_rule(syscall, ruleset, path, read_access)
+        for path in writable_dirs:
+            if path and os.path.isdir(path) and not os.path.islink(path):
+                _add_landlock_rule(syscall, ruleset, path, handled)
         if hasattr(libc, "prctl"):
             limited = libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
         else:
@@ -278,11 +291,20 @@ def confine_dream(readable_dirs, writable_dirs):
         os.close(ruleset)
 
 
-def _sandbox_profile(readable_dirs, writable_dirs):
-    def subpath(path):
-        escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
-        return '(subpath "%s")' % escaped
+def _present_paths(paths):
+    return [path for path in paths if path and os.path.lexists(path)]
 
+
+def _sandbox_filter(path):
+    escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    if os.path.isdir(path) and not os.path.islink(path):
+        return '(subpath "%s")' % escaped
+    if os.path.lexists(path):
+        return '(literal "%s")' % escaped
+    return ""
+
+
+def _sandbox_profile(readable_dirs, writable_dirs):
     lines = [
         "(version 1)",
         "(deny default)",
@@ -295,13 +317,15 @@ def _sandbox_profile(readable_dirs, writable_dirs):
         "(allow system-socket)",
         "(allow file-ioctl)",
     ]
-    for directory in readable_dirs:
-        if directory and os.path.isdir(directory):
-            lines.append("(allow file-read* %s)" % subpath(directory))
-    for directory in writable_dirs:
-        if directory and os.path.isdir(directory):
-            lines.append("(allow file-read* %s)" % subpath(directory))
-            lines.append("(allow file-write* %s)" % subpath(directory))
+    for path in readable_dirs:
+        clause = _sandbox_filter(path) if path else ""
+        if clause:
+            lines.append("(allow file-read* %s)" % clause)
+    for path in writable_dirs:
+        clause = _sandbox_filter(path) if path else ""
+        if clause and os.path.isdir(path) and not os.path.islink(path):
+            lines.append("(allow file-read* %s)" % clause)
+            lines.append("(allow file-write* %s)" % clause)
     return "\n".join(lines) + "\n"
 
 

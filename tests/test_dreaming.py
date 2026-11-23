@@ -954,3 +954,91 @@ class ReviewTests(unittest.TestCase):
         ids = self.app._dream_projects_for_cancel(work["id"])
         self.assertIn(project["id"], ids)
         self.assertEqual([row for row in self.app.store.find("task", limit=20) if row.get("work_id") == work["id"]], [])
+
+    def test_a_waiting_stage_is_not_deleted_before_its_task_exists(self):
+        project = self.app.create_project("bot-main", {"title": "Wait", "goal": "hold"})
+        stage = self.data.resolve().parent / "dream-stage" / project["id"] / "run-waiting"
+        (stage / "signal").mkdir(parents=True)
+        (stage / "signal" / "note.txt").write_text("stay\n", encoding="utf-8")
+        (stage / "candidate").mkdir()
+        row = dreaming.load(self.app)
+        row["held"] = {project["id"]: {"work_id": "work-waiting", "stage": str(stage.resolve()), "dream": {}}}
+        dreaming._save(self.app, row)
+        for _ in range(3):
+            dreaming.sweep_finished_dirs(self.app)
+        self.assertEqual((stage / "signal" / "note.txt").read_text(encoding="utf-8"), "stay\n")
+
+    def test_file_rules_are_not_dropped(self):
+        from pangpang import runner
+        target = Path(self.tmp.name) / "libpython.so"
+        target.write_bytes(b"\x7fELF")
+        folder = Path(self.tmp.name) / "stdlib"
+        folder.mkdir()
+        profile = runner._sandbox_profile([str(target), str(folder)], [])
+        self.assertIn('(literal "%s")' % target, profile)
+        self.assertIn('(subpath "%s")' % folder, profile)
+        missing = str(Path(self.tmp.name) / "missing")
+        self.assertEqual(runner._present_paths([str(target), str(folder), missing]),
+                         [str(target), str(folder)])
+
+    def test_cleanup_skip_does_not_stall_past_the_first_page(self):
+        project = self.app.create_project("bot-main", {"title": "Pages", "goal": "hold"})
+        base = self.data.resolve().parent / "dream-stage" / project["id"]
+        for index in range(80):
+            (base / ("run-%03d" % index)).mkdir(parents=True)
+        dreaming._save_cleanup(self.app, {"frames": [], "root_skip": 64})
+        dreaming.sweep_finished_dirs(self.app)
+        left = [path for path in base.iterdir() if path.is_dir()]
+        self.assertLess(len(left), 80)
+        self.assertGreater(len(left), 0)
+        for _ in range(12):
+            dreaming.sweep_finished_dirs(self.app)
+        self.assertEqual([path for path in base.iterdir() if path.is_dir()], [])
+
+    def test_a_watermark_larger_than_the_commit_cap_stays_complete(self):
+        project = self.app.create_project("bot-main", {"title": "Wide", "goal": "hold"})
+        root = dreaming.memory_root(self.app, project["id"])
+        chunk = root / "mark"
+        chunk.mkdir(parents=True)
+        payload = {"k%05d" % index: "v" * 80 for index in range(20000)}
+        text = json.dumps(payload, sort_keys=True)
+        self.assertGreater(len(text.encode("utf-8")), dreaming.COMMIT_MAX)
+        (chunk / "wide.json").write_text(text, encoding="utf-8")
+        (chunk / "order.json").write_text(json.dumps(["wide.json"]), encoding="utf-8")
+        found = dreaming._read_watermark(root)
+        self.assertEqual(len(found), 20000)
+        self.assertEqual(found["k00000"], "v" * 80)
+        self.assertEqual(found["k19999"], "v" * 80)
+
+    def test_a_published_batch_is_appended_on_recovery(self):
+        project = self.app.create_project("bot-main", {"title": "Recover mark", "goal": "hold"})
+        root = dreaming.memory_root(self.app, project["id"])
+        gen = "gen-" + "cd" * 16
+        folder = root / "g" / gen
+        folder.mkdir(parents=True)
+        (folder / "READY").write_text("ok\n", encoding="utf-8")
+        (folder / "commit.json").write_text(json.dumps({
+            "task_id": "task-1", "attempt_uuid": None, "base_gen": "",
+            "batch": {"work:alpha": "token-alpha"},
+        }), encoding="utf-8")
+        (root / "CURRENT").write_text(gen + "\n", encoding="utf-8")
+        real = dreaming._append_mark
+
+        def fail_once(root, batch):
+            dreaming._append_mark = real
+            raise OSError("mark disk")
+
+        dreaming._append_mark = fail_once
+        try:
+            dreaming.recover_marks(self.app)
+        finally:
+            dreaming._append_mark = real
+        self.assertFalse((root / "mark" / "order.json").exists())
+        dreaming.recover_marks(self.app)
+        order = json.loads((root / "mark" / "order.json").read_text(encoding="utf-8"))
+        stored = (root / "mark" / order[0]).read_text(encoding="utf-8")
+        self.assertIn("work:alpha", stored)
+        self.assertEqual(dreaming._chunk_watermark(root).get("work:alpha"), "token-alpha")
+        before = (root / "mark" / "order.json").read_text(encoding="utf-8")
+        dreaming.recover_marks(self.app)
+        self.assertEqual((root / "mark" / "order.json").read_text(encoding="utf-8"), before)

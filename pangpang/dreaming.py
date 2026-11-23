@@ -299,8 +299,32 @@ def formal_index(service, project_id):
     return _read_regular(root / "g" / gen / INDEX_NAME, INDEX_MAX)
 
 
+def _read_whole_regular(path):
+    """The whole regular file. A watermark chunk is not silently cut off."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ""
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return ""
+        parts = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            parts.append(block)
+        return b"".join(parts).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
 def _load_json_dict(path):
-    raw = _read_regular(path, COMMIT_MAX)
+    raw = _read_whole_regular(path)
     if not raw:
         return None
     try:
@@ -310,17 +334,25 @@ def _load_json_dict(path):
     return data
 
 
+def _chunk_watermark(root):
+    """Batches already stored as mark chunks. Empty when the mark was not written."""
+    order = _load_json_dict(root / "mark" / "order.json")
+    merged = {}
+    if not isinstance(order, list):
+        return merged
+    for name in order:
+        if not isinstance(name, str) or "/" in name or name.startswith("."):
+            continue
+        piece = _load_json_dict(root / "mark" / name)
+        if isinstance(piece, dict):
+            merged.update(piece)
+    return merged
+
+
 def _read_watermark(root):
     """One pass over compacted chunks. No generation-chain recursion."""
-    order = _load_json_dict(root / "mark" / "order.json")
-    if isinstance(order, list) and order:
-        merged = {}
-        for name in order:
-            if not isinstance(name, str) or "/" in name or name.startswith("."):
-                continue
-            piece = _load_json_dict(root / "mark" / name)
-            if isinstance(piece, dict):
-                merged.update(piece)
+    merged = _chunk_watermark(root)
+    if merged:
         return merged
     gen = _current_gen(root)
     seen = set()
@@ -360,9 +392,23 @@ def _append_mark(root, batch):
                 piece = _load_json_dict(folder / item)
                 if isinstance(piece, dict):
                     merged.update(piece)
-        compact = "c-" + uid("part").split("-", 1)[-1] + ".json"
-        _write_synced(folder / compact, json.dumps(merged, ensure_ascii=False, sort_keys=True))
-        order = [compact]
+        order = []
+        chunk = {}
+        for key, value in merged.items():
+            trial = dict(chunk)
+            trial[key] = value
+            encoded = json.dumps(trial, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            if chunk and len(encoded) > COMMIT_MAX:
+                compact = "c-" + uid("part").split("-", 1)[-1] + ".json"
+                _write_synced(folder / compact, json.dumps(chunk, ensure_ascii=False, sort_keys=True))
+                order.append(compact)
+                chunk = {key: value}
+            else:
+                chunk = trial
+        if chunk:
+            compact = "c-" + uid("part").split("-", 1)[-1] + ".json"
+            _write_synced(folder / compact, json.dumps(chunk, ensure_ascii=False, sort_keys=True))
+            order.append(compact)
     _write_synced(folder / "order.json", json.dumps(order))
     _fsync(folder)
 
@@ -1194,7 +1240,34 @@ def _chain_gens(root, gen):
     return kept
 
 
-def _cleanup_keep(service, path, live_stages, live_gens):
+def _held_stages(service):
+    stages = set()
+    row = load(service)
+    for item in (row.get("held") or {}).values():
+        stage = item.get("stage") if isinstance(item, dict) else ""
+        if not stage:
+            continue
+        try:
+            stages.add(str(Path(stage).resolve()))
+        except OSError:
+            stages.add(str(stage))
+    return stages
+
+
+def _inside_held(path, held_stages):
+    try:
+        identity = str(Path(path).resolve())
+    except OSError:
+        identity = str(path)
+    for stage in held_stages:
+        if identity == stage or identity.startswith(stage + os.sep):
+            return True
+    return False
+
+
+def _cleanup_keep(service, path, live_stages, live_gens, held_stages=()):
+    if _inside_held(path, held_stages):
+        return True
     identity = str(path)
     if identity in live_stages or _stage_in_use(service, identity):
         return True
@@ -1232,6 +1305,7 @@ def sweep_finished_dirs(service):
         log.exception("dreaming could not list live tasks; cleanup skipped")
         return
     row = load(service)
+    held_stages = _held_stages(service)
     cursor = row.get("cleanup_cursor") if isinstance(row.get("cleanup_cursor"), dict) else {}
     frames = cursor.get("frames") if isinstance(cursor.get("frames"), list) else []
     root_skip = int(cursor.get("root_skip") or 0)
@@ -1239,7 +1313,11 @@ def sweep_finished_dirs(service):
     base = Path(service.data).resolve().parent / "dream-stage"
     while budget > 0:
         if not frames:
-            found = _next_cleanup_root(service, base, live_stages, live_gens, budget, root_skip)
+            found = _next_cleanup_root(service, base, live_stages, live_gens, budget, root_skip, held_stages)
+            # A cursor past the end (entries were removed) must not spend the
+            # sweep only skipping. Continue from the start with the same budget.
+            if not found.get("path") and root_skip and found["budget"] == budget:
+                found = _next_cleanup_root(service, base, live_stages, live_gens, budget, 0, held_stages)
             budget = found["budget"]
             root_skip = found["skip"]
             if not found.get("path"):
@@ -1248,7 +1326,7 @@ def sweep_finished_dirs(service):
             continue
         current = Path(frames[-1])
         budget -= 1
-        if _cleanup_keep(service, current, live_stages, live_gens):
+        if _cleanup_keep(service, current, live_stages, live_gens, held_stages):
             frames.pop()
             continue
         try:
@@ -1283,7 +1361,7 @@ def sweep_finished_dirs(service):
     _save_cleanup(service, {"frames": frames, "root_skip": root_skip})
 
 
-def _next_cleanup_root(service, base, live_stages, live_gens, budget, skip):
+def _next_cleanup_root(service, base, live_stages, live_gens, budget, skip, held_stages=()):
     """The next unused stage or generation after `skip` names, within the budget."""
     if budget <= 0:
         return {"path": None, "budget": budget, "skip": skip}
@@ -1306,14 +1384,11 @@ def _next_cleanup_root(service, base, live_stages, live_gens, budget, skip):
                             for item in inner:
                                 if seen < skip:
                                     seen += 1
-                                    budget -= 1
-                                    if budget <= 0:
-                                        return {"path": None, "budget": 0, "skip": seen}
                                     continue
                                 seen += 1
                                 budget -= 1
                                 path = Path(item.path)
-                                if not _cleanup_keep(service, path, live_stages, live_gens):
+                                if not _cleanup_keep(service, path, live_stages, live_gens, held_stages):
                                     return {"path": str(path), "budget": budget, "skip": seen}
                                 if budget <= 0:
                                     return {"path": None, "budget": 0, "skip": seen}
@@ -1459,6 +1534,38 @@ def _sync_duties(service):
     return duties
 
 
+def recover_marks(service):
+    """A published commit whose batch is not in the watermark is still due.
+
+    CURRENT is the evidence. Retrying the append is idempotent, and it does
+    not depend on a side file that may never have been written.
+    """
+    memory = Path(service.data) / "memory"
+    if not memory.is_dir():
+        return
+    for project_dir in memory.iterdir():
+        if not project_dir.is_dir() or project_dir.is_symlink():
+            continue
+        try:
+            root = memory_root(service, project_dir.name)
+        except Fault:
+            continue
+        gen = _current_gen(root)
+        record = _commit_record(root, gen) if gen else None
+        batch = (record or {}).get("batch") if isinstance((record or {}).get("batch"), dict) else None
+        if not batch:
+            continue
+        # The chain walk is not the watermark. Only a chunk counts as remembered.
+        have = _chunk_watermark(root)
+        missing = {key: value for key, value in batch.items() if have.get(key) != value}
+        if not missing:
+            continue
+        try:
+            _append_mark(root, missing)
+        except OSError:
+            log.exception("dreaming watermark append still due project=%s", project_dir.name)
+
+
 def recover_sync(service):
     """Finish a directory sync that failed after CURRENT was renamed.
 
@@ -1520,6 +1627,7 @@ def step(service, now=None):
     now = time.time() if now is None else float(now)
     try:
         recover_sync(service)
+        recover_marks(service)
         account_published(service)
     except Exception:
         log.exception("dreaming account failed")
