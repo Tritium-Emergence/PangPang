@@ -1,5 +1,6 @@
 import type {TFunction} from 'i18next';
 import i18n from './i18n';
+import {confirmationFaultText} from './pure';
 import type {Routine} from './types';
 
 // Presentation only: map server codes to i18n keys; never adjudicate Work reality.
@@ -39,4 +40,12 @@ export function friendlyError(e: unknown, t: TFunction = i18n.t) {
   const code = e instanceof Error ? e.message: String(e || 'operation_failed');
   const label = t(`errors.${code}`, {defaultValue: ''});
   return label ? `${label}（${code}）`: code;
+}
+
+// Setup confirmation cards. An expired apply/deny shows the sentence alone.
+export function setupCardFault(e: unknown, t: TFunction = i18n.t): string {
+  const raw = e instanceof Error ? e.message: String(e || '');
+  const sentence = confirmationFaultText(raw, t('errors.setup_request_expired_or_used', {defaultValue: ''}));
+  if (sentence) return sentence;
+  return friendlyError(e, t);
 }

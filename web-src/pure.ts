@@ -3,6 +3,29 @@
 // imports these directly, and the tests import the SAME module (no bundle slicing,
 // no esbuild/vm, no second implementation).
 
+// A numeric expires already in the past is a confirmation card that timed out
+// under the old click deadline. Missing expires means the card is still waiting.
+export function setupClickExpired(expires: unknown, now = Date.now() / 1000): boolean {
+  return typeof expires === 'number' && Number.isFinite(expires) && expires < now;
+}
+
+// The chat setup panel. Denied and finished rows leave. An already-expired
+// waiting card stays until deny, so the operator can close it.
+const SETUP_PANEL_STATUSES = new Set(['needs_approval', 'needs_secret', 'configuring']);
+export function visibleSetupCards<T extends {status?: string}>(requests: T[] | undefined | null): T[] {
+  return (requests || []).filter((row) => SETUP_PANEL_STATUSES.has(row.status || ''));
+}
+
+// The expiry fault is one sentence. Other codes return null and keep their
+// existing presentation. The sentence must not contain the raw code.
+export function confirmationFaultText(message: string, sentence: string): string | null {
+  const code = String(message || '').split(':')[0].trim();
+  if (code !== 'setup_request_expired_or_used') return null;
+  const text = sentence.trim();
+  if (!text || text.includes(code)) return null;
+  return text;
+}
+
 // XSS gate for rendered links/images: allow http(s), site-relative,./ relative and
 // data:image only; everything else (javascript:/vbscript:/file:/data:text/html) -> ''.
 export function safeUrl(u: string): string {

@@ -30,7 +30,9 @@ test('custom adapter approval shows the full row and posts an empty body', async
   await expect(card).toContainText('my-echo');
   await expect(card).toContainText('--stdio');
   await expect(card).toContainText('echo a line');
-  await expect(card).toContainText('concurrency');
+  await expect(card).toContainText('并行');
+  await expect(card).not.toContainText('"binary"');
+  await expect(card).not.toContainText('"argv"');
   await expect(card.locator('input[type=url]')).toHaveCount(0);
   await card.getByRole('button', {name: '应用这些设置'}).click();
   expect(body).toEqual({});

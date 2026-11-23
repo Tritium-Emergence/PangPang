@@ -5,8 +5,8 @@ import type {Store} from '../store';
 import type {Capability, SetupRequest} from '../types';
 import {api} from '../api';
 import {sealCredential, type SecretTarget} from '../crypto';
-import {capabilityLabel, capabilityStateLabel, friendlyError, DEFAULT_OUTPUT_TOKENS} from '../display';
-import {executorSetupTone} from '../pure';
+import {capabilityLabel, capabilityStateLabel, friendlyError, setupCardFault, DEFAULT_OUTPUT_TOKENS} from '../display';
+import {executorSetupTone, visibleSetupCards} from '../pure';
 
 // Conversational-setup surface. Mirrors setup.js: the model settings dialog, the
 // pending setup-request panel (approve + sealed-secret), and credential sealing. RCB:
@@ -254,7 +254,7 @@ function CapabilityList({rows, envRows, onSealEnv, onClearEnv}: {
 export function SetupPanel({store}: {store: Store}) {
   const {t} = useTranslation();
   const setup = store.snapshot!.setup;
-  const requests = (setup.requests || []).filter((r) => ['needs_approval', 'needs_secret', 'configuring'].includes(r.status));
+  const requests = visibleSetupCards(setup.requests);
   const [secretReq, setSecretReq] = useState<{id: string; target: SecretTarget} | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const onboarding = !setup.model.configured || requests.length > 0;
@@ -299,19 +299,57 @@ export function StatusStrip({store}: {store: Store}) {
 );
 }
 
+function keyList(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  return Object.keys(value as Record<string, unknown>).join(', ');
+}
+
+function ProposalFacts({draft, row}: {draft: Record<string, any> | null; row: Record<string, any> | null}) {
+  const {t} = useTranslation();
+  const source = row || draft;
+  if (!source) return null;
+  const argv = Array.isArray(source.extra_argv) ? source.extra_argv.map(String).join(' ') : '';
+  const envKeys = keyList(source.extra_env || source.env);
+  const secretKeys = keyList(source.secret_env || source.secret_refs);
+  return (
+    <>
+      {source.profile ? <p className="text-xs">{t('setup.rowProfile', {profile: String(source.profile)})}</p>: null}
+      {source.concurrency != null ? <p className="text-xs">{t('setup.rowConcurrency', {n: source.concurrency})}</p>: null}
+      {source.max_concurrency != null ? <p className="text-xs">{t('setup.rowConcurrency', {n: source.max_concurrency})}</p>: null}
+      {source.priority != null ? <p className="text-xs">{t('setup.rowPriority', {n: source.priority})}</p>: null}
+      {source.use_when ? <p className="text-xs">{t('setup.rowUseWhen', {text: String(source.use_when)})}</p>: null}
+      {argv ? <p className="text-xs">{t('setup.rowExtraArgv', {argv})}</p>: null}
+      {source.stdin_protocol ? <p className="text-xs">{t('setup.rowStdin', {protocol: String(source.stdin_protocol)})}</p>: null}
+      {source.timeout_s != null ? <p className="text-xs">{t('setup.rowTimeout', {n: source.timeout_s})}</p>: null}
+      {'enabled' in source ? <p className="text-xs">{source.enabled ? t('setup.rowEnabled'): t('setup.rowDisabled')}</p>: null}
+      {envKeys ? <p className="text-xs">{t('setup.rowEnv', {keys: envKeys})}</p>: null}
+      {secretKeys ? <p className="text-xs">{t('setup.rowSecrets', {keys: secretKeys})}</p>: null}
+    </>
+  );
+}
+
 function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; onSecret: (t: SecretTarget) => void}) {
   const {t} = useTranslation();
   const [endpoint, setEndpoint] = useState('');
   const [fault, setFault] = useState('');
   const p = (req.proposal || {}) as Record<string, any>;
+  const draft = p.draft && typeof p.draft === 'object' ? p.draft as Record<string, any>: null;
+  const row = p.adapter_row && typeof p.adapter_row === 'object' ? p.adapter_row as Record<string, any>: null;
   const asksEndpoint = p.action === 'configure' || (p.action === 'executor_config' && !p.installation_id);
   const declaring = p.action === 'declare_adapter';
   const host = store.snapshot!.hosts.find((h) => h.id === req.host_id);
-  const command = Array.isArray(p.command) ? p.command.map(String).join(' ') : '';
+  const command = Array.isArray(p.command) ? p.command.map(String).join(' ')
+    : row ? [row.binary, ...(Array.isArray(row.argv) ? row.argv: [])].filter((part) => part != null && part !== '').map(String).join(' '): '';
+  const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd: draft && typeof draft.cwd === 'string' && draft.cwd ? draft.cwd: '';
   const showFault = (error: unknown) => {
-    const text = friendlyError(error) || t('setup.operationFailed');
+    const text = setupCardFault(error) || t('setup.operationFailed');
     setFault(text);
     store.setNotice(text);
+  };
+  const deny = async () => {
+    setFault('');
+    try { await api('setup/' + req.id + '/deny', {}); await store.refresh(); }
+    catch (e: unknown) { showFault(e); }
   };
   return (
     <div className="mini mt-2 rounded-lg border border-line bg-raised p-3">
@@ -323,21 +361,17 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
             <>
               <p className="text-sm">{t('setup.declareAdapterLine', {adapter: p.adapter})}</p>
               <p className="text-xs text-warn">{t('setup.declareAdapterBoundary')}</p>
-              <p className="text-xs">{t('setup.commandLine', {command})}</p>
-              <pre className="mt-1 overflow-auto text-xs">{JSON.stringify(p.adapter_row, null, 2)}</pre>
             </>
           ) : (
             <>
           <p className="text-sm">{t('setup.requestActionLine', {action: p.action === 'configure' ? t('setup.actionConnectCli') : p.action === 'executor_config' ? t('setup.actionExecutorConfig') : t('setup.actionRemoveKey'), agent: p.adapter || p.installation_id})}</p>
-          <p className="text-xs">{t('setup.cwdLine', {cwd: p.cwd || t('setup.cwdDefault')})}</p>
+          <p className="text-xs">{t('setup.cwdLine', {cwd: cwd || t('setup.cwdDefault')})}</p>
           <p className="text-xs">{t('setup.authLine', {auth: p.auth === 'api_key' ? t('setup.authApiKey'): p.auth === 'existing' ? t('setup.authExisting'): p.auth || t('setup.authUnregistered')})}</p>
-          {p.draft ? <p className="mt-1 text-xs">{t('setup.draftLine', {draft: JSON.stringify({
-            profile: p.draft.profile, env: p.draft.env, extra_argv: p.draft.extra_argv, cwd: p.draft.cwd,
-            credential_ids: p.draft.secret_refs, command: p.command,
-          })})}</p>: null}
           {p.uses_qwen ? <p className="text-xs">{t('setup.sharedQwen')}</p>: null}
             </>
           )}
+          {command ? <p className="text-xs">{t('setup.commandLine', {command})}</p>: null}
+          <ProposalFacts draft={declaring ? null: draft} row={row} />
           {asksEndpoint && !declaring ? (
             <>
               <p className="mt-1 text-xs text-warn">{t('setup.securityBoundary')}</p>
@@ -350,20 +384,19 @@ function RequestRow({req, store, onSecret}: {req: SetupRequest; store: Store; on
               try { await api('setup/' + req.id + '/approve', asksEndpoint ? {endpoint: endpoint.trim()}: {}); await store.refresh(); }
               catch (e: unknown) { showFault(e); }
             }}>{t('setup.applySettings')}</button>
-            <button className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={async () => {
-              setFault('');
-              try { await api('setup/' + req.id + '/deny', {}); await store.refresh(); }
-              catch (e: unknown) { showFault(e); }
-            }}>{t('setup.denySettings')}</button>
+            <button className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={() => void deny()}>{t('setup.denySettings')}</button>
           </div>
         </>
 ): null}
       {req.status === 'needs_secret' ? (
-        <button className="mt-2 rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={async () => {
-          setFault('');
-          try { const target = await api<SecretTarget>('setup/' + req.id + '/secret-target'); onSecret(target); }
-          catch (e: unknown) { showFault(e); }
-        }}>{t('setup.openSecretWindow')}</button>
+        <div className="mt-2 flex gap-2">
+          <button className="rounded-lg bg-brand px-3 py-1.5 text-sm text-white" onClick={async () => {
+            setFault('');
+            try { const target = await api<SecretTarget>('setup/' + req.id + '/secret-target'); onSecret(target); }
+            catch (e: unknown) { showFault(e); }
+          }}>{t('setup.openSecretWindow')}</button>
+          <button className="rounded-lg border border-line px-3 py-1.5 text-sm" onClick={() => void deny()}>{t('setup.denySettings')}</button>
+        </div>
 ): null}
       {fault ? <p className="setup-fault mt-2 text-xs text-warn" role="alert">{fault}</p>: null}
     </div>
@@ -417,7 +450,7 @@ function SecretDialog({store, reqId, target, onClose}: {store: Store; reqId: str
         e.preventDefault();
         const v = value; setValue('');
         try { const sealed = await sealCredential(v, target); await api('setup/' + reqId + '/secret', {sealed}); onClose(); await store.refresh(); }
-        catch (err: any) { store.setNotice(err?.message || t('setup.saveFailed')); }
+        catch (err: unknown) { store.setNotice(setupCardFault(err) || t('setup.saveFailed')); }
       }}>
         <h2 className="text-lg font-semibold">{t('setup.secretSaveHeading')}</h2>
         <p id="secret-purpose" className="mt-1 text-sm text-muted">{target.host_id} · {target.installation_id} · {target.endpoint || t('setup.cliDefaultEndpoint')} · {target.storage}</p>
