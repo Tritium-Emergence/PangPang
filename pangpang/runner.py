@@ -157,11 +157,40 @@ def dream_boundary_available():
 _RUNTIME_PARENT_BLOCK = {"/", "/usr", "/opt", "/private", "/Library", "/System", "/home", "/Users", "/tmp", "/var", "/data"}
 
 
+def _is_broad_runtime_dir(path):
+    """A directory that can hold another project's inputs, memory, or sessions.
+
+    The executable's own file and its library directory are fine. Its home
+    directory, and the other broad parents, are not.
+    """
+    if not path:
+        return True
+    norm = os.path.normpath(path)
+    if norm in _RUNTIME_PARENT_BLOCK:
+        return True
+    if norm.startswith("/opt/") or norm.startswith("/private/") or norm.startswith("/var/"):
+        return True
+    parts = norm.split("/")
+    if len(parts) == 3 and parts[1] in {"home", "Users"} and parts[2]:
+        return True
+    try:
+        home = os.path.normpath(os.path.expanduser("~"))
+        homes = {home, os.path.realpath(home)}
+    except OSError:
+        homes = set()
+    if norm in homes:
+        return True
+    try:
+        if os.path.exists(norm) and os.path.realpath(norm) in homes:
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def _allow_runtime_parent(path):
     parent = os.path.dirname(path)
-    if not parent or parent in _RUNTIME_PARENT_BLOCK:
-        return ""
-    if parent.startswith("/opt/") or parent.startswith("/private/") or parent.startswith("/var/"):
+    if _is_broad_runtime_dir(parent):
         return ""
     return parent
 
@@ -176,7 +205,7 @@ def _runtime_read_paths(argv):
     paths = []
 
     def add(path):
-        if path and os.path.exists(path) and path not in paths:
+        if path and os.path.exists(path) and path not in paths and not _is_broad_runtime_dir(path):
             paths.append(path)
 
     requested = argv[0] if argv else sys.executable
@@ -211,6 +240,44 @@ def _runtime_read_paths(argv):
     for extra in _RUNTIME_FILES:
         add(extra)
     return paths
+
+
+def runtime_grant_possible(argv):
+    """False when the only way to run argv is to open a broad directory.
+
+    Select and start both refuse in that case. A missing parent that is just
+    /usr/bin stays allowed; a home directory does not.
+    """
+    if not argv or not isinstance(argv[0], str) or not argv[0]:
+        return False
+    requested = argv[0]
+    try:
+        exe = os.path.realpath(requested)
+    except OSError:
+        exe = requested
+    files = [requested, exe]
+    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
+    try:
+        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
+        files.extend(re.findall(r"(/[^ )\n]+)", listed.stdout or ""))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for path in files:
+        parent = os.path.dirname(path or "")
+        if parent and _is_broad_runtime_dir(parent):
+            return False
+    if exe and "python" in os.path.basename(exe).lower() and os.path.exists(exe):
+        try:
+            listed = subprocess.run(
+                [exe, "-c",
+                 "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
+                capture_output=True, text=True, timeout=5)
+            for line in (listed.stdout or "").splitlines():
+                if line and _is_broad_runtime_dir(line.strip()):
+                    return False
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return True
 
 
 def _landlock_handled(abi):
@@ -331,6 +398,8 @@ def _sandbox_profile(readable_dirs, writable_dirs):
 
 def exec_confined(readable_dirs, writable_dirs, argv):
     """Replace this process with argv inside the dream boundary."""
+    if not runtime_grant_possible(argv):
+        raise OSError(errno.EPERM, "dream_boundary_unavailable")
     readable = [path for path in readable_dirs if path]
     readable.extend(_runtime_read_paths(argv))
     writable = [path for path in writable_dirs if path]
@@ -3220,7 +3289,7 @@ def supervise(directory):
             # An open-stdin protocol keeps stderr off the stdout parser. Other
             # executors stay on the merged pipe they already had.
             if spec.get("dream_boundary"):
-                if not dream_boundary_available():
+                if not dream_boundary_available() or not runtime_grant_possible(argv):
                     raise ValueError("dream_boundary_unavailable")
                 # Process-group launches exec the CLI directly. Confine in a
                 # wrapper that replaces itself, so the supervised pid is the

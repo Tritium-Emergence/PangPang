@@ -1579,6 +1579,8 @@ class Service:
             visited.add(work_id)
             work = self.store.get("work", work_id)
             if work.get("status") in {"cancelled", "delivered", "failed", "linked"}:
+                if work.get("kind") == "dreaming":
+                    dreaming.release_held_work(self, work_id)
                 return # idempotent no-op on terminal work
             work["cancel_requested"] = True # closes admission immediately
             self.store.put("work", work)
@@ -1586,6 +1588,8 @@ class Service:
             work = self.store.get("work", work_id)
             work["status"] = "cancelled"
             self.store.put("work", work)
+            if work.get("kind") == "dreaming":
+                dreaming.release_held_work(self, work_id)
 
     def _propagate_cancel(self, work, visited):
         work_id = work["id"]

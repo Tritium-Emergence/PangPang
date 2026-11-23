@@ -984,16 +984,28 @@ class ReviewTests(unittest.TestCase):
     def test_cleanup_skip_does_not_stall_past_the_first_page(self):
         project = self.app.create_project("bot-main", {"title": "Pages", "goal": "hold"})
         base = self.data.resolve().parent / "dream-stage" / project["id"]
-        for index in range(80):
+        held = {}
+        for index in range(64):
+            stage = base / ("held-%03d" % index)
+            stage.mkdir(parents=True)
+            held["h%03d" % index] = {"work_id": "w", "stage": str(stage.resolve()), "dream": {}}
+        for index in range(10):
             (base / ("run-%03d" % index)).mkdir(parents=True)
-        dreaming._save_cleanup(self.app, {"frames": [], "root_skip": 64})
-        dreaming.sweep_finished_dirs(self.app)
-        left = [path for path in base.iterdir() if path.is_dir()]
-        self.assertLess(len(left), 80)
-        self.assertGreater(len(left), 0)
-        for _ in range(12):
+        row = dreaming.load(self.app)
+        row["held"] = held
+        dreaming._save(self.app, row)
+        dreaming._WALK.reads = 0
+        total = 0
+        for _ in range(8):
+            before = dreaming._WALK.reads
             dreaming.sweep_finished_dirs(self.app)
-        self.assertEqual([path for path in base.iterdir() if path.is_dir()], [])
+            self.assertLessEqual(dreaming._WALK.reads - before, dreaming.CLEANUP_BUDGET)
+            total += dreaming._WALK.reads - before
+            if not [path for path in base.iterdir() if path.name.startswith("run-")]:
+                break
+        self.assertEqual([path.name for path in base.iterdir() if path.name.startswith("run-")], [])
+        self.assertEqual(len([path for path in base.iterdir() if path.name.startswith("held-")]), 64)
+        self.assertLess(total, 250)
 
     def test_a_watermark_larger_than_the_commit_cap_stays_complete(self):
         project = self.app.create_project("bot-main", {"title": "Wide", "goal": "hold"})
@@ -1042,3 +1054,120 @@ class ReviewTests(unittest.TestCase):
         before = (root / "mark" / "order.json").read_text(encoding="utf-8")
         dreaming.recover_marks(self.app)
         self.assertEqual((root / "mark" / "order.json").read_text(encoding="utf-8"), before)
+
+    def _publish_chain(self, project, batches):
+        root = dreaming.memory_root(self.app, project["id"])
+        base = ""
+        gen = ""
+        for index, batch in enumerate(batches):
+            gen = "gen-" + ("%02x" % (index + 1)) * 16
+            folder = root / "g" / gen
+            folder.mkdir(parents=True)
+            (folder / "READY").write_text("ok\n", encoding="utf-8")
+            (folder / "commit.json").write_text(json.dumps({
+                "task_id": "task-%d" % index, "attempt_uuid": None, "base_gen": base, "batch": batch,
+            }), encoding="utf-8")
+            base = gen
+        (root / "CURRENT").write_text(gen + "\n", encoding="utf-8")
+        return root, gen
+
+    def test_every_unpublished_batch_is_recovered_and_blocks_the_next_publish(self):
+        project, work_id = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        work = self.app.store.get("work", work_id)
+        older = dreaming._work_token(work)
+        newer = dreaming._work_token(dict(work, checkpoint=dict(work["checkpoint"], summary="later")))
+        root, gen = self._publish_chain(project, [
+            {"work:" + work_id: older},
+            {"work:later": newer},
+        ])
+        (root / "mark").mkdir(parents=True)
+        (root / "mark" / "only-new.json").write_text(json.dumps({"work:later": newer}), encoding="utf-8")
+        (root / "mark" / "order.json").write_text(json.dumps(["only-new.json"]), encoding="utf-8")
+        self.assertTrue(dreaming._has_new(dreaming.formal_watermark(self.app, project["id"]), [work], [], []))
+        real = dreaming._append_mark
+
+        def fail_append(root, batch):
+            raise OSError("mark disk")
+
+        dreaming._append_mark = fail_append
+        try:
+            dreaming.recover_marks(self.app)
+            self.assertTrue(dreaming._mark_gap(root))
+            stage = self.data.resolve().parent / "dream-stage" / project["id"] / "run-next"
+            stage.mkdir(parents=True)
+            task = self.app.store.put("task", {
+                "id": uid("task"), "attempt_uuid": "attempt-1", "status": "running",
+                "dreaming": True, "dreaming_project_id": project["id"], "work_id": work_id,
+                "dream_stage": str(stage), "dream_base_gen": gen, "dream_cursor": {},
+            })
+            with self.assertRaises(dreaming.CandidateRejected):
+                dreaming.accept_candidate(self.app, task)
+            self.assertEqual((root / "CURRENT").read_text(encoding="utf-8").strip(), gen)
+        finally:
+            dreaming._append_mark = real
+        dreaming.recover_marks(self.app)
+        self.assertFalse(dreaming._mark_gap(root))
+        remembered = dreaming.formal_watermark(self.app, project["id"])
+        self.assertEqual(remembered.get("work:" + work_id), older)
+        self.assertEqual(remembered.get("work:later"), newer)
+        self.assertFalse(dreaming._has_new(remembered, [work], [], []))
+
+    def test_watermark_is_not_written_while_directory_sync_is_failing(self):
+        project = self.app.create_project("bot-main", {"title": "Sync", "goal": "hold"})
+        root, _gen = self._publish_chain(project, [{"work:alpha": "token-alpha"}])
+        (root / "PENDING_SYNC").write_text("pending\n", encoding="utf-8")
+        dreaming.recover_marks(self.app)
+        self.assertFalse((root / "mark").exists())
+        (root / "PENDING_SYNC").unlink()
+        real = dreaming._fsync_ancestors
+
+        def fail_sync(path):
+            raise OSError("sync")
+
+        dreaming._fsync_ancestors = fail_sync
+        try:
+            dreaming.recover_marks(self.app)
+            self.assertFalse((root / "mark").exists())
+        finally:
+            dreaming._fsync_ancestors = real
+        dreaming.recover_marks(self.app)
+        self.assertEqual(dreaming._chunk_watermark(root).get("work:alpha"), "token-alpha")
+
+    def test_a_home_directory_is_not_a_runtime_read(self):
+        from pangpang import runner
+        self.assertNotIn("/home/user", runner._runtime_read_paths(["/home/user/python"]))
+        self.assertNotIn("/home/user", runner._runtime_read_paths(["/home/user/bin/tool"]))
+        self.assertFalse(runner.runtime_grant_possible(["/home/user/python"]))
+        self.assertFalse(runner.runtime_grant_possible(["/Users/user/claude"]))
+        self.assertTrue(runner.runtime_grant_possible([sys.executable]))
+        argv = self.app.execution.installations["codex-local"]["argv"]
+        self.app.execution.installations["codex-local"]["argv"] = ["/home/user/python"]
+        try:
+            with self.assertRaises(Fault):
+                self.app.set_dreaming({
+                    "enabled": True, "installation_id": "codex-local", "time": "02:00",
+                })
+            offered = [item for item in self.app.dreaming_view()["executors"] if item["id"] == "codex-local"]
+            self.assertFalse(offered[0]["bounded"])
+        finally:
+            self.app.execution.installations["codex-local"]["argv"] = argv
+
+    def test_cancelling_a_held_work_drops_the_retry(self):
+        project = self.app.create_project("bot-main", {"title": "Held", "goal": "hold"})
+        work = self.app.store.put("work", {
+            "id": uid("work"), "owner_bot_id": "bot-main", "goal": "dream", "status": "active",
+            "kind": "dreaming", "project_id": project["id"], "created": time.time(),
+        })
+        self._enable()
+        row = dreaming.load(self.app)
+        row["held"] = {project["id"]: {"work_id": work["id"], "stage": "/tmp/dream-held", "dream": {}}}
+        row["pending_slot"] = time.time() - 1
+        row["retry_not_before"] = time.time() - 1
+        dreaming._save(self.app, row)
+        self.app.cancel_work(work["id"])
+        self.assertNotIn(project["id"], dreaming.load(self.app).get("held") or {})
+        self.app.dream_step(time.time())
+        self.assertEqual(
+            [task for task in self.app.store.find("task", limit=20) if task.get("work_id") == work["id"]],
+            [])
+        self.assertNotIn(project["id"], dreaming.load(self.app).get("held") or {})
