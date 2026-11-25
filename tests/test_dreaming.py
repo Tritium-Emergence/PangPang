@@ -1068,6 +1068,126 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(runner._present_paths([str(target), str(folder), missing]),
                          [str(target), str(folder)])
 
+    def _runtime_fixture(self):
+        root = Path(self.tmp.name) / "runtime"
+        root.mkdir()
+        runtime = root / "pang-dream-runtime"
+        runtime.write_bytes(b"\x7fELF")
+        runtime.chmod(0o755)
+        shim = root / "shim"
+        shim.write_text("#!/usr/bin/env -S pang-dream-runtime\n", encoding="utf-8")
+        shim.chmod(0o755)
+        direct = Path(self.tmp.name) / "direct"
+        direct.write_text("#!%s\n" % runtime, encoding="utf-8")
+        nested = Path(self.tmp.name) / "nested"
+        nested.write_text("#!%s\n" % shim, encoding="utf-8")
+        return root, runtime, shim, direct, nested
+
+    def test_interpreter_chain_is_readable_without_opening_a_data_tree(self):
+        from pangpang import runner
+        root, runtime, shim, direct, nested = self._runtime_fixture()
+        home_tool = Path(self.tmp.name) / "home-tool"
+        home_tool.write_text("#!/home/user/python\n", encoding="utf-8")
+        user_tool = Path(self.tmp.name) / "user-tool"
+        user_tool.write_text("#!/Users/user/claude\n", encoding="utf-8")
+        path = str(root) + os.pathsep + os.environ.get("PATH", "")
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            via_env = runner._runtime_read_paths([str(shim)])
+            via_direct = runner._runtime_read_paths([str(direct)])
+            via_nested = runner._runtime_read_paths([str(nested)])
+            self.assertTrue(runner.runtime_grant_possible([str(shim)]))
+            self.assertTrue(runner.runtime_grant_possible([str(direct)]))
+            self.assertTrue(runner.runtime_grant_possible([str(nested)]))
+            self.assertFalse(runner.runtime_grant_possible([str(home_tool)]))
+            self.assertFalse(runner.runtime_grant_possible([str(user_tool)]))
+        real = os.path.realpath(runtime)
+        for paths in (via_env, via_direct, via_nested):
+            self.assertIn(real, paths)
+            self.assertNotIn("/usr", paths)
+            self.assertNotIn("/Library", paths)
+            self.assertNotIn("/home/user", paths)
+            self.assertNotIn("/Users/user", paths)
+            self.assertFalse(any(item == "/opt" or item.startswith("/opt/") for item in paths))
+            self.assertFalse(any(item == "/private" or item.startswith("/private/") for item in paths))
+        if os.path.exists("/usr/bin/env"):
+            env = os.path.realpath("/usr/bin/env")
+            self.assertIn(env, via_env)
+            self.assertIn(env, via_nested)
+        self.assertIn(os.path.realpath(shim), via_nested)
+
+    def test_startup_allowance_does_not_grant_writes(self):
+        from pangpang import runner
+        stage = Path(self.tmp.name) / "stage"
+        candidate = stage / "candidate"
+        memory = Path(self.tmp.name) / "memory-out"
+        candidate.mkdir(parents=True)
+        memory.mkdir()
+        root, runtime, shim, _direct, _nested = self._runtime_fixture()
+        script = stage / "executor"
+        script.write_text("#!/usr/bin/env -S pang-dream-runtime\n", encoding="utf-8")
+        path = str(root) + os.pathsep + os.environ.get("PATH", "")
+        writable = [str(candidate), str(memory)]
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            readable = [str(stage)] + runner._runtime_read_paths([str(script)])
+            rules = runner._landlock_rules(readable, writable, 3)
+            real = os.path.realpath(runtime)
+            rule_paths = [item for item, _bits in rules]
+            self.assertIn(real, rule_paths)
+            self.assertIn(str(candidate), rule_paths)
+            self.assertIn(str(memory), rule_paths)
+            read_access = runner._LANDLOCK_EXECUTE | runner._LANDLOCK_READ
+            handled = runner._landlock_handled(3)
+            self.assertTrue(handled & runner._LANDLOCK_WRITE)
+            self.assertFalse(read_access & runner._LANDLOCK_WRITE)
+            for rule_path, bits in rules:
+                if rule_path in {str(candidate), str(memory)}:
+                    self.assertEqual(bits, handled, rule_path)
+                else:
+                    self.assertEqual(bits, read_access, rule_path)
+            for blocked in ("/usr", "/opt", "/private", "/Library", "/System", "/home/user", "/Users/user"):
+                self.assertNotIn(blocked, rule_paths)
+            linker = "/lib64/ld-linux-x86-64.so.2"
+            if os.path.exists(linker) and os.path.exists("/usr/bin/env"):
+                self.assertIn(linker, rule_paths)
+            seen = {}
+
+            def stop(file, argv, env):
+                seen["file"] = file
+                seen["argv"] = argv
+                raise RuntimeError("stop")
+
+            with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(os, "execvpe", stop):
+                with self.assertRaises(RuntimeError):
+                    runner.exec_confined([str(stage)], writable, [str(script)])
+            self.assertEqual(seen["file"], "sandbox-exec")
+            argv = seen["argv"]
+            self.assertEqual(argv[:2], ["sandbox-exec", "-f"])
+            self.assertEqual(argv[3], "--")
+            self.assertEqual(argv[4], str(script))
+            profile_path = Path(argv[2])
+            profile = profile_path.read_text(encoding="utf-8")
+            shutil.rmtree(profile_path.parent, ignore_errors=True)
+        self.assertIn("(deny default)", profile)
+        self.assertNotIn("(allow default)", profile)
+        self.assertIn('(allow file-read* (literal "/"))', profile)
+        self.assertNotIn('(subpath "/")', profile)
+        self.assertNotIn('file-write* (literal "/")', profile)
+        for root_path in runner._STARTUP_ROOTS:
+            self.assertIn('(allow file-read* (subpath "%s"))' % root_path, profile)
+            self.assertIn('(allow file-map-executable (subpath "%s"))' % root_path, profile)
+            self.assertNotIn('file-write* (subpath "%s")' % root_path, profile)
+        for blocked in ("/opt", "/Library", "/Users", "/home", "/private", "/var", "/tmp"):
+            self.assertNotIn('(subpath "%s")' % blocked, profile)
+        for line in profile.splitlines():
+            if "file-write*" in line:
+                self.assertTrue(str(candidate) in line or str(memory) in line, line)
+        self.assertIn('(allow file-write* (subpath "%s"))' % candidate, profile)
+        self.assertIn('(allow file-write* (subpath "%s"))' % memory, profile)
+        self.assertNotIn('(allow file-write* (subpath "%s"))' % stage, profile)
+        self.assertIn('(allow file-map-executable (literal "%s"))' % real, profile)
+        self.assertNotIn('(allow file-write* (literal "%s"))' % real, profile)
+        self.assertNotIn('(allow file-write* (subpath "%s"))' % root, profile)
+
     def test_cleanup_skip_does_not_stall_past_the_first_page(self):
         project = self.app.create_project("bot-main", {"title": "Pages", "goal": "hold"})
         base = self.data.resolve().parent / "dream-stage" / project["id"]

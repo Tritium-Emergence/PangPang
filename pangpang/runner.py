@@ -155,6 +155,18 @@ def dream_boundary_available():
 
 
 _RUNTIME_PARENT_BLOCK = {"/", "/usr", "/opt", "/private", "/Library", "/System", "/home", "/Users", "/tmp", "/var", "/data"}
+# Mac loader roots. Readable and mappable so dyld and the interpreter can
+# reach main; never writable. /System includes the cryptex shared cache.
+# The db paths are the cache directory, not /private or /var. Linux landlock
+# does not use this list: a file rule on the interpreter is enough there.
+_STARTUP_ROOTS = (
+    "/usr",
+    "/bin",
+    "/System",
+    "/private/var/db/dyld",
+    "/var/db/dyld",
+)
+_SHEBANG_DEPTH = 4
 
 
 def _is_broad_runtime_dir(path):
@@ -195,11 +207,132 @@ def _allow_runtime_parent(path):
     return parent
 
 
-def _runtime_read_paths(argv):
-    """The chosen program, its libraries, and the few system files it needs.
+def _shebang_tokens(path):
+    """Interpreter tokens from a script's first line, or nothing for a binary."""
+    try:
+        with open(path, "rb") as handle:
+            line = handle.readline(256)
+    except OSError:
+        return []
+    if not line.startswith(b"#!"):
+        return []
+    text = line[2:].strip().decode("utf-8", "replace")
+    return text.split() if text else []
 
-    The program's own directory and library directory are included so it can
-    be executed. Broad trees that can hold project memory or control data
+
+def _lookup_program(token):
+    if not token or token.startswith("-"):
+        return ""
+    if os.path.isabs(token):
+        return token
+    if "/" in token:
+        return os.path.normpath(os.path.join(os.getcwd(), token))
+    return shutil.which(token) or ""
+
+
+def _env_program(tokens):
+    """The command env will exec. Options and NAME=VALUE assignments are skipped."""
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        if "=" in token and "/" not in token:
+            continue
+        return token
+    return ""
+
+
+def _interpreter_chain(path):
+    """Executables a script reaches through shebangs, including env's target.
+
+    The names come from the shebang line. A binary contributes nothing.
+    Depth and the seen set stop a cycle.
+    """
+    chain = []
+    seen = set()
+    current = path
+    for _ in range(_SHEBANG_DEPTH):
+        if not current or current in seen:
+            break
+        seen.add(current)
+        tokens = _shebang_tokens(current)
+        if not tokens:
+            break
+        program = _lookup_program(tokens[0])
+        if not program:
+            break
+        if program not in chain:
+            chain.append(program)
+        if os.path.basename(program) != "env":
+            current = program
+            continue
+        target = _lookup_program(_env_program(tokens[1:]))
+        if not target or target in seen or target in chain:
+            break
+        chain.append(target)
+        current = target
+    return chain
+
+
+def _linked_files(exe):
+    if not exe or not os.path.isfile(exe):
+        return []
+    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
+    try:
+        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return re.findall(r"(/[^ )\n]+)", listed.stdout or "")
+
+
+def _python_lib_paths(exe):
+    if not exe or not os.path.isfile(exe) or "python" not in os.path.basename(exe).lower():
+        return []
+    try:
+        listed = subprocess.run(
+            [exe, "-c",
+             "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in (listed.stdout or "").splitlines() if line.strip()]
+
+
+def _startup_files(argv):
+    """The requested program and every interpreter it needs before main."""
+    requested = argv[0] if argv else sys.executable
+    try:
+        primary = os.path.realpath(requested)
+    except OSError:
+        primary = requested
+    files = []
+
+    def push(path):
+        if path and path not in files:
+            files.append(path)
+
+    push(requested)
+    push(primary)
+    if os.path.isfile(primary):
+        origin = primary
+    elif os.path.isfile(requested):
+        origin = requested
+    else:
+        origin = ""
+    for path in _interpreter_chain(origin):
+        push(path)
+        try:
+            push(os.path.realpath(path))
+        except OSError:
+            pass
+    return files
+
+
+def _runtime_read_paths(argv):
+    """The chosen program, its interpreters, its libraries, and a few system files.
+
+    A script contributes the executables named by its shebang, including the
+    program `env` selects. Each program's own directory and library directory
+    are included. Broad trees that can hold project memory or control data
     (/usr, /opt, /private, /Library, /var) are not.
     """
     paths = []
@@ -208,33 +341,22 @@ def _runtime_read_paths(argv):
         if path and os.path.exists(path) and path not in paths and not _is_broad_runtime_dir(path):
             paths.append(path)
 
-    requested = argv[0] if argv else sys.executable
-    try:
-        exe = os.path.realpath(requested)
-    except OSError:
-        exe = requested
-    add(requested)
-    add(exe)
-    add(_allow_runtime_parent(requested))
-    add(_allow_runtime_parent(exe))
-    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
-    try:
-        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
-        for match in re.findall(r"(/[^ )\n]+)", listed.stdout or ""):
+    seen = set()
+    for path in _startup_files(argv):
+        add(path)
+        add(_allow_runtime_parent(path))
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            real = path
+        if real in seen:
+            continue
+        seen.add(real)
+        for match in _linked_files(real):
             add(match)
             add(_allow_runtime_parent(match))
-    except (OSError, subprocess.SubprocessError):
-        pass
-    if exe and "python" in os.path.basename(exe).lower():
-        try:
-            listed = subprocess.run(
-                [exe, "-c",
-                 "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
-                capture_output=True, text=True, timeout=5)
-            for line in (listed.stdout or "").splitlines():
-                add(line)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        for lib in _python_lib_paths(real):
+            add(lib)
     for extra in ("/etc/ssl", "/etc/ssl/certs", "/System/Library/OpenSSL"):
         add(extra)
     for extra in _RUNTIME_FILES:
@@ -245,38 +367,31 @@ def _runtime_read_paths(argv):
 def runtime_grant_possible(argv):
     """False when the only way to run argv is to open a broad directory.
 
-    Select and start both refuse in that case. A missing parent that is just
-    /usr/bin stays allowed; a home directory does not.
+    The shebang chain counts: an interpreter whose directory is a home
+    directory is refused, the same as the program itself. A missing parent
+    that is just /usr/bin stays allowed.
     """
     if not argv or not isinstance(argv[0], str) or not argv[0]:
         return False
-    requested = argv[0]
-    try:
-        exe = os.path.realpath(requested)
-    except OSError:
-        exe = requested
-    files = [requested, exe]
-    lister = ["otool", "-L", exe] if sys.platform == "darwin" else ["ldd", exe]
-    try:
-        listed = subprocess.run(lister, capture_output=True, text=True, timeout=5)
-        files.extend(re.findall(r"(/[^ )\n]+)", listed.stdout or ""))
-    except (OSError, subprocess.SubprocessError):
-        pass
-    for path in files:
+    seen = set()
+    for path in _startup_files(argv):
         parent = os.path.dirname(path or "")
         if parent and _is_broad_runtime_dir(parent):
             return False
-    if exe and "python" in os.path.basename(exe).lower() and os.path.exists(exe):
         try:
-            listed = subprocess.run(
-                [exe, "-c",
-                 "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('platstdlib'))"],
-                capture_output=True, text=True, timeout=5)
-            for line in (listed.stdout or "").splitlines():
-                if line and _is_broad_runtime_dir(line.strip()):
-                    return False
-        except (OSError, subprocess.SubprocessError):
-            pass
+            real = os.path.realpath(path)
+        except OSError:
+            real = path
+        if real in seen:
+            continue
+        seen.add(real)
+        for match in _linked_files(real):
+            parent = os.path.dirname(match or "")
+            if parent and _is_broad_runtime_dir(parent):
+                return False
+        for lib in _python_lib_paths(real):
+            if _is_broad_runtime_dir(lib):
+                return False
     return True
 
 
@@ -316,6 +431,19 @@ def _add_landlock_rule(syscall, ruleset, path, access):
         os.close(parent)
 
 
+def _landlock_rules(readable_dirs, writable_dirs, abi):
+    """Execute and read on readable paths. Writes, including truncate, only on writable directories."""
+    handled = _landlock_handled(abi)
+    read_access = _LANDLOCK_EXECUTE | _LANDLOCK_READ
+    rules = []
+    for path in _present_paths(readable_dirs):
+        rules.append((path, read_access))
+    for path in writable_dirs:
+        if path and os.path.isdir(path) and not os.path.islink(path):
+            rules.append((path, handled))
+    return rules
+
+
 def confine_dream(readable_dirs, writable_dirs):
     """Apply the dream boundary in this process, then return.
 
@@ -327,7 +455,6 @@ def confine_dream(readable_dirs, writable_dirs):
     if abi < 3:
         raise OSError(errno.ENOTSUP, "dream_boundary_unavailable")
     handled = _landlock_handled(abi)
-    read_access = _LANDLOCK_EXECUTE | _LANDLOCK_READ
     libc = ctypes.CDLL(None, use_errno=True)
     syscall = libc.syscall
     syscall.restype = ctypes.c_long
@@ -340,11 +467,8 @@ def confine_dream(readable_dirs, writable_dirs):
     if ruleset < 0:
         raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
     try:
-        for path in _present_paths(readable_dirs):
-            _add_landlock_rule(syscall, ruleset, path, read_access)
-        for path in writable_dirs:
-            if path and os.path.isdir(path) and not os.path.islink(path):
-                _add_landlock_rule(syscall, ruleset, path, handled)
+        for path, access in _landlock_rules(readable_dirs, writable_dirs, abi):
+            _add_landlock_rule(syscall, ruleset, path, access)
         if hasattr(libc, "prctl"):
             limited = libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
         else:
@@ -372,6 +496,12 @@ def _sandbox_filter(path):
 
 
 def _sandbox_profile(readable_dirs, writable_dirs):
+    """Deny by default. Loader trees and granted files are readable and mappable.
+
+    file-write* is emitted only for writable_dirs. Startup roots use subpath
+    even when the path is a symlink: a literal symlink would not cover the
+    interpreter or the dyld cache.
+    """
     lines = [
         "(version 1)",
         "(deny default)",
@@ -383,11 +513,18 @@ def _sandbox_profile(readable_dirs, writable_dirs):
         "(allow network-bind)",
         "(allow system-socket)",
         "(allow file-ioctl)",
+        # The root directory node, not its children. dyld stats it while
+        # finding the shared cache.
+        '(allow file-read* (literal "/"))',
     ]
+    for root in _STARTUP_ROOTS:
+        lines.append('(allow file-read* (subpath "%s"))' % root)
+        lines.append('(allow file-map-executable (subpath "%s"))' % root)
     for path in readable_dirs:
         clause = _sandbox_filter(path) if path else ""
         if clause:
             lines.append("(allow file-read* %s)" % clause)
+            lines.append("(allow file-map-executable %s)" % clause)
     for path in writable_dirs:
         clause = _sandbox_filter(path) if path else ""
         if clause and os.path.isdir(path) and not os.path.islink(path):
