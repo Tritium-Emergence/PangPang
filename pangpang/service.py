@@ -7783,11 +7783,6 @@ class Service:
                 return self._fail_task_terminally(task["id"], "dream_unbound", {"queued"})
             if task.get("status") == "starting":
                 return self._deny_starting_task(task, "dream_unbound")
-        if task.get("dreaming") and not runner.dream_boundary_available():
-            if task.get("status") == "queued":
-                return self._fail_task_terminally(task["id"], "dream_boundary_unavailable", {"queued"})
-            if task.get("status") == "starting":
-                return self._deny_starting_task(task, "dream_boundary_unavailable")
         try:
             start = self.execution.start(task)
         except Fault as error:

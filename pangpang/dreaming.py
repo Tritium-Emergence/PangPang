@@ -54,7 +54,7 @@ _OPEN = _ACTIVE + ("queued", "awaiting_approval")
 _DEFER = {
     "executor_host_offline", "requested_executor_not_available", "no_eligible_executor",
     "backpressure", "connector_offline", "requested_executor_not_registered",
-    "dream_boundary_unavailable", "dream_mark_pending",
+    "dream_mark_pending",
 }
 CLEANUP_BUDGET = 64
 
@@ -129,18 +129,6 @@ def load(service):
     return row
 
 
-def _boundary_ready():
-    from . import runner
-    return runner.dream_boundary_available()
-
-
-def _executor_runtime_ok(service, installation_id):
-    from . import runner
-    inst = service.execution.installations.get(installation_id) or {}
-    argv = inst.get("argv") if isinstance(inst.get("argv"), list) else []
-    return runner.runtime_grant_possible(argv)
-
-
 def _held_work_open(service, held):
     work_id = held.get("work_id") if isinstance(held, dict) else ""
     if not work_id:
@@ -166,20 +154,12 @@ def release_held_work(service, work_id):
 
 def _executor_rows(service):
     rows = []
-    ready = _boundary_ready()
     for inst in service.execution.installations.values():
         host = service.execution.hosts.get(inst.get("host_id")) or {}
-        local = host.get("transport") == "local"
-        from . import runner
-        argv = inst.get("argv") if isinstance(inst.get("argv"), list) else []
-        runnable = bool(argv) and runner.runtime_grant_possible(argv)
         rows.append({
             "id": inst.get("id") or "",
             "label": str(inst.get("adapter") or inst.get("id") or ""),
-            "local": local,
-            # Selectable only when this host confines the dream and this
-            # executor's runtime does not need a broad directory.
-            "bounded": bool(local and ready and runnable),
+            "local": host.get("transport") == "local",
         })
     rows.sort(key=lambda item: item["id"])
     return rows
@@ -228,16 +208,6 @@ def configure(service, body):
     if installation_id and _local_installation(service, installation_id) is None:
         raise Fault("dream_executor_not_local", 400,
                     advice="只能选本机执行器。远程整理稿收不回来。")
-    if installation_id and not _boundary_ready():
-        raise Fault("dream_boundary_unavailable", 400,
-                    advice="当前运行器不能限制执行器只写候选目录，所以不能用来做梦。")
-    if installation_id:
-        from . import runner
-        chosen = service.execution.installations.get(installation_id) or {}
-        argv = chosen.get("argv") if isinstance(chosen.get("argv"), list) else []
-        if not runner.runtime_grant_possible(argv):
-            raise Fault("dream_boundary_unavailable", 400,
-                        advice="这个执行器的程序目录里还有其他项目的数据，不能用来做梦。")
     clock = body.get("time", DEFAULT_TIME)
     if not isinstance(clock, str):
         raise Fault("invalid_dream_time", 400)
@@ -1582,8 +1552,6 @@ def _dispatch(service, project, installation_id):
         raise Fault("dream_executor_not_local", 400)
     if not _executor_free(service, installation_id) or _dreams_waiting(service, installation_id):
         return None
-    if not _boundary_ready():
-        raise Fault("dream_boundary_unavailable", 400)
     try:
         probe = service.store.get("probe", installation_id)
     except Fault:
@@ -1909,8 +1877,6 @@ def step(service, now=None):
             held = True
             break
         try:
-            if not _boundary_ready() or not _executor_runtime_ok(service, row["installation_id"]):
-                raise Fault("dream_boundary_unavailable", 400)
             if _project_blocked(service, project["id"]):
                 raise Fault("dream_mark_pending", 409)
             service._check_backpressure(project["owner_bot_id"])
