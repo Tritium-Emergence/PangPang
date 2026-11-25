@@ -1,6 +1,6 @@
-"""Per-project memory, written by the chosen executor.
+"""Memory written by the chosen executor for one project, or for work with no project.
 
-The server copies only this project's published memory and the material that
+The server copies only this scope's published memory and the material that
 arrived after the watermark into an isolated directory. The executor is started
 with that directory as its working root and writes candidate/ there. The server
 checks the candidate, then replaces the published memory. Executor sessions and
@@ -43,6 +43,8 @@ COMMIT_MAX = 1024 * 1024
 DEFER_S = 30
 
 _PROJECT_ID = re.compile(r"^project-[a-f0-9]{32}$")
+# Directory and lock key for work that has no project. Not a project row.
+UNCATEGORIZED_ID = "uncategorized"
 _GEN_ID = re.compile(r"^gen-[a-f0-9]{32}$")
 _TOPIC_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.md$")
 _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -279,8 +281,13 @@ def next_deadline(service, now):
     return soon
 
 
+def _scope_id(project_id):
+    return project_id == UNCATEGORIZED_ID or (
+        isinstance(project_id, str) and _PROJECT_ID.fullmatch(project_id) is not None)
+
+
 def memory_root(service, project_id):
-    if not isinstance(project_id, str) or not _PROJECT_ID.fullmatch(project_id):
+    if not _scope_id(project_id):
         raise Fault("dream_scope_refused", 403)
     base = (Path(service.data) / "memory").resolve()
     root = (base / project_id).resolve()
@@ -474,9 +481,23 @@ def _pages(store, kind, **where):
             return
 
 
+def _loose_works(service):
+    """Work with an empty or missing project id. Dreaming rows are not material."""
+    rows = []
+    for value in ("", None):
+        for row in _pages(service.store, "work", project_id=value):
+            if row.get("kind") == "dreaming":
+                continue
+            rows.append(row)
+    return rows
+
+
 def _sources(service, project_id):
-    works = [row for row in _pages(service.store, "work", project_id=project_id)
-             if row.get("kind") != "dreaming"]
+    if project_id == UNCATEGORIZED_ID:
+        works = _loose_works(service)
+    else:
+        works = [row for row in _pages(service.store, "work", project_id=project_id)
+                 if row.get("kind") != "dreaming"]
     tasks, artifacts = [], []
     for work in works:
         tasks.extend(row for row in _pages(service.store, "task", work_id=work["id"])
@@ -609,6 +630,8 @@ def _copy_published(root, dest):
 
 def stage_dir(service, project_id):
     """Isolated directory outside the control-plane data dir."""
+    if not _scope_id(project_id):
+        raise Fault("dream_scope_refused", 403)
     base = Path(service.data).resolve().parent / "dream-stage"
     run = base / project_id / uid("run")
     if base.resolve() == Path(service.data).resolve() or Path(service.data).resolve() in run.resolve().parents:
@@ -1777,10 +1800,11 @@ def recover_sync(service):
         except OSError:
             continue
         try:
-            project = service.store.get("project", project_id)
-            project.pop("dream_alert", None)
-            project["dreamed_at"] = time.time()
-            service.store.put("project", project)
+            if project_id != UNCATEGORIZED_ID:
+                project = service.store.get("project", project_id)
+                project.pop("dream_alert", None)
+                project["dreamed_at"] = time.time()
+                service.store.put("project", project)
             if work_id:
                 work = service.store.get("work", work_id)
                 work.pop("dream_sync_pending", None)
@@ -1798,6 +1822,44 @@ def recover_sync(service):
                 marker.unlink()
             except OSError:
                 pass
+
+
+def _owner_of_oldest(works):
+    if not works:
+        return ""
+    oldest = min(works, key=lambda row: row.get("created") if isinstance(row.get("created"), (int, float)) else 0)
+    return oldest.get("owner_bot_id") or ""
+
+
+def _uncategorized_subject(service):
+    """One dream subject for work with no project, or None when there is nothing to run.
+
+    The dict is not stored. A held retry keeps the owner of the work already created.
+    """
+    works = _loose_works(service)
+    held = (load(service).get("held") or {}).get(UNCATEGORIZED_ID)
+    held_work_id = held.get("work_id") if isinstance(held, dict) else ""
+    if not works and not held_work_id:
+        return None
+    owner = ""
+    if held_work_id:
+        try:
+            owner = service.store.get("work", held_work_id).get("owner_bot_id") or ""
+        except Fault:
+            owner = ""
+    if not owner:
+        owner = _owner_of_oldest(works)
+    if not owner:
+        return None
+    return {"id": UNCATEGORIZED_ID, "owner_bot_id": owner}
+
+
+def _dream_subjects(service):
+    subjects = list(_pages(service.store, "project"))
+    loose = _uncategorized_subject(service)
+    if loose is not None:
+        subjects.append(loose)
+    return subjects
 
 
 def step(service, now=None):
@@ -1840,7 +1902,7 @@ def step(service, now=None):
         return False
     attempted = set(row.get("attempted") or [])
     held = False
-    for project in _pages(service.store, "project"):
+    for project in _dream_subjects(service):
         if project["id"] in attempted:
             continue
         if not _executor_free(service, row["installation_id"]) or _dreams_waiting(service, row["installation_id"]):
