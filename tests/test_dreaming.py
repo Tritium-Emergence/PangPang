@@ -106,6 +106,17 @@ class DreamingTests(unittest.TestCase):
             })
         return project, message["work_id"]
 
+    def _loose_work(self, summary, project_id=""):
+        row = {
+            "id": uid("work"), "owner_bot_id": "bot-main", "goal": summary, "status": "delivered",
+            "created": time.time(),
+            "checkpoint": {"phase": "build", "summary": summary, "completed": ["noted"],
+                           "next_actions": [], "blocked_on": [], "evidence_refs": []},
+        }
+        if project_id is not None:
+            row["project_id"] = project_id
+        return self.app.store.put("work", row)
+
     def _drain(self):
         deadline = time.time() + 20
         while time.time() < deadline:
@@ -366,6 +377,82 @@ class DreamingTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_unattached_works_are_dreamed_without_a_project(self):
+        self._enable()
+        empty = self._loose_work("EMPTY-SUMMARY", "")
+        missing = self._loose_work("MISSING-SUMMARY", None)
+        self.assertEqual(self.app.store.find("project"), [])
+        self._fire()
+        text = self._memory_text(dreaming.UNCATEGORIZED_ID)
+        self.assertIn("DREAMED", text)
+        self.assertIn("EMPTY-SUMMARY", text)
+        self.assertIn("MISSING-SUMMARY", text)
+        self.assertFalse((self.root / "MEMORY.md").exists())
+        with self.assertRaises(Fault):
+            self.app.store.get("project", dreaming.UNCATEGORIZED_ID)
+        tasks = [task for task in self.app.store.find("task", limit=20) if task.get("dreaming")]
+        self.assertEqual(len(tasks), 1)
+        task = tasks[0]
+        self.assertEqual(task["status"], "succeeded")
+        self.assertEqual(task["dreaming_project_id"], dreaming.UNCATEGORIZED_ID)
+        self.assertEqual(task["cwd"], task["dream_stage"])
+        self.assertEqual(task["launch_roots"], [task["dream_stage"]])
+        self.assertEqual(Path(task["dream_stage"]).parent.name, dreaming.UNCATEGORIZED_ID)
+        self.assertNotEqual(task["cwd"], str(self.root))
+        root = dreaming.memory_root(self.app, dreaming.UNCATEGORIZED_ID)
+        current = (root / "CURRENT").read_text(encoding="utf-8").strip()
+        self.assertTrue((root / "g" / current / "READY").is_file())
+        mark = dreaming.formal_watermark(self.app, dreaming.UNCATEGORIZED_ID)
+        self.assertIn("work:" + empty["id"], mark)
+        self.assertIn("work:" + missing["id"], mark)
+        dream = self.app.store.get("work", task["work_id"])
+        self.assertEqual(dream["kind"], "dreaming")
+        self.assertEqual(dream["project_id"], dreaming.UNCATEGORIZED_ID)
+        self._fire()
+        self.assertEqual(dreaming.formal_watermark(self.app, dreaming.UNCATEGORIZED_ID), mark)
+        self.assertEqual(len([row for row in self.app.store.find("task", limit=20) if row.get("dreaming")]), 1)
+        self.assertEqual((root / "CURRENT").read_text(encoding="utf-8").strip(), current)
+
+    def test_mixed_projects_and_unattached_works_both_get_a_memory(self):
+        self._enable()
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self._loose_work("LOOSE-SUMMARY", "")
+        self._fire()
+        self._fire()
+        self.assertIn("ALPHA-SUMMARY", self._memory_text(alpha["id"]))
+        self.assertNotIn("LOOSE-SUMMARY", self._memory_text(alpha["id"]))
+        self.assertIn("LOOSE-SUMMARY", self._memory_text(dreaming.UNCATEGORIZED_ID))
+        self.assertNotIn("ALPHA-SUMMARY", self._memory_text(dreaming.UNCATEGORIZED_ID))
+        self.assertIn("DREAMED", dreaming.formal_index(self.app, alpha["id"]))
+        self.assertIn("DREAMED", dreaming.formal_index(self.app, dreaming.UNCATEGORIZED_ID))
+        with self.assertRaises(Fault):
+            self.app.store.get("project", dreaming.UNCATEGORIZED_ID)
+        tasks = [task for task in self.app.store.find("task", limit=20) if task.get("dreaming")]
+        self.assertEqual(
+            {task["dreaming_project_id"] for task in tasks},
+            {alpha["id"], dreaming.UNCATEGORIZED_ID})
+        loose = next(task for task in tasks if task["dreaming_project_id"] == dreaming.UNCATEGORIZED_ID)
+        self.assertEqual(loose["launch_roots"], [loose["dream_stage"]])
+        self.assertEqual(loose["cwd"], loose["dream_stage"])
+        self.assertEqual(Path(loose["dream_stage"]).parent.name, dreaming.UNCATEGORIZED_ID)
+
+    def test_no_unattached_works_do_not_create_an_uncategorized_memory(self):
+        self._enable()
+        self._fire()
+        self.assertIsNone(self.app.store.get("settings", "dreaming").get("pending_slot"))
+        self.assertFalse(any(task.get("dreaming") for task in self.app.store.find("task", limit=20)))
+        self.assertFalse((self.data / "memory" / dreaming.UNCATEGORIZED_ID).exists())
+        self.assertFalse((self.data.parent / "dream-stage" / dreaming.UNCATEGORIZED_ID).exists())
+        alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        self._fire()
+        self.assertIn("ALPHA-SUMMARY", self._memory_text(alpha["id"]))
+        self.assertIn("DREAMED", dreaming.formal_index(self.app, alpha["id"]))
+        self.assertFalse((self.data / "memory" / dreaming.UNCATEGORIZED_ID).exists())
+        self.assertFalse((self.data.parent / "dream-stage" / dreaming.UNCATEGORIZED_ID).exists())
+        self.assertFalse(any(
+            task.get("dreaming_project_id") == dreaming.UNCATEGORIZED_ID
+            for task in self.app.store.find("task", limit=20)))
 
 
 class ReviewTests(unittest.TestCase):
