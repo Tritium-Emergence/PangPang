@@ -246,7 +246,7 @@ class DreamingTests(unittest.TestCase):
     def test_symlink_and_escape_and_oversize_are_rejected(self):
         self._enable()
         alpha, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
-        for code, needle in ((_SYMLINK, "符号链接"), (_ESCAPE, "执行器"), (_HUGE, "大小")):
+        for code, needle in ((_SYMLINK, "符号链接"), (_ESCAPE, "目录外面"), (_HUGE, "大小")):
             self._argv(code)
             before = dreaming.formal_watermark(self.app, alpha["id"])
             self._fire()
@@ -462,6 +462,7 @@ class ReviewTests(unittest.TestCase):
     _enable = DreamingTests._enable
     _project = DreamingTests._project
     _drain = DreamingTests._drain
+    _fire = DreamingTests._fire
     _memory_text = DreamingTests._memory_text
 
     def _due(self):
@@ -896,40 +897,6 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(len([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]), 1)
         self.assertTrue(any(row.get("dreaming") for row in self.app.store.find("task", limit=20)))
 
-    def test_confinement_blocks_a_read_outside_the_stage(self):
-        from pangpang import runner
-        stage = Path(self.tmp.name) / "stage"
-        (stage / "signal").mkdir(parents=True)
-        (stage / "candidate").mkdir()
-        (stage / "signal" / "in.txt").write_text("INSIDE", encoding="utf-8")
-        outside = Path(self.tmp.name) / "other-project.txt"
-        outside.write_text("SECRET-OTHER", encoding="utf-8")
-        run = Path(self.tmp.name) / "run"
-        run.mkdir()
-        code = (
-            "import pathlib,sys\n"
-            "try:\n"
-            "    print('OUT '+pathlib.Path(sys.argv[1]).read_text())\n"
-            "except OSError as e:\n"
-            "    print('OUT_DENIED')\n"
-            "pathlib.Path('signal/in.txt').read_text()\n"
-            "pathlib.Path('candidate/out.txt').write_text('ok')\n"
-            "print('WRITE_OK')\n"
-        )
-        (run / "dream-confine.json").write_text(json.dumps({
-            "readable": [str(stage)],
-            "writable": [str(stage / "candidate")],
-            "argv": [sys.executable, "-c", code, str(outside)],
-        }), encoding="utf-8")
-        import subprocess
-        completed = subprocess.run(
-            [sys.executable, str(Path(runner.__file__)), "confine", str(run)],
-            cwd=stage, capture_output=True, text=True, timeout=20)
-        self.assertIn("OUT_DENIED", completed.stdout)
-        self.assertNotIn("SECRET-OTHER", completed.stdout)
-        self.assertIn("WRITE_OK", completed.stdout)
-        self.assertEqual((stage / "candidate" / "out.txt").read_text(encoding="utf-8"), "ok")
-
     def test_a_deep_leftover_is_resumed_past_the_shallow_sibling(self):
         project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
         stage = self.data.resolve().parent / "dream-stage" / project["id"] / "run-deep"
@@ -985,16 +952,6 @@ class ReviewTests(unittest.TestCase):
         self.app.dream_step(time.time() + 2 * dreaming.DEFER_S + 2)
         self.assertEqual(len([row for row in self.app.store.find("work", limit=20) if row.get("kind") == "dreaming"]), 1)
         self.assertTrue(any(row.get("dreaming") for row in self.app.store.find("task", limit=20)))
-
-    def test_runtime_paths_are_the_program_not_a_data_parent(self):
-        from pangpang import runner
-        paths = runner._runtime_read_paths([sys.executable])
-        self.assertIn(os.path.realpath(sys.executable), paths)
-        self.assertTrue(any("python" in path for path in paths))
-        self.assertFalse(any(path == "/opt" or path.startswith("/opt/") for path in paths))
-        self.assertFalse(any(path == "/private" or path.startswith("/private/") for path in paths))
-        self.assertNotIn("/usr", paths)
-        self.assertNotIn("/Library", paths)
 
     def test_sync_recovery_uses_the_work_when_the_marker_is_missing(self):
         self._due()
@@ -1054,139 +1011,6 @@ class ReviewTests(unittest.TestCase):
         for _ in range(3):
             dreaming.sweep_finished_dirs(self.app)
         self.assertEqual((stage / "signal" / "note.txt").read_text(encoding="utf-8"), "stay\n")
-
-    def test_file_rules_are_not_dropped(self):
-        from pangpang import runner
-        target = Path(self.tmp.name) / "libpython.so"
-        target.write_bytes(b"\x7fELF")
-        folder = Path(self.tmp.name) / "stdlib"
-        folder.mkdir()
-        profile = runner._sandbox_profile([str(target), str(folder)], [])
-        self.assertIn('(literal "%s")' % target, profile)
-        self.assertIn('(subpath "%s")' % folder, profile)
-        missing = str(Path(self.tmp.name) / "missing")
-        self.assertEqual(runner._present_paths([str(target), str(folder), missing]),
-                         [str(target), str(folder)])
-
-    def _runtime_fixture(self):
-        root = Path(self.tmp.name) / "runtime"
-        root.mkdir()
-        runtime = root / "pang-dream-runtime"
-        runtime.write_bytes(b"\x7fELF")
-        runtime.chmod(0o755)
-        shim = root / "shim"
-        shim.write_text("#!/usr/bin/env -S pang-dream-runtime\n", encoding="utf-8")
-        shim.chmod(0o755)
-        direct = Path(self.tmp.name) / "direct"
-        direct.write_text("#!%s\n" % runtime, encoding="utf-8")
-        nested = Path(self.tmp.name) / "nested"
-        nested.write_text("#!%s\n" % shim, encoding="utf-8")
-        return root, runtime, shim, direct, nested
-
-    def test_interpreter_chain_is_readable_without_opening_a_data_tree(self):
-        from pangpang import runner
-        root, runtime, shim, direct, nested = self._runtime_fixture()
-        home_tool = Path(self.tmp.name) / "home-tool"
-        home_tool.write_text("#!/home/user/python\n", encoding="utf-8")
-        user_tool = Path(self.tmp.name) / "user-tool"
-        user_tool.write_text("#!/Users/user/claude\n", encoding="utf-8")
-        path = str(root) + os.pathsep + os.environ.get("PATH", "")
-        with mock.patch.dict(os.environ, {"PATH": path}):
-            via_env = runner._runtime_read_paths([str(shim)])
-            via_direct = runner._runtime_read_paths([str(direct)])
-            via_nested = runner._runtime_read_paths([str(nested)])
-            self.assertTrue(runner.runtime_grant_possible([str(shim)]))
-            self.assertTrue(runner.runtime_grant_possible([str(direct)]))
-            self.assertTrue(runner.runtime_grant_possible([str(nested)]))
-            self.assertFalse(runner.runtime_grant_possible([str(home_tool)]))
-            self.assertFalse(runner.runtime_grant_possible([str(user_tool)]))
-        real = os.path.realpath(runtime)
-        for paths in (via_env, via_direct, via_nested):
-            self.assertIn(real, paths)
-            self.assertNotIn("/usr", paths)
-            self.assertNotIn("/Library", paths)
-            self.assertNotIn("/home/user", paths)
-            self.assertNotIn("/Users/user", paths)
-            self.assertFalse(any(item == "/opt" or item.startswith("/opt/") for item in paths))
-            self.assertFalse(any(item == "/private" or item.startswith("/private/") for item in paths))
-        if os.path.exists("/usr/bin/env"):
-            env = os.path.realpath("/usr/bin/env")
-            self.assertIn(env, via_env)
-            self.assertIn(env, via_nested)
-        self.assertIn(os.path.realpath(shim), via_nested)
-
-    def test_startup_allowance_does_not_grant_writes(self):
-        from pangpang import runner
-        stage = Path(self.tmp.name) / "stage"
-        candidate = stage / "candidate"
-        memory = Path(self.tmp.name) / "memory-out"
-        candidate.mkdir(parents=True)
-        memory.mkdir()
-        root, runtime, shim, _direct, _nested = self._runtime_fixture()
-        script = stage / "executor"
-        script.write_text("#!/usr/bin/env -S pang-dream-runtime\n", encoding="utf-8")
-        path = str(root) + os.pathsep + os.environ.get("PATH", "")
-        writable = [str(candidate), str(memory)]
-        with mock.patch.dict(os.environ, {"PATH": path}):
-            readable = [str(stage)] + runner._runtime_read_paths([str(script)])
-            rules = runner._landlock_rules(readable, writable, 3)
-            real = os.path.realpath(runtime)
-            rule_paths = [item for item, _bits in rules]
-            self.assertIn(real, rule_paths)
-            self.assertIn(str(candidate), rule_paths)
-            self.assertIn(str(memory), rule_paths)
-            read_access = runner._LANDLOCK_EXECUTE | runner._LANDLOCK_READ
-            handled = runner._landlock_handled(3)
-            self.assertTrue(handled & runner._LANDLOCK_WRITE)
-            self.assertFalse(read_access & runner._LANDLOCK_WRITE)
-            for rule_path, bits in rules:
-                if rule_path in {str(candidate), str(memory)}:
-                    self.assertEqual(bits, handled, rule_path)
-                else:
-                    self.assertEqual(bits, read_access, rule_path)
-            for blocked in ("/usr", "/opt", "/private", "/Library", "/System", "/home/user", "/Users/user"):
-                self.assertNotIn(blocked, rule_paths)
-            linker = "/lib64/ld-linux-x86-64.so.2"
-            if os.path.exists(linker) and os.path.exists("/usr/bin/env"):
-                self.assertIn(linker, rule_paths)
-            seen = {}
-
-            def stop(file, argv, env):
-                seen["file"] = file
-                seen["argv"] = argv
-                raise RuntimeError("stop")
-
-            with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(os, "execvpe", stop):
-                with self.assertRaises(RuntimeError):
-                    runner.exec_confined([str(stage)], writable, [str(script)])
-            self.assertEqual(seen["file"], "sandbox-exec")
-            argv = seen["argv"]
-            self.assertEqual(argv[:2], ["sandbox-exec", "-f"])
-            self.assertEqual(argv[3], "--")
-            self.assertEqual(argv[4], str(script))
-            profile_path = Path(argv[2])
-            profile = profile_path.read_text(encoding="utf-8")
-            shutil.rmtree(profile_path.parent, ignore_errors=True)
-        self.assertIn("(deny default)", profile)
-        self.assertNotIn("(allow default)", profile)
-        self.assertIn('(allow file-read* (literal "/"))', profile)
-        self.assertNotIn('(subpath "/")', profile)
-        self.assertNotIn('file-write* (literal "/")', profile)
-        for root_path in runner._STARTUP_ROOTS:
-            self.assertIn('(allow file-read* (subpath "%s"))' % root_path, profile)
-            self.assertIn('(allow file-map-executable (subpath "%s"))' % root_path, profile)
-            self.assertNotIn('file-write* (subpath "%s")' % root_path, profile)
-        for blocked in ("/opt", "/Library", "/Users", "/home", "/private", "/var", "/tmp"):
-            self.assertNotIn('(subpath "%s")' % blocked, profile)
-        for line in profile.splitlines():
-            if "file-write*" in line:
-                self.assertTrue(str(candidate) in line or str(memory) in line, line)
-        self.assertIn('(allow file-write* (subpath "%s"))' % candidate, profile)
-        self.assertIn('(allow file-write* (subpath "%s"))' % memory, profile)
-        self.assertNotIn('(allow file-write* (subpath "%s"))' % stage, profile)
-        self.assertIn('(allow file-map-executable (literal "%s"))' % real, profile)
-        self.assertNotIn('(allow file-write* (literal "%s"))' % real, profile)
-        self.assertNotIn('(allow file-write* (subpath "%s"))' % root, profile)
 
     def test_cleanup_skip_does_not_stall_past_the_first_page(self):
         project = self.app.create_project("bot-main", {"title": "Pages", "goal": "hold"})
@@ -1340,24 +1164,66 @@ class ReviewTests(unittest.TestCase):
         dreaming.recover_marks(self.app)
         self.assertEqual(dreaming._chunk_watermark(root).get("work:alpha"), "token-alpha")
 
-    def test_a_home_directory_is_not_a_runtime_read(self):
+    def test_dream_does_not_set_a_boundary_and_publish_still_replaces_current(self):
+        import subprocess
         from pangpang import runner
-        self.assertNotIn("/home/user", runner._runtime_read_paths(["/home/user/python"]))
-        self.assertNotIn("/home/user", runner._runtime_read_paths(["/home/user/bin/tool"]))
-        self.assertFalse(runner.runtime_grant_possible(["/home/user/python"]))
-        self.assertFalse(runner.runtime_grant_possible(["/Users/user/claude"]))
-        self.assertTrue(runner.runtime_grant_possible([sys.executable]))
-        argv = self.app.execution.installations["codex-local"]["argv"]
-        self.app.execution.installations["codex-local"]["argv"] = ["/home/user/python"]
+        inst = self.app.execution.installations["codex-local"]
+        saved = list(inst["argv"])
+        inst["argv"] = ["/home/user/qwen-claude"]
         try:
-            with self.assertRaises(Fault):
-                self.app.set_dreaming({
-                    "enabled": True, "installation_id": "codex-local", "time": "02:00",
-                })
-            offered = [item for item in self.app.dreaming_view()["executors"] if item["id"] == "codex-local"]
-            self.assertFalse(offered[0]["bounded"])
+            view = self.app.set_dreaming({
+                "enabled": True, "installation_id": "codex-local", "time": "02:00",
+            })
         finally:
-            self.app.execution.installations["codex-local"]["argv"] = argv
+            inst["argv"] = saved
+        offered = next(item for item in view["executors"] if item["id"] == "codex-local")
+        self.assertTrue(offered["local"])
+        self.assertNotIn("bounded", offered)
+        self.assertNotIn("dream_boundary_unavailable", dreaming._DEFER)
+        self.assertFalse(hasattr(runner, "dream_boundary_available"))
+        self.assertFalse(hasattr(runner, "exec_confined"))
+        source = Path(runner.__file__).resolve().parent
+        for name in ("runner.py", "dreaming.py", "execution.py", "service.py"):
+            text = (source / name).read_text(encoding="utf-8").lower()
+            self.assertNotIn("dream_boundary", text, name)
+            self.assertNotIn("sandbox-exec", text, name)
+            self.assertNotIn("landlock", text, name)
+        dreaming_source = (source / "dreaming.py").read_text(encoding="utf-8")
+        self.assertIn("def accept_candidate(", dreaming_source)
+        self.assertIn("def _publish(", dreaming_source)
+        self.assertIn("os.replace(tmp, pointer)", dreaming_source)
+        self.assertIn("dreaming.accept_candidate(", (source / "service.py").read_text(encoding="utf-8"))
+        refused = subprocess.run(
+            [sys.executable, str(Path(runner.__file__)), "confine", str(self.tmp.name)],
+            capture_output=True, text=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("invalid choice", refused.stderr)
+
+        self._argv(_DRAIN)
+        self._enable()
+        project, _work = self._project("Alpha", "ALPHA-SUMMARY", "alpha")
+        memory = dreaming.memory_root(self.app, project["id"])
+        self.assertFalse((memory / "CURRENT").exists())
+        self._fire()
+        task = next(row for row in self.app.store.find("task", limit=20) if row.get("dreaming"))
+        self.assertEqual(task["status"], "succeeded")
+        spec = self.app.execution.spec(task)
+        self.assertNotIn("dream_boundary", spec)
+        self.assertEqual(spec["argv"][0], sys.executable)
+        self.assertNotIn("sandbox-exec", spec["argv"])
+        run = Path(self.app.execution.directory(
+            self.app.execution.hosts["local"], task["execution_id"]))
+        stored = json.loads((run / "spec.json").read_text(encoding="utf-8"))
+        self.assertNotIn("dream_boundary", stored)
+        self.assertFalse((run / "dream-confine.json").exists())
+        current = (memory / "CURRENT").read_text(encoding="utf-8").strip()
+        self.assertRegex(current, r"^gen-[a-f0-9]{32}$")
+        self.assertEqual(task.get("dream_generation"), current)
+        self.assertFalse((memory / "CURRENT.tmp").exists())
+        published = (memory / "g" / current / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("ALPHA-SUMMARY", published)
+        self.assertIn("DREAMED", published)
+        self.assertTrue((memory / "g" / current / "READY").is_file())
 
     def test_cancelling_a_held_work_drops_the_retry(self):
         project = self.app.create_project("bot-main", {"title": "Held", "goal": "hold"})

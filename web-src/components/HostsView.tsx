@@ -249,10 +249,10 @@ function DreamingForm({store}: {store: Store}) {
           >
             <option value="">{t('hosts.dreamingExecutorNone')}</option>
             {executors.map((item) => {
-              const offered = item.local && item.bounded !== false;
+              const offered = item.local;
               return (
                 <option key={item.id} value={item.id} disabled={!offered}>
-                  {item.label} · {item.id}{offered ? '' : item.local ? t('hosts.dreamingUnbounded') : t('hosts.dreamingRemote')}
+                  {item.label} · {item.id}{offered ? '' : t('hosts.dreamingRemote')}
                 </option>
               );
             })}
